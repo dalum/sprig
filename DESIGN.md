@@ -95,7 +95,7 @@ Because sentinels delimit everything, block boundaries are unambiguous no matter
 
 ## Tool activity in the transcript
 
-Tool calls and results render inline but are transcript-only: `sprig--turns` strips them from the assistant text it assembles, and the CLI keeps its own tool memory server-side, so they never feed back into the model. Results can be large, so `sprig-render-tools` sets how much is written: `none`, `calls` (default: show each call, omit its result), or `full`. A file overrides the default with a `sprig_tools:` frontmatter line, set by `sprig-set-tool-display`. Because results are omitted at render time rather than hidden, the level applies to turns rendered afterwards.
+Tool calls and results render inline but are transcript-only: `sprig--turns` strips them from the assistant text it assembles, and the CLI keeps its own tool memory server-side, so they never feed back into the model. Results can be large, so `sprig-render-tools` sets how much is written: `none` (default: no tool blocks), `calls` (show each call, omit its result), or `full`. A file overrides the default with a `sprig_tools:` frontmatter line, set by `sprig-set-tool-display`. Because results are omitted at render time rather than hidden, the level applies to turns rendered afterwards.
 
 ## Context assembly
 

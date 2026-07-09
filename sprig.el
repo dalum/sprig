@@ -1,7 +1,7 @@
 ;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.3.1
+;; Version: 0.3.2
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -27,8 +27,8 @@
 ;; are meant for Emacs, not GitHub.
 ;;
 ;; Tool activity can be verbose, so `sprig-render-tools' (default
-;; `calls': show each tool call but not its result) controls how much
-;; lands in the transcript.  A file overrides it with a `sprig_tools:'
+;; `none': omit tool calls and results) controls how much lands in the
+;; transcript.  A file overrides it with a `sprig_tools:'
 ;; frontmatter line (none / calls / full), or `M-x sprig-set-tool-display'
 ;; sets it.  The setting affects only turns rendered afterwards.
 ;;
@@ -102,7 +102,7 @@ the file.  Toggle the block at point with `sprig-toggle-fold', or use
 `sprig-fold-all' / `sprig-unfold-all'."
   :type 'boolean)
 
-(defcustom sprig-render-tools 'calls
+(defcustom sprig-render-tools 'none
   "How much tool activity to render into the transcript.
 `none'   -- omit tool calls and results entirely.
 `calls'  -- show each tool call, omit its (often large) result.
