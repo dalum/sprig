@@ -47,45 +47,65 @@ A branch file is Markdown with YAML frontmatter:
 
 ```markdown
 ---
-id: conv-7f3a
-parent: conv-1b20
-forked_at: r2
 title: Chase the caching idea
+claude_session: 7f3a…            # CLI session id, for --resume
+sprig_tools: calls               # optional: none | calls | full
 ---
 
-Me: how should context assembly work?
+how should context assembly work?
 
-<details><summary>assistant</summary>
 <!-- sprig:reply id=r1 -->
 
-You'd walk the transcript top to bottom...
-</details>
+You'd walk the transcript top to bottom…
 
-Me: what about forks?
+<!-- sprig:end id=r1 -->
 
-<details><summary>assistant</summary>
+what about forks?
+
 <!-- sprig:reply id=r2 -->
 
-Each fork freezes its parent by copying...
-</details>
+Each fork freezes its parent by copying…
 
-Me: dig into the drawer approach...
+<!-- sprig:end id=r2 -->
 ```
 
-- *User turns* are plain prose. *Assistant turns* are `<details>` blocks: they fold in the editor and collapse natively on GitHub.
-- Delimiters are inserted by commands, not hand-typed. You type prose; `send` wraps the agent reply in a `<details>` block.
-- Each reply carries an `<!-- sprig:reply id=... -->` marker for stable references (fork anchors, status).
-- Frontmatter holds branch identity and the fork link.
+- *User turns* are plain prose in the gaps. *Assistant turns* are the spans between a `sprig:reply` sentinel and its `sprig:end`.
+- Delimiters are inserted by `send`, not hand-typed. You type prose below the last reply; `send` opens a reply span and streams into it.
+- Each reply span carries a stable id (`r1`, `r2`, …) for references: fork anchors, status, and the interrupted flag.
+- Frontmatter holds the CLI session id and display settings today; the fork machinery will add branch identity and the fork link (`id:`, `parent:`, `forked_at:`).
+
+## In-file structure: sentinels, not prose
+
+Structure lives entirely in invisible HTML-comment *sentinels*, never in the prose. An earlier draft wrapped replies in `<details>` blocks so they would fold in Emacs and collapse on GitHub, but a tool that printed `</details>` (or any HTML) could forge the delimiter and break parsing. Moving structure into `sprig:` comment sentinels keeps agent output, which is arbitrary text, from ever being mistaken for markup. The consequence is that the files are for Emacs, not GitHub.
+
+The sentinel kinds, each an HTML comment alone on its line at column 0:
+
+- `<!-- sprig:reply id=rN -->` … `<!-- sprig:end id=rN -->` bracket one assistant turn.
+- `<!-- sprig:tool id=… name=… -->` … `<!-- sprig:tool-end id=… -->` wrap a tool call, its input in a fenced block between them.
+- `<!-- sprig:result id=… -->` … `<!-- sprig:result-end id=… -->` wrap that call's result.
+
+`sprig-mode` draws *chrome* over the raw sentinels so the buffer reads as chat, not markup:
+
+- Each sentinel line is hidden behind an overlay; a tool call shows a `🔧 name` header, a result an `↳ result` header, and a reply span a faint rule at its start and end.
+- Tool bodies fold to their header (`C-c C-f`); the full text stays in the file.
+- The user's own turns get a distinguishing face, so input reads apart from output.
+- A structural *edit guard* makes the hidden sentinels and any folded body reject interactive deletion, so a stray backspace at a boundary cannot silently corrupt the structure. Sprig's own writes opt out via `inhibit-read-only`.
+
+Because sentinels delimit everything, block boundaries are unambiguous no matter what the agent prints.
+
+## Tool activity in the transcript
+
+Tool calls and results render inline but are transcript-only: `sprig--turns` strips them from the assistant text it assembles, and the CLI keeps its own tool memory server-side, so they never feed back into the model. Results can be large, so `sprig-render-tools` sets how much is written: `none`, `calls` (default: show each call, omit its result), or `full`. A file overrides the default with a `sprig_tools:` frontmatter line, set by `sprig-set-tool-display`. Because results are omitted at render time rather than hidden, the level applies to turns rendered afterwards.
 
 ## Context assembly
 
-Read the file top to bottom, map user prose and `<details>` blocks to roles, send. That is the whole algorithm. Forking froze the ancestry into the file already, so there is no ancestor walk.
+Read the file top to bottom, map user prose and reply spans to roles, strip each reply's tool and result blocks to leave the prose, send. That is the whole algorithm; `sprig--turns` produces exactly this role-tagged list. Forking froze the ancestry into the file already, so there is no ancestor walk. (Today's `claude` CLI transport keeps memory server-side and takes only the new user turn; the full-replay path that makes this literal is the deferred stateless backend.)
 
 ## Interaction
 
 Core verbs, available from both the editing buffer and the navigator:
 
-- *send* - collect the file as a message list, stream the reply into a new `<details>` block.
+- *send* - collect the file as a message list, stream the reply into a new reply span (a `sprig:reply`/`sprig:end` pair).
 - *fork* - copy this file up to the fork point into a new branch file, set frontmatter, open it.
 - *interrupt* - abort this buffer's stream (see below).
 
@@ -98,7 +118,7 @@ Minor verbs:
 
 Stopping a streaming reply is first class, mirroring the CLI "seen enough, stop, redirect" gesture. One stream per buffer makes this simple.
 
-- *Atomic abort.* Kill this buffer's stream and close the `<details>` block cleanly, so the file is never left half-written.
+- *Atomic abort.* Kill this buffer's stream and close the reply span cleanly with its `sprig:end` sentinel, so the file is never left half-written.
 - *Keep and mark the partial.* The truncated reply stays as a real turn, marked interrupted (`<!-- sprig:reply id=... interrupted -->`). Context assembly treats it as a normal turn, and the marker tells the model on the next send that its previous turn was cut off.
 - *Point drops to a fresh user turn* right after the partial, ready for an immediate redirect.
 - *Discard is separate*: interrupt keeps and marks, discard deletes.
@@ -113,7 +133,7 @@ Many branches can stream at once, each in its own file and buffer. Emacs Lisp is
 
 ## Modes
 
-- *Editing buffer*: `markdown-mode` plus a `sprig-mode` minor mode adding send / fork / interrupt and folding of reply blocks.
+- *Editing buffer*: `markdown-mode` plus a `sprig-mode` minor mode adding send / fork / interrupt and the editor chrome: sentinel hiding, tool/result headers, reply rules, the user-input face, tool-body folding, and the structural edit guard.
 - *Navigator*: `sprig-status-mode`, a major mode on `magit-section` + `transient`.
 
 ## Deferred
@@ -127,18 +147,19 @@ Many branches can stream at once, each in its own file and buffer. Emacs Lisp is
 ## Open questions
 
 - Backend abstraction: how thin an interface over different agent providers. The `claude` CLI keeps memory server-side and resumes by session id, so it wants only the new user turn; a stateless messages backend wants the whole transcript replayed. Fork-by-copy needs the replay path.
-- Turn delimiting: `<details>` blocks are the working choice; confirm they parse and fold cleanly in practice.
-- How tool calls and thinking are represented in the transcript.
+- How thinking / reasoning is represented in the transcript. Tool calls are settled (see the sentinel and tool-activity sections); thinking is not yet surfaced.
 - Keybindings for the verbs in each surface.
+
+Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>` so agent output cannot forge a delimiter) and tool-call representation (sentinel-delimited fenced blocks with header chrome and a render level).
 
 ## Build status
 
-- **Done (v0.2):** the Markdown transcript format, the turn parser (`sprig--turns`, the role-tagged message list), streaming replies into `<details>` blocks, session persistence in frontmatter, and a basic interrupt. Single file, one turn at a time, backed by the `claude` CLI session.
+- **Done (v0.3):** the sentinel-based Markdown transcript and turn parser (`sprig--turns`), streaming replies plus inline tool calls and results, the editor chrome (hidden sentinels, tool/result headers, reply rules, user-input face), tool-body folding with the structural edit guard, a per-file tool-render level, session persistence in frontmatter, and interrupt. Single file, one turn at a time, over the `claude` CLI (local or via SSH with `sprig-remote`).
 - **Next slice:** fork-by-copy plus the `sprig-status` navigator, and the stateless-backend replay path that makes "context is the whole file" literal.
 
 ## First build slice (as shipped)
 
-Context assembly plus send against one file: parse a Markdown branch file into a role-tagged message list, stream a reply into a `<details>` block. It is the heart of the design and testable on a single file, with no navigator or fork machinery yet.
+Context assembly plus send against one file: parse a Markdown branch file into a role-tagged message list, stream a reply into a sentinel-delimited reply span. It is the heart of the design and testable on a single file, with no navigator or fork machinery yet.
 
 ## Superseded
 
