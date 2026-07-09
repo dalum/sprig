@@ -38,6 +38,7 @@
 ;;; Code:
 
 (require 'json)
+(require 'seq)
 (require 'subr-x)
 (eval-when-compile (require 'let-alist))
 
@@ -80,6 +81,13 @@ When nil, the session runs locally."
 (defcustom sprig-assistant-summary "assistant"
   "Summary label used in the `<details>' block wrapping an agent reply."
   :type 'string)
+
+(defcustom sprig-fold-tool-calls t
+  "When non-nil, fold tool-call and result blocks to their summary line.
+Folding only hides the body in this buffer; the full content is still
+written to the file and expands on GitHub.  Toggle the block at point
+with `sprig-toggle-fold', or use `sprig-fold-all' / `sprig-unfold-all'."
+  :type 'boolean)
 
 ;;;; Buffer-local state
 
@@ -151,6 +159,8 @@ the block closes and the call is rendered.")
   "Regexp matching either a `<details>' open or close line.
 Used to find an assistant block's matching close while stepping over
 the nested `<details>' blocks that render tool calls.")
+(defconst sprig--tool-summary-re "^<details><summary>\\(?:\U0001F527\\|↳\\)"
+  "Regexp matching the summary line of a tool-call or result block.")
 
 (defun sprig--strip-reply-marker (text)
   "Remove a leading `<!-- sprig:reply ... -->' marker line from TEXT."
@@ -329,10 +339,41 @@ the scaffold that precedes the first block."
                content ""))
    (t (format "%S" content))))
 
+(defun sprig--ensure-invisibility ()
+  "Make sure this buffer's invisibility spec honours `sprig-fold'.
+Registers the spec if it is missing, so folding works even when the
+code is reloaded while `sprig-mode' is already on."
+  (unless (and (listp buffer-invisibility-spec)
+               (assq 'sprig-fold buffer-invisibility-spec))
+    (add-to-invisibility-spec '(sprig-fold . t))))
+
+(defun sprig--fold-block (beg end)
+  "Hide the body of the block between BEG and END, keeping its first line.
+BEG is the start of the `<details>' summary line, END just past the
+matching `</details>'.  Idempotent: re-folding the same block is a no-op."
+  (sprig--ensure-invisibility)
+  (save-excursion
+    (goto-char beg)
+    (let ((body-beg (line-end-position)))
+      (when (< body-beg end)
+        (remove-overlays body-beg end 'sprig-fold t)
+        (let ((ov (make-overlay body-beg end)))
+          (overlay-put ov 'invisible 'sprig-fold)
+          (overlay-put ov 'sprig-fold t)
+          (overlay-put ov 'evaporate t))))))
+
+(defun sprig--emit-tool-block (text)
+  "Insert a rendered tool TEXT block, folding its body when enabled."
+  (when (and sprig--marker (marker-buffer sprig--marker))
+    (let ((beg (marker-position sprig--marker)))
+      (sprig--emit text)
+      (when sprig-fold-tool-calls
+        (sprig--fold-block beg (marker-position sprig--marker))))))
+
 (defun sprig--emit-tool-call (name json)
   "Render a collapsed tool-call block for tool NAME with input JSON."
   (sprig--block-separator)
-  (sprig--emit
+  (sprig--emit-tool-block
    (concat "<details><summary>\U0001F527 " (or name "tool") "</summary>\n\n"
            "```json\n" (sprig--pretty-json json) "\n```\n\n"
            "</details>")))
@@ -345,7 +386,7 @@ the scaffold that precedes the first block."
         (let-alist block
           (when (equal .type "tool_result")
             (sprig--block-separator)
-            (sprig--emit
+            (sprig--emit-tool-block
              (concat "<details><summary>↳ result"
                      (if .is_error " [error]" "") "</summary>\n\n"
                      "```\n"
@@ -529,22 +570,98 @@ The pending turn is the prose typed after the last reply."
              (message "sprig: disconnected"))
     (message "sprig: no live session")))
 
+;;;; Folding commands
+
+(defun sprig--fold-block-at (beg)
+  "Fold the tool block whose summary line starts at BEG."
+  (save-excursion
+    (goto-char beg)
+    (forward-line 1)
+    (when (re-search-forward sprig--block-close-re nil t)
+      (sprig--fold-block beg (line-end-position)))))
+
+(defun sprig--tool-block-at-point ()
+  "Return the summary-line start of the tool block containing point, or nil.
+Works from anywhere inside the block, not just the summary line."
+  (let ((orig (point)))
+    (save-excursion
+      (end-of-line)
+      (when (re-search-backward sprig--tool-summary-re nil t)
+        (let ((beg (line-beginning-position)))
+          (forward-line 1)
+          (when (re-search-forward sprig--block-close-re nil t)
+            (when (<= orig (line-end-position))
+              beg)))))))
+
+;;;###autoload
+(defun sprig-fold-all ()
+  "Fold every tool-call and result block in the buffer to its summary.
+Re-hides blocks that already have a (possibly expanded) fold overlay and
+scans to create overlays for any that lack one, e.g. in a reopened file."
+  (interactive)
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward sprig--tool-summary-re nil t)
+      (let* ((beg (line-beginning-position))
+             (ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
+                           (overlays-in beg (1+ (line-end-position))))))
+        (if ov
+            (overlay-put ov 'invisible 'sprig-fold)
+          (sprig--fold-block-at beg))))))
+
+;;;###autoload
+(defun sprig-unfold-all ()
+  "Expand every folded tool block in the buffer, keeping the overlays."
+  (interactive)
+  (dolist (o (overlays-in (point-min) (point-max)))
+    (when (overlay-get o 'sprig-fold)
+      (overlay-put o 'invisible nil))))
+
+;;;###autoload
+(defun sprig-toggle-fold ()
+  "Toggle folding of the tool block whose summary is on the current line."
+  (interactive)
+  (let ((ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
+                      (overlays-in (line-beginning-position)
+                                   (1+ (line-end-position))))))
+    (cond
+     ;; A fold overlay covers this line: flip its visibility.  The overlay
+     ;; spans the body whether shown or hidden, so this works from the
+     ;; summary line (folded) or anywhere in the body (unfolded), and never
+     ;; re-searches for a boundary that tool output might fake with its own
+     ;; `</details>' line.
+     (ov (overlay-put ov 'invisible
+                      (and (not (overlay-get ov 'invisible)) 'sprig-fold)))
+     ;; No overlay yet (e.g. a reopened buffer): create one by scanning.
+     (t (let ((beg (sprig--tool-block-at-point)))
+          (if beg
+              (sprig--fold-block-at beg)
+            (user-error "Not on a tool-call block")))))))
+
 ;;;; Minor mode / keymap
 
-(defvar sprig-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c")     #'sprig-send)
-    (define-key map (kbd "C-c C-a C-o") #'sprig-connect)
-    (define-key map (kbd "C-c C-k")     #'sprig-interrupt)
-    (define-key map (kbd "C-c C-a C-k") #'sprig-disconnect)
-    map)
+(defvar sprig-mode-map (make-sparse-keymap)
   "Keymap for `sprig-mode'.")
+
+;; Bind at top level (not inside the `defvar') so reloading the file
+;; refreshes the bindings; `defvar' would not reassign the live keymap.
+(define-key sprig-mode-map (kbd "C-c C-c")     #'sprig-send)
+(define-key sprig-mode-map (kbd "C-c C-a C-o") #'sprig-connect)
+(define-key sprig-mode-map (kbd "C-c C-k")     #'sprig-interrupt)
+(define-key sprig-mode-map (kbd "C-c C-a C-k") #'sprig-disconnect)
+(define-key sprig-mode-map (kbd "C-c C-f")     #'sprig-toggle-fold)
 
 ;;;###autoload
 (define-minor-mode sprig-mode
   "Minor mode for conversing with an agent in a Markdown buffer."
   :lighter " Sprig"
-  :keymap sprig-mode-map)
+  :keymap sprig-mode-map
+  (if sprig-mode
+      (progn
+        (add-to-invisibility-spec '(sprig-fold . t))
+        (when sprig-fold-tool-calls (sprig-fold-all)))
+    (remove-from-invisibility-spec '(sprig-fold . t))
+    (sprig-unfold-all)))
 
 (provide 'sprig)
 ;;; sprig.el ends here
