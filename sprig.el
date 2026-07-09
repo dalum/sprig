@@ -1,4 +1,4 @@
-;;; claude-org.el --- Chat with a Claude Code session from Org, over SSH -*- lexical-binding: t; -*-
+;;; sprig.el --- Chat with a Claude Code session from Org, over SSH -*- lexical-binding: t; -*-
 
 ;; Author: you
 ;; Version: 0.1.0
@@ -15,12 +15,12 @@
 ;;          --include-partial-messages --verbose
 ;;
 ;; Because the transport is plain stdio, the same process can run locally
-;; or on a remote host via `ssh HOST claude ...' -- set `claude-org-remote'.
+;; or on a remote host via `ssh HOST claude ...' -- set `sprig-remote'.
 ;; The CLI uses whatever it is logged in as (e.g. a Pro/Max subscription),
 ;; so no API key is required.
 ;;
-;; One Org buffer == one conversation.  Connect with `claude-org-connect',
-;; then send the region or the current subtree with `claude-org-send-dwim'
+;; One Org buffer == one conversation.  Connect with `sprig-connect',
+;; then send the region or the current subtree with `sprig-send-dwim'
 ;; (C-c C-a C-c).  Replies stream into the buffer live.  The session id is
 ;; stored as a `#+CLAUDE_SESSION:' keyword so the conversation survives an
 ;; Emacs restart and reconnects with --resume.
@@ -35,64 +35,64 @@
 (require 'subr-x)
 (eval-when-compile (require 'let-alist))
 
-(defgroup claude-org nil
+(defgroup sprig nil
   "Chat with a Claude Code session from Org."
   :group 'tools
-  :prefix "claude-org-")
+  :prefix "sprig-")
 
-(defcustom claude-org-program "claude"
+(defcustom sprig-program "claude"
   "Path to the `claude' CLI (on the machine where the session runs)."
   :type 'string)
 
-(defcustom claude-org-remote nil
+(defcustom sprig-remote nil
   "If non-nil, an SSH destination (e.g. \"user@host\") to run `claude' on.
 When nil, the session runs locally."
   :type '(choice (const :tag "Local" nil) (string :tag "SSH destination")))
 
-(defcustom claude-org-ssh-program "ssh"
-  "SSH client used when `claude-org-remote' is set."
+(defcustom sprig-ssh-program "ssh"
+  "SSH client used when `sprig-remote' is set."
   :type 'string)
 
-(defcustom claude-org-ssh-args '("-T")
+(defcustom sprig-ssh-args '("-T")
   "Extra arguments passed to SSH (before the destination).
 `-T' disables pseudo-tty allocation, which is what we want for a pipe."
   :type '(repeat string))
 
-(defcustom claude-org-model "claude-opus-4-8"
+(defcustom sprig-model "claude-opus-4-8"
   "Model id, or nil to let the CLI choose its default."
   :type '(choice (const :tag "CLI default" nil) (string :tag "Model id")))
 
-(defcustom claude-org-system-prompt
+(defcustom sprig-system-prompt
   "You are chatting inside an Emacs Org-mode buffer. Answer concisely in Org-formatted text."
   "Text appended to the system prompt, or nil to skip."
   :type '(choice (const :tag "None" nil) string))
 
-(defcustom claude-org-extra-args nil
+(defcustom sprig-extra-args nil
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
-(defcustom claude-org-response-heading "** Claude"
+(defcustom sprig-response-heading "** Claude"
   "Org heading inserted before a streamed reply."
   :type 'string)
 
-(defcustom claude-org-prompt-heading "** You"
+(defcustom sprig-prompt-heading "** You"
   "Org heading inserted after a reply, ready for your next message."
   :type 'string)
 
 ;;;; Buffer-local state
 
-(defvar-local claude-org--process nil
+(defvar-local sprig--process nil
   "The stream-json `claude' process bound to this conversation buffer.")
-(defvar-local claude-org--session-id nil
+(defvar-local sprig--session-id nil
   "Session id captured from the CLI, used for --resume.")
-(defvar-local claude-org--marker nil
+(defvar-local sprig--marker nil
   "Marker where streamed reply text is inserted.")
-(defvar-local claude-org--busy nil
+(defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
 
 ;;;; Command construction
 
-(defun claude-org--base-args ()
+(defun sprig--base-args ()
   "The `claude' argument list (without program / ssh wrapping)."
   (append
    (list "-p"
@@ -101,26 +101,26 @@ When nil, the session runs locally."
          "--include-partial-messages"
          "--verbose"
          "--allowedTools" "")           ; chat-only: no tool use
-   (when claude-org-model (list "--model" claude-org-model))
-   (when claude-org-system-prompt
-     (list "--append-system-prompt" claude-org-system-prompt))
-   (when claude-org--session-id
-     (list "--resume" claude-org--session-id))
-   claude-org-extra-args))
+   (when sprig-model (list "--model" sprig-model))
+   (when sprig-system-prompt
+     (list "--append-system-prompt" sprig-system-prompt))
+   (when sprig--session-id
+     (list "--resume" sprig--session-id))
+   sprig-extra-args))
 
-(defun claude-org--command ()
+(defun sprig--command ()
   "Full command vector for `make-process', local or via SSH."
-  (let ((args (cons claude-org-program (claude-org--base-args))))
-    (if claude-org-remote
-        (append (list claude-org-ssh-program)
-                claude-org-ssh-args
-                (list claude-org-remote
+  (let ((args (cons sprig-program (sprig--base-args))))
+    (if sprig-remote
+        (append (list sprig-ssh-program)
+                sprig-ssh-args
+                (list sprig-remote
                       (mapconcat #'shell-quote-argument args " ")))
       args)))
 
 ;;;; Process I/O
 
-(defun claude-org--filter (proc chunk)
+(defun sprig--filter (proc chunk)
   "Accumulate CHUNK from PROC and dispatch complete JSON lines."
   (let* ((acc (concat (or (process-get proc :acc) "") chunk))
          (lines (split-string acc "\n")))
@@ -129,9 +129,9 @@ When nil, the session runs locally."
     (dolist (line (butlast lines))
       (setq line (string-trim line))
       (unless (string-empty-p line)
-        (claude-org--handle proc line)))))
+        (sprig--handle proc line)))))
 
-(defun claude-org--handle (proc line)
+(defun sprig--handle (proc line)
   "Parse one JSON LINE from PROC and act on it."
   (let ((buf (process-get proc :conv-buffer))
         (ev (condition-case nil
@@ -144,63 +144,63 @@ When nil, the session runs locally."
           (cond
            ;; Session init: capture and persist the session id.
            ((and (equal .type "system") (equal .subtype "init"))
-            (when (and .session_id (not claude-org--session-id))
-              (setq claude-org--session-id .session_id)
-              (claude-org--save-session-id .session_id)))
+            (when (and .session_id (not sprig--session-id))
+              (setq sprig--session-id .session_id)
+              (sprig--save-session-id .session_id)))
            ;; Streaming text delta.
            ((equal .type "stream_event")
             (when (and (equal .event.type "content_block_delta")
                        (equal .event.delta.type "text_delta")
                        .event.delta.text)
-              (claude-org--emit .event.delta.text)))
+              (sprig--emit .event.delta.text)))
            ;; Turn complete.
            ((equal .type "result")
-            (claude-org--finish-turn .total_cost_usd .is_error))
+            (sprig--finish-turn .total_cost_usd .is_error))
            ;; Fallback: a non-streamed error surfaced as a result-less error.
            ((and (equal .type "system") (equal .subtype "error"))
-            (claude-org--emit (format "\n[error] %s\n" (or .message line))))))))))
+            (sprig--emit (format "\n[error] %s\n" (or .message line))))))))))
 
-(defun claude-org--emit (text)
+(defun sprig--emit (text)
   "Insert streamed TEXT at the reply marker in the current buffer."
-  (when (and claude-org--marker (marker-buffer claude-org--marker))
+  (when (and sprig--marker (marker-buffer sprig--marker))
     (save-excursion
-      (goto-char claude-org--marker)
+      (goto-char sprig--marker)
       (let ((inhibit-read-only t))
         (insert text))
-      (set-marker claude-org--marker (point)))))
+      (set-marker sprig--marker (point)))))
 
-(defun claude-org--finish-turn (cost is-error)
+(defun sprig--finish-turn (cost is-error)
   "Close out the current turn.  COST and IS-ERROR come from the result event."
-  (setq claude-org--busy nil)
-  (claude-org--emit
-   (concat "\n\n" claude-org-prompt-heading "\n"))
+  (setq sprig--busy nil)
+  (sprig--emit
+   (concat "\n\n" sprig-prompt-heading "\n"))
   ;; Leave point ready for the next message.
-  (when (and claude-org--marker (marker-buffer claude-org--marker))
-    (goto-char claude-org--marker))
-  (message "claude-org: turn done%s%s"
+  (when (and sprig--marker (marker-buffer sprig--marker))
+    (goto-char sprig--marker))
+  (message "sprig: turn done%s%s"
            (if cost (format " ($%.4f)" cost) "")
            (if is-error " [error]" "")))
 
-(defun claude-org--sentinel (proc event)
+(defun sprig--sentinel (proc event)
   "Report PROC lifecycle EVENT."
   (let ((buf (process-get proc :conv-buffer)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (memq (process-status proc) '(exit signal))
-          (setq claude-org--process nil
-                claude-org--busy nil)
-          (message "claude-org: session ended (%s)" (string-trim event)))))))
+          (setq sprig--process nil
+                sprig--busy nil)
+          (message "sprig: session ended (%s)" (string-trim event)))))))
 
 ;;;; Session-id persistence via an Org keyword
 
-(defun claude-org--buffer-session-id ()
+(defun sprig--buffer-session-id ()
   "Return the `#+CLAUDE_SESSION:' id in the current buffer, or nil."
   (save-excursion
     (goto-char (point-min))
     (when (re-search-forward "^#\\+CLAUDE_SESSION:[ \t]*\\([-0-9a-fA-F]+\\)" nil t)
       (match-string 1))))
 
-(defun claude-org--save-session-id (id)
+(defun sprig--save-session-id (id)
   "Store ID as a `#+CLAUDE_SESSION:' keyword at the top of the buffer."
   (save-excursion
     (goto-char (point-min))
@@ -213,66 +213,66 @@ When nil, the session runs locally."
 ;;;; Public commands
 
 ;;;###autoload
-(defun claude-org-connect ()
+(defun sprig-connect ()
   "Start (or resume) a Claude session bound to the current buffer."
   (interactive)
-  (when (process-live-p claude-org--process)
+  (when (process-live-p sprig--process)
     (user-error "This buffer already has a live Claude session"))
-  (setq claude-org--session-id (claude-org--buffer-session-id))
+  (setq sprig--session-id (sprig--buffer-session-id))
   (let ((proc (make-process
-               :name "claude-org"
+               :name "sprig"
                :buffer nil
-               :command (claude-org--command)
+               :command (sprig--command)
                :connection-type 'pipe
                :coding 'utf-8-unix
                :noquery t
-               :filter #'claude-org--filter
-               :sentinel #'claude-org--sentinel)))
+               :filter #'sprig--filter
+               :sentinel #'sprig--sentinel)))
     (process-put proc :conv-buffer (current-buffer))
-    (setq claude-org--process proc)
-    (message "claude-org: %s (%s)"
-             (if claude-org--session-id "resuming session" "new session")
-             (if claude-org-remote (concat "ssh " claude-org-remote) "local"))))
+    (setq sprig--process proc)
+    (message "sprig: %s (%s)"
+             (if sprig--session-id "resuming session" "new session")
+             (if sprig-remote (concat "ssh " sprig-remote) "local"))))
 
-(defun claude-org--ensure ()
+(defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
-  (unless (process-live-p claude-org--process)
-    (claude-org-connect)))
+  (unless (process-live-p sprig--process)
+    (sprig-connect)))
 
-(defun claude-org--send-user (text)
+(defun sprig--send-user (text)
   "Send TEXT to the session as a user message."
   (let ((json (json-serialize
                `(:type "user"
                  :message (:role "user"
                            :content [(:type "text" :text ,text)])))))
-    (process-send-string claude-org--process (concat json "\n"))))
+    (process-send-string sprig--process (concat json "\n"))))
 
-(defun claude-org--start-reply ()
+(defun sprig--start-reply ()
   "Insert the reply scaffold at end of buffer and arm the marker."
   (goto-char (point-max))
   (unless (bolp) (insert "\n"))
-  (insert "\n" claude-org-response-heading "\n")
-  (setq claude-org--marker (copy-marker (point) t)))
+  (insert "\n" sprig-response-heading "\n")
+  (setq sprig--marker (copy-marker (point) t)))
 
-(defun claude-org-send-string (text)
+(defun sprig-send-string (text)
   "Send TEXT as a message and stream the reply into this buffer."
-  (claude-org--ensure)
-  (when claude-org--busy
+  (sprig--ensure)
+  (when sprig--busy
     (user-error "A turn is already in flight"))
   (setq text (string-trim text))
   (when (string-empty-p text)
     (user-error "Nothing to send"))
-  (setq claude-org--busy t)
-  (claude-org--start-reply)
-  (claude-org--send-user text))
+  (setq sprig--busy t)
+  (sprig--start-reply)
+  (sprig--send-user text))
 
 ;;;###autoload
-(defun claude-org-send-region (beg end)
+(defun sprig-send-region (beg end)
   "Send the region BEG..END to Claude."
   (interactive "r")
-  (claude-org-send-string (buffer-substring-no-properties beg end)))
+  (sprig-send-string (buffer-substring-no-properties beg end)))
 
-(defun claude-org--subtree-body ()
+(defun sprig--subtree-body ()
   "Return the body text of the Org subtree at point (heading excluded)."
   (if (and (derived-mode-p 'org-mode) (fboundp 'org-back-to-heading))
       (save-excursion
@@ -287,44 +287,44 @@ When nil, the session runs locally."
         (buffer-substring-no-properties beg end)))))
 
 ;;;###autoload
-(defun claude-org-send-subtree ()
+(defun sprig-send-subtree ()
   "Send the body of the current Org subtree (or paragraph) to Claude."
   (interactive)
-  (claude-org-send-string (claude-org--subtree-body)))
+  (sprig-send-string (sprig--subtree-body)))
 
 ;;;###autoload
-(defun claude-org-send-dwim ()
+(defun sprig-send-dwim ()
   "Send the active region if any, otherwise the current subtree."
   (interactive)
   (if (use-region-p)
-      (claude-org-send-region (region-beginning) (region-end))
-    (claude-org-send-subtree)))
+      (sprig-send-region (region-beginning) (region-end))
+    (sprig-send-subtree)))
 
 ;;;###autoload
-(defun claude-org-disconnect ()
+(defun sprig-disconnect ()
   "Stop the Claude session for this buffer (the conversation is kept)."
   (interactive)
-  (if (process-live-p claude-org--process)
-      (progn (delete-process claude-org--process)
-             (setq claude-org--process nil claude-org--busy nil)
-             (message "claude-org: disconnected"))
-    (message "claude-org: no live session")))
+  (if (process-live-p sprig--process)
+      (progn (delete-process sprig--process)
+             (setq sprig--process nil sprig--busy nil)
+             (message "sprig: disconnected"))
+    (message "sprig: no live session")))
 
 ;;;; Minor mode / keymap
 
-(defvar claude-org-mode-map
+(defvar sprig-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-a C-c") #'claude-org-send-dwim)
-    (define-key map (kbd "C-c C-a C-o") #'claude-org-connect)
-    (define-key map (kbd "C-c C-a C-k") #'claude-org-disconnect)
+    (define-key map (kbd "C-c C-a C-c") #'sprig-send-dwim)
+    (define-key map (kbd "C-c C-a C-o") #'sprig-connect)
+    (define-key map (kbd "C-c C-a C-k") #'sprig-disconnect)
     map)
-  "Keymap for `claude-org-mode'.")
+  "Keymap for `sprig-mode'.")
 
 ;;;###autoload
-(define-minor-mode claude-org-mode
+(define-minor-mode sprig-mode
   "Minor mode for chatting with a Claude session in this Org buffer."
-  :lighter " Claude"
-  :keymap claude-org-mode-map)
+  :lighter " Sprig"
+  :keymap sprig-mode-map)
 
-(provide 'claude-org)
-;;; claude-org.el ends here
+(provide 'sprig)
+;;; sprig.el ends here
