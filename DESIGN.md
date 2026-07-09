@@ -1,0 +1,145 @@
+# Design: Sprig - non-linear agent conversations in Markdown
+
+## Name
+
+**Sprig**. Package `sprig`, function prefix `sprig-`, editing minor mode `sprig-mode`, navigator major mode `sprig-status-mode`. Model-agnostic: the agent backend is not fixed. Rejected: `org-agent` (reserved `org-` prefix, crowded), `owl-mode` (collides with OWL/ontology modes). A sprig is a small shoot off a branch, which matches the fork-by-copy model below.
+
+## Goal
+
+An Emacs package for conversing with an LLM agent, breaking out of linear chat. You hold many conversations at once and fork any of them to explore several directions in parallel. Conversations are plain Markdown files you edit directly. The non-linear structure lives between files and is driven from a Magit-like control buffer.
+
+## Architecture
+
+Two surfaces, cleanly separated.
+
+### The conversation is a plain Markdown file
+
+- One *branch* is one Markdown file, a plain linear transcript.
+- You *edit it directly*: type your turns, the agent streams its replies in.
+- No in-file tree, no nesting, no drawers-as-branches. A long conversation stays a flat, readable file.
+- The model emits Markdown, so its output lands with zero conversion. This was the "models emit Markdown, not Org" friction; it is gone.
+
+### The structure is a forest of files
+
+- A *directory* is the forest: a set of branch files plus their fork links.
+- *Forking copies a file* up to the fork point, then the copy diverges. The frozen ancestry is inlined into the new file, so each file is a complete, standalone transcript.
+- Fork links live in each file's YAML frontmatter (`parent:`, `forked_at:`, `id:`). The navigator reconstructs the forest from these.
+
+### The navigator is Magit for Sprig state
+
+A dedicated `sprig-status` buffer, built on `magit-section` and `transient`. It is a control surface over state, not a rendered chat.
+
+- Shows the forest of branch files: title or summary, status (idle / streaming / interrupted), fork edges.
+- Single-key transient verbs: open (jump to the file buffer), fork, new root, prune, interrupt, rename.
+- The files are the working tree; `sprig-status` is `magit-status`.
+
+## Why this shape
+
+- *Direct-edit Markdown* satisfies the wish for plain text files and dissolves the Markdown-vs-Org conversion problem.
+- *Fork by copy* inlines frozen ancestry, so context assembly collapses to "send the file". No recursive ancestor walk.
+- *One stream per file* makes concurrency and interrupt trivial and unambiguous, no marker registry inside a shared buffer.
+- *Complexity moves out of the text* into the navigator and the filesystem, keeping each transcript simple.
+- Branch comparison is a plain `diff` of two files.
+
+## File format
+
+A branch file is Markdown with YAML frontmatter:
+
+```markdown
+---
+id: conv-7f3a
+parent: conv-1b20
+forked_at: r2
+title: Chase the caching idea
+---
+
+Me: how should context assembly work?
+
+<details><summary>assistant</summary>
+<!-- sprig:reply id=r1 -->
+
+You'd walk the transcript top to bottom...
+</details>
+
+Me: what about forks?
+
+<details><summary>assistant</summary>
+<!-- sprig:reply id=r2 -->
+
+Each fork freezes its parent by copying...
+</details>
+
+Me: dig into the drawer approach...
+```
+
+- *User turns* are plain prose. *Assistant turns* are `<details>` blocks: they fold in the editor and collapse natively on GitHub.
+- Delimiters are inserted by commands, not hand-typed. You type prose; `send` wraps the agent reply in a `<details>` block.
+- Each reply carries an `<!-- sprig:reply id=... -->` marker for stable references (fork anchors, status).
+- Frontmatter holds branch identity and the fork link.
+
+## Context assembly
+
+Read the file top to bottom, map user prose and `<details>` blocks to roles, send. That is the whole algorithm. Forking froze the ancestry into the file already, so there is no ancestor walk.
+
+## Interaction
+
+Core verbs, available from both the editing buffer and the navigator:
+
+- *send* - collect the file as a message list, stream the reply into a new `<details>` block.
+- *fork* - copy this file up to the fork point into a new branch file, set frontmatter, open it.
+- *interrupt* - abort this buffer's stream (see below).
+
+Minor verbs:
+
+- *discard* - delete a reply block when the partial is junk.
+- *prune*, *rename*, *new root* - from the navigator.
+
+## Interruption
+
+Stopping a streaming reply is first class, mirroring the CLI "seen enough, stop, redirect" gesture. One stream per buffer makes this simple.
+
+- *Atomic abort.* Kill this buffer's stream and close the `<details>` block cleanly, so the file is never left half-written.
+- *Keep and mark the partial.* The truncated reply stays as a real turn, marked interrupted (`<!-- sprig:reply id=... interrupted -->`). Context assembly treats it as a normal turn, and the marker tells the model on the next send that its previous turn was cut off.
+- *Point drops to a fresh user turn* right after the partial, ready for an immediate redirect.
+- *Discard is separate*: interrupt keeps and marks, discard deletes.
+
+## Concurrency
+
+Many branches can stream at once, each in its own file and buffer. Emacs Lisp is single-threaded, so this is many async requests interleaving on the main loop, not true parallelism.
+
+- *One process per buffer.* No shared-buffer marker registry; each stream owns its file.
+- *Session-level registry* maps file to process so `sprig-status` can show which branches are live and route interrupt.
+- *Out-of-band status.* The navigator surfaces activity across files, so a stream finishing in a file you are not viewing is visible there. A mode-line indicator per buffer covers the focused case.
+
+## Modes
+
+- *Editing buffer*: `markdown-mode` plus a `sprig-mode` minor mode adding send / fork / interrupt and folding of reply blocks.
+- *Navigator*: `sprig-status-mode`, a major mode on `magit-section` + `transient`.
+
+## Deferred
+
+- Merging or comparing branches beyond plain `diff`.
+- Summarising a long transcript to fit the context window.
+- Roles beyond user and assistant (system, tool).
+- Running code blocks: not Babel; a section or buffer action on a code block ("run this").
+- Reference-style forks (store only the divergent tail) if copy duplication ever bites. Copy is the default.
+
+## Open questions
+
+- Backend abstraction: how thin an interface over different agent providers. The `claude` CLI keeps memory server-side and resumes by session id, so it wants only the new user turn; a stateless messages backend wants the whole transcript replayed. Fork-by-copy needs the replay path.
+- Turn delimiting: `<details>` blocks are the working choice; confirm they parse and fold cleanly in practice.
+- How tool calls and thinking are represented in the transcript.
+- Keybindings for the verbs in each surface.
+
+## Build status
+
+- **Done (v0.2):** the Markdown transcript format, the turn parser (`sprig--turns`, the role-tagged message list), streaming replies into `<details>` blocks, session persistence in frontmatter, and a basic interrupt. Single file, one turn at a time, backed by the `claude` CLI session.
+- **Next slice:** fork-by-copy plus the `sprig-status` navigator, and the stateless-backend replay path that makes "context is the whole file" literal.
+
+## First build slice (as shipped)
+
+Context assembly plus send against one file: parse a Markdown branch file into a role-tagged message list, stream a reply into a `<details>` block. It is the heart of the design and testable on a single file, with no navigator or fork machinery yet.
+
+## Superseded
+
+Earlier drafts put the whole tree inside one Org file: branches as headings, turns as `:reply:` drawers, `:FORK_FROM:` property anchors, and concurrent streams multiplexed into one buffer via markers. Replaced by one Markdown file per branch and fork-by-copy. Kept from that draft: the verbs (`send` / `fork` / `interrupt`) and the principle that a fork freezes its parent, now realized as a file copy.

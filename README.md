@@ -2,9 +2,9 @@
 
 Sprig is an Emacs interface for conversing with an LLM agent, aimed at breaking out of linear chat.
 
-**Where it is today:** a small chat client for a persistent **Claude Code session**, local or over **SSH**. It talks to the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed). One Org buffer is one conversation.
+**Where it is today:** a chat client where one conversation branch is a plain **Markdown file** you edit directly. You type your turns as prose; the agent's replies stream in wrapped in `<details>` blocks that fold in the editor and collapse on GitHub. The transport is a persistent **Claude Code session**, local or over **SSH**, via the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed).
 
-**Where it is going:** a non-linear, forkable model where conversations are plain Markdown files you edit directly and explore in parallel, driven from a Magit-like control buffer. That design is written up in [DESIGN.org](DESIGN.org) and is **not yet implemented**. The current code still reflects the earlier single-buffer Org design.
+**Where it is going:** a non-linear, forkable model where you hold many conversations at once, fork any of them to explore several directions in parallel, and drive the whole forest from a Magit-like `sprig-status` navigator. That design is written up in [DESIGN.md](DESIGN.md). Forking, the navigator, and concurrent streams are **not yet implemented**; today is a single-file, one-turn-at-a-time client.
 
 This is a *chat* client: tools are disabled, so the agent answers in text and never edits your files. If you want agentic edits from Emacs, use `claude-code-ide.el` instead.
 
@@ -17,14 +17,17 @@ claude -p --input-format stream-json --output-format stream-json \
        --include-partial-messages --verbose --allowedTools ""
 ```
 
-You write a user-message JSON line to its stdin; it streams assistant token deltas back on stdout, which get inserted into the buffer live. The session id is captured from the CLI and stored as a `#+CLAUDE_SESSION:` keyword, so the conversation survives an Emacs restart and reconnects with `--resume`.
+You write a user-message JSON line to its stdin; it streams assistant token deltas back on stdout, which get inserted into the buffer live under a new `<details>` block. The session id is captured from the CLI and stored in the file's YAML frontmatter as `claude_session:`, so the conversation survives an Emacs restart and reconnects with `--resume`.
 
 Because the whole protocol is plain stdio, running the session on a remote host is just a matter of prefixing the command with `ssh HOST`. Set `sprig-remote` and the session runs there instead of locally. The remote box is where `claude` must be installed and logged in.
+
+Note: the CLI keeps conversation memory server-side and resumes by session id, so a send transmits only your new turn. The "context is the whole file" replay the fork model wants (see [DESIGN.md](DESIGN.md)) suits a stateless messages backend and is future work; the turn parser that assembles that message list is already in place.
 
 ## Requirements
 
 - Emacs 27.1+ (uses the built-in `json-parse-string` / `json-serialize`).
 - `claude` CLI v2.1+ on the machine that runs the session (local or the SSH host), logged in (`claude` then `/login`).
+- `markdown-mode` is recommended for the editing buffer, but not required.
 
 ## Install
 
@@ -37,8 +40,8 @@ Put `sprig.el` on your `load-path`, then:
 (setq sprig-remote "you@your-server")   ;; nil = run locally
 (setq sprig-model  "claude-opus-4-8")     ;; or nil for the CLI default
 
-;; Turn on the keymap in Org buffers you use for chatting:
-(add-hook 'org-mode-hook #'sprig-mode)
+;; Turn on the keymap in the Markdown buffers you use for chatting:
+(add-hook 'markdown-mode-hook #'sprig-mode)
 ```
 
 With `use-package` and a local checkout:
@@ -46,7 +49,7 @@ With `use-package` and a local checkout:
 ```elisp
 (use-package sprig
   :load-path "~/Projects/sprig"
-  :hook (org-mode . sprig-mode)
+  :hook (markdown-mode . sprig-mode)
   :custom
   (sprig-remote "you@your-server")
   (sprig-model "claude-opus-4-8"))
@@ -73,22 +76,21 @@ With `use-package` and a local checkout:
 
 ## Usage
 
-1. Open an `.org` file. It becomes your conversation transcript.
+1. Open a `.md` file. It becomes your conversation branch.
 2. `M-x sprig-connect` (`C-c C-a C-o`) to start/resume the session.
-3. Type a message, then send it:
-   - select it and `C-c C-a C-c` (region), or
-   - put point in a subtree and `C-c C-a C-c` (sends the subtree body).
-4. The reply streams in under a `** Claude` heading, followed by a fresh `** You` heading for your next message.
-5. `C-c C-a C-k` (`sprig-disconnect`) stops the process; the transcript and `#+CLAUDE_SESSION:` id are kept, so reconnecting resumes the conversation.
+3. Type a message as plain prose at the end of the buffer.
+4. `sprig-send` (`C-c C-c`) sends the prose typed since the last reply. The reply streams into a new `<details>` block.
+5. Type your next message below that block and send again.
+6. `sprig-interrupt` (`C-c C-k`) aborts a streaming reply, keeps the partial (marked `interrupted`), and leaves point ready for a redirect.
+7. `sprig-disconnect` (`C-c C-a C-k`) stops the process; the transcript and `claude_session:` id are kept, so reconnecting resumes the conversation.
 
 ### Commands
 
 | Command | Binding | Does |
 |---|---|---|
 | `sprig-connect` | `C-c C-a C-o` | Start or resume the session for this buffer |
-| `sprig-send-dwim` | `C-c C-a C-c` | Send the region, else the current subtree |
-| `sprig-send-region` | | Send the active region |
-| `sprig-send-subtree` | | Send the current subtree body |
+| `sprig-send` | `C-c C-c` | Send the prose typed since the last reply |
+| `sprig-interrupt` | `C-c C-k` | Abort a streaming reply, keep and mark the partial |
 | `sprig-disconnect` | `C-c C-a C-k` | Stop the session (conversation kept) |
 
 ## Options
@@ -98,20 +100,22 @@ With `use-package` and a local checkout:
 | `sprig-remote` | `nil` | SSH destination, or nil for local |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
-| `sprig-system-prompt` | short Org hint | Appended system prompt, or nil |
+| `sprig-system-prompt` | short Markdown hint | Appended system prompt, or nil |
+| `sprig-assistant-summary` | `"assistant"` | Label in the reply `<details>` summary |
 | `sprig-ssh-args` | `("-T")` | Extra SSH args |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
 
 ## Status / caveats
 
-- v0.1, written against `claude` 2.1.205. The protocol round-trip (streaming, multi-turn memory, session resume) is verified against the real CLI; the Elisp itself has not yet been exercised in a running Emacs, so expect a rough edge or two on first run.
-- One turn at a time per buffer (no interrupt yet).
-- The current implementation is the older single-buffer Org client. The Markdown, fork-by-copy, and navigator model in [DESIGN.org](DESIGN.org) is the planned direction, not built yet.
+- v0.2, written against `claude` 2.1.205. The protocol round-trip (streaming, multi-turn memory, session resume) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- Single file, one turn at a time per buffer.
+- `sprig-interrupt` currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
+- Forking, the `sprig-status` navigator, and concurrent streams from [DESIGN.md](DESIGN.md) are not built yet.
 - Loading the full CLAUDE.md/skills context on the session host adds cost per turn; a `--bare`-style lean mode is a possible future option, but `--bare` currently forces API-key auth, so it is off by the subscription path.
 
 ## Direction
 
-The fork-and-explore model is the point of the project. See [DESIGN.org](DESIGN.org) for the full write-up. In short:
+The fork-and-explore model is the point of the project. See [DESIGN.md](DESIGN.md) for the full write-up. In short:
 
 - One conversation branch is one plain Markdown file you edit directly; the agent's Markdown output lands with no conversion.
 - Forking copies a file up to the fork point, so each file is a complete, standalone transcript and context assembly is just "send the file".

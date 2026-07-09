@@ -1,33 +1,37 @@
-;;; sprig.el --- Chat with a Claude Code session from Org, over SSH -*- lexical-binding: t; -*-
+;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
 ;;; Commentary:
 
-;; A minimal Org-native client for a persistent Claude Code session.
+;; Sprig is an Emacs interface for conversing with an LLM agent.  A
+;; conversation branch is a plain Markdown file you edit directly: you
+;; type your turns as prose, and the agent's replies stream in wrapped
+;; in `<details>' blocks that fold in the editor and collapse on GitHub.
 ;;
-;; It speaks the `claude' CLI's stream-json protocol over stdio:
+;; Today the transport is the `claude' CLI's stream-json protocol over
+;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
+;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription),
+;; so no API key is required.  Tools are disabled, so the agent answers
+;; in text and does not edit files.
 ;;
-;;   claude -p --input-format stream-json --output-format stream-json \
-;;          --include-partial-messages --verbose
+;; One buffer is one branch.  Connect with `sprig-connect', type a
+;; message below the last reply, and send it with `sprig-send'
+;; (C-c C-c).  The reply streams into a new `<details>' block.  The CLI
+;; session id is stored in the file's YAML frontmatter (`claude_session')
+;; so the conversation survives an Emacs restart and reconnects with
+;; --resume.
 ;;
-;; Because the transport is plain stdio, the same process can run locally
-;; or on a remote host via `ssh HOST claude ...' -- set `sprig-remote'.
-;; The CLI uses whatever it is logged in as (e.g. a Pro/Max subscription),
-;; so no API key is required.
-;;
-;; One Org buffer == one conversation.  Connect with `sprig-connect',
-;; then send the region or the current subtree with `sprig-send-dwim'
-;; (C-c C-a C-c).  Replies stream into the buffer live.  The session id is
-;; stored as a `#+CLAUDE_SESSION:' keyword so the conversation survives an
-;; Emacs restart and reconnects with --resume.
-;;
-;; This is a chat client: tools are disabled (`--allowedTools ""'), so
-;; Claude answers in text and does not edit files.  For agentic work use
-;; claude-code-ide.el instead.
+;; Design note: the CLI keeps conversation memory server-side and
+;; resumes by session id, so `sprig-send' transmits only the new user
+;; turn.  The intended "context is the whole file" model from DESIGN.md
+;; (needed for fork-by-copy) wants a full-transcript replay, which suits
+;; a stateless messages backend.  `sprig--turns' assembles that
+;; role-tagged message list already; wiring it to a stateless backend,
+;; plus the fork-by-copy navigator, is the next slice.
 
 ;;; Code:
 
@@ -36,7 +40,7 @@
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
-  "Chat with a Claude Code session from Org."
+  "Non-linear agent conversations in Markdown."
   :group 'tools
   :prefix "sprig-")
 
@@ -63,7 +67,7 @@ When nil, the session runs locally."
   :type '(choice (const :tag "CLI default" nil) (string :tag "Model id")))
 
 (defcustom sprig-system-prompt
-  "You are chatting inside an Emacs Org-mode buffer. Answer concisely in Org-formatted text."
+  "You are chatting inside a Markdown buffer. Answer concisely in Markdown."
   "Text appended to the system prompt, or nil to skip."
   :type '(choice (const :tag "None" nil) string))
 
@@ -71,12 +75,8 @@ When nil, the session runs locally."
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
-(defcustom sprig-response-heading "** Claude"
-  "Org heading inserted before a streamed reply."
-  :type 'string)
-
-(defcustom sprig-prompt-heading "** You"
-  "Org heading inserted after a reply, ready for your next message."
+(defcustom sprig-assistant-summary "assistant"
+  "Summary label used in the `<details>' block wrapping an agent reply."
   :type 'string)
 
 ;;;; Buffer-local state
@@ -117,6 +117,65 @@ When nil, the session runs locally."
                 (list sprig-remote
                       (mapconcat #'shell-quote-argument args " ")))
       args)))
+
+;;;; Buffer parsing: frontmatter, turns
+
+(defun sprig--body-start ()
+  "Return the position where the body begins, after any YAML frontmatter."
+  (save-excursion
+    (goto-char (point-min))
+    (if (looking-at-p "^---[ \t]*$")
+        (progn
+          (forward-line 1)
+          (if (re-search-forward "^---[ \t]*$" nil t)
+              (progn (forward-line 1) (point))
+            (point-min)))
+      (point-min))))
+
+(defconst sprig--block-open-re "^<details><summary>\\(.*?\\)</summary>[ \t]*$"
+  "Regexp matching the opening line of an assistant `<details>' block.")
+(defconst sprig--block-close-re "^</details>[ \t]*$"
+  "Regexp matching the closing line of an assistant `<details>' block.")
+
+(defun sprig--strip-reply-marker (text)
+  "Remove a leading `<!-- sprig:reply ... -->' marker line from TEXT."
+  (string-trim
+   (replace-regexp-in-string
+    "\\`[ \t\n]*<!--[ \t]*sprig:reply[^>]*-->[ \t]*\n?" "" text)))
+
+(defun sprig--turns ()
+  "Parse the buffer body into an ordered list of (ROLE . TEXT) turns.
+ROLE is `user' or `assistant'.  Blank user turns are skipped.  This is
+the role-tagged message list a stateless backend would send verbatim."
+  (let ((turns '()))
+    (save-excursion
+      (goto-char (sprig--body-start))
+      (let ((pos (point)))
+        (while (re-search-forward sprig--block-open-re nil t)
+          (let ((user-text (buffer-substring-no-properties pos (match-beginning 0)))
+                (body-beg (progn (forward-line 1) (point))))
+            (when (string-match-p "[^ \t\n]" user-text)
+              (push (cons 'user (string-trim user-text)) turns))
+            (if (re-search-forward sprig--block-close-re nil t)
+                (let ((atext (buffer-substring-no-properties
+                              body-beg (match-beginning 0))))
+                  (push (cons 'assistant (sprig--strip-reply-marker atext)) turns)
+                  (forward-line 1)
+                  (setq pos (point)))
+              ;; Unterminated block (a reply still streaming): take the rest.
+              (let ((atext (buffer-substring-no-properties body-beg (point-max))))
+                (push (cons 'assistant (sprig--strip-reply-marker atext)) turns)
+                (goto-char (point-max))
+                (setq pos (point))))))
+        (let ((tail (buffer-substring-no-properties pos (point-max))))
+          (when (string-match-p "[^ \t\n]" tail)
+            (push (cons 'user (string-trim tail)) turns)))))
+    (nreverse turns)))
+
+(defun sprig--pending-user-text ()
+  "Return the trailing user turn (text typed after the last reply), or nil."
+  (let ((last (car (last (sprig--turns)))))
+    (when (eq (car last) 'user) (cdr last))))
 
 ;;;; Process I/O
 
@@ -172,9 +231,7 @@ When nil, the session runs locally."
 (defun sprig--finish-turn (cost is-error)
   "Close out the current turn.  COST and IS-ERROR come from the result event."
   (setq sprig--busy nil)
-  (sprig--emit
-   (concat "\n\n" sprig-prompt-heading "\n"))
-  ;; Leave point ready for the next message.
+  (sprig--close-reply)
   (when (and sprig--marker (marker-buffer sprig--marker))
     (goto-char sprig--marker))
   (message "sprig: turn done%s%s"
@@ -191,33 +248,92 @@ When nil, the session runs locally."
                 sprig--busy nil)
           (message "sprig: session ended (%s)" (string-trim event)))))))
 
-;;;; Session-id persistence via an Org keyword
+;;;; Reply scaffolding
+
+(defun sprig--next-reply-id ()
+  "Return a fresh reply id like \"r3\", one past the highest in the buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((n 0))
+      (while (re-search-forward "<!--[ \t]*sprig:reply" nil t)
+        (setq n (1+ n)))
+      (format "r%d" (1+ n)))))
+
+(defun sprig--start-reply ()
+  "Insert an assistant `<details>' scaffold at end of buffer, arm the marker."
+  (let ((id (sprig--next-reply-id)))
+    (goto-char (point-max))
+    (skip-chars-backward " \t\n")
+    (delete-region (point) (point-max))
+    (let ((inhibit-read-only t))
+      (insert "\n\n"
+              "<details><summary>" sprig-assistant-summary "</summary>\n"
+              "<!-- sprig:reply id=" id " -->\n\n"))
+    (setq sprig--marker (copy-marker (point) t))))
+
+(defun sprig--close-reply (&optional interrupted)
+  "Close the current reply block.  With INTERRUPTED, flag the reply marker."
+  (when (and sprig--marker (marker-buffer sprig--marker))
+    (goto-char sprig--marker)
+    (let ((inhibit-read-only t))
+      (insert "\n</details>\n\n"))
+    (set-marker sprig--marker (point))
+    (when interrupted (sprig--flag-interrupted))))
+
+(defun sprig--flag-interrupted ()
+  "Add an `interrupted' flag to the most recent reply marker."
+  (save-excursion
+    (when (and sprig--marker (marker-buffer sprig--marker))
+      (goto-char sprig--marker))
+    (when (re-search-backward
+           "\\(<!--[ \t]*sprig:reply\\)\\([^>]*?\\)[ \t]*-->" nil t)
+      (unless (string-match-p "interrupted" (match-string 2))
+        (let ((inhibit-read-only t))
+          (replace-match "\\1\\2 interrupted -->"))))))
+
+;;;; Session-id persistence via YAML frontmatter
+
+(defun sprig--frontmatter-end ()
+  "Return the position of the closing `---' line, or nil if no frontmatter."
+  (save-excursion
+    (goto-char (point-min))
+    (when (looking-at-p "^---[ \t]*$")
+      (forward-line 1)
+      (when (re-search-forward "^---[ \t]*$" nil t)
+        (line-beginning-position)))))
 
 (defun sprig--buffer-session-id ()
-  "Return the `#+CLAUDE_SESSION:' id in the current buffer, or nil."
-  (save-excursion
-    (goto-char (point-min))
-    (when (re-search-forward "^#\\+CLAUDE_SESSION:[ \t]*\\([-0-9a-fA-F]+\\)" nil t)
-      (match-string 1))))
+  "Return the `claude_session' id from the YAML frontmatter, or nil."
+  (let ((end (sprig--frontmatter-end)))
+    (when end
+      (save-excursion
+        (goto-char (point-min))
+        (when (re-search-forward "^claude_session:[ \t]*\\(.+\\)$" end t)
+          (string-trim (match-string 1)))))))
 
 (defun sprig--save-session-id (id)
-  "Store ID as a `#+CLAUDE_SESSION:' keyword at the top of the buffer."
+  "Store ID as `claude_session' in the buffer's YAML frontmatter."
   (save-excursion
-    (goto-char (point-min))
-    (let ((inhibit-read-only t))
-      (if (re-search-forward "^#\\+CLAUDE_SESSION:.*$" nil t)
-          (replace-match (concat "#+CLAUDE_SESSION: " id))
+    (let ((inhibit-read-only t)
+          (end (sprig--frontmatter-end)))
+      (if end
+          (if (progn (goto-char (point-min))
+                     (re-search-forward "^claude_session:.*$" end t))
+              (replace-match (concat "claude_session: " id))
+            (goto-char (point-min))
+            (forward-line 1)
+            (insert "claude_session: " id "\n"))
         (goto-char (point-min))
-        (insert "#+CLAUDE_SESSION: " id "\n")))))
+        (insert "---\nclaude_session: " id "\n---\n\n")))))
 
 ;;;; Public commands
 
 ;;;###autoload
 (defun sprig-connect ()
-  "Start (or resume) a Claude session bound to the current buffer."
+  "Start (or resume) an agent session bound to the current buffer."
   (interactive)
   (when (process-live-p sprig--process)
-    (user-error "This buffer already has a live Claude session"))
+    (user-error "This buffer already has a live session"))
   (setq sprig--session-id (sprig--buffer-session-id))
   (let ((proc (make-process
                :name "sprig"
@@ -247,62 +363,38 @@ When nil, the session runs locally."
                            :content [(:type "text" :text ,text)])))))
     (process-send-string sprig--process (concat json "\n"))))
 
-(defun sprig--start-reply ()
-  "Insert the reply scaffold at end of buffer and arm the marker."
-  (goto-char (point-max))
-  (unless (bolp) (insert "\n"))
-  (insert "\n" sprig-response-heading "\n")
-  (setq sprig--marker (copy-marker (point) t)))
-
-(defun sprig-send-string (text)
-  "Send TEXT as a message and stream the reply into this buffer."
+;;;###autoload
+(defun sprig-send ()
+  "Send the pending user turn and stream the reply into a new block.
+The pending turn is the prose typed after the last reply."
+  (interactive)
   (sprig--ensure)
   (when sprig--busy
     (user-error "A turn is already in flight"))
-  (setq text (string-trim text))
-  (when (string-empty-p text)
-    (user-error "Nothing to send"))
-  (setq sprig--busy t)
-  (sprig--start-reply)
-  (sprig--send-user text))
+  (let ((text (sprig--pending-user-text)))
+    (when (or (null text) (string-empty-p text))
+      (user-error "No pending message: type below the last reply first"))
+    (setq sprig--busy t)
+    (sprig--start-reply)
+    (sprig--send-user text)))
 
 ;;;###autoload
-(defun sprig-send-region (beg end)
-  "Send the region BEG..END to Claude."
-  (interactive "r")
-  (sprig-send-string (buffer-substring-no-properties beg end)))
-
-(defun sprig--subtree-body ()
-  "Return the body text of the Org subtree at point (heading excluded)."
-  (if (and (derived-mode-p 'org-mode) (fboundp 'org-back-to-heading))
-      (save-excursion
-        (org-back-to-heading t)
-        (let ((beg (line-beginning-position 2)))
-          (org-end-of-subtree t t)
-          (buffer-substring-no-properties beg (point))))
-    ;; Fallback: current paragraph.
-    (save-excursion
-      (let ((beg (progn (backward-paragraph) (point)))
-            (end (progn (forward-paragraph) (point))))
-        (buffer-substring-no-properties beg end)))))
-
-;;;###autoload
-(defun sprig-send-subtree ()
-  "Send the body of the current Org subtree (or paragraph) to Claude."
+(defun sprig-interrupt ()
+  "Abort the in-flight turn, keeping and marking the partial reply."
   (interactive)
-  (sprig-send-string (sprig--subtree-body)))
-
-;;;###autoload
-(defun sprig-send-dwim ()
-  "Send the active region if any, otherwise the current subtree."
-  (interactive)
-  (if (use-region-p)
-      (sprig-send-region (region-beginning) (region-end))
-    (sprig-send-subtree)))
+  (if (not sprig--busy)
+      (message "sprig: nothing to interrupt")
+    (when (process-live-p sprig--process)
+      (delete-process sprig--process))
+    (setq sprig--process nil sprig--busy nil)
+    (sprig--close-reply t)
+    (when (and sprig--marker (marker-buffer sprig--marker))
+      (goto-char sprig--marker))
+    (message "sprig: interrupted (session resumes on next send)")))
 
 ;;;###autoload
 (defun sprig-disconnect ()
-  "Stop the Claude session for this buffer (the conversation is kept)."
+  "Stop the session for this buffer (the conversation is kept)."
   (interactive)
   (if (process-live-p sprig--process)
       (progn (delete-process sprig--process)
@@ -314,15 +406,16 @@ When nil, the session runs locally."
 
 (defvar sprig-mode-map
   (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-a C-c") #'sprig-send-dwim)
+    (define-key map (kbd "C-c C-c")     #'sprig-send)
     (define-key map (kbd "C-c C-a C-o") #'sprig-connect)
+    (define-key map (kbd "C-c C-k")     #'sprig-interrupt)
     (define-key map (kbd "C-c C-a C-k") #'sprig-disconnect)
     map)
   "Keymap for `sprig-mode'.")
 
 ;;;###autoload
 (define-minor-mode sprig-mode
-  "Minor mode for chatting with a Claude session in this Org buffer."
+  "Minor mode for conversing with an agent in a Markdown buffer."
   :lighter " Sprig"
   :keymap sprig-mode-map)
 
