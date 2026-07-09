@@ -1,7 +1,7 @@
 ;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -9,31 +9,42 @@
 
 ;; Sprig is an Emacs interface for conversing with an LLM agent.  A
 ;; conversation branch is a plain Markdown file you edit directly: you
-;; type your turns as prose, and the agent's replies stream in wrapped
-;; in `<details>' blocks that fold in the editor and collapse on GitHub.
+;; type your turns as prose and the agent's replies stream in below them.
+;;
+;; Structure lives in invisible HTML-comment sentinels, never in the
+;; prose, so tool output can't be mistaken for markup:
+;;
+;;   <!-- sprig:reply id=r1 -->      ... <!-- sprig:end id=r1 -->
+;;   <!-- sprig:tool id=t1 name=Bash --> ... <!-- sprig:tool-end id=t1 -->
+;;   <!-- sprig:result id=t1 -->     ... <!-- sprig:result-end id=t1 -->
+;;
+;; A reply is the prose (plus tool blocks) between a `reply' and its
+;; `end'; your turns are the gaps.  Tool input and output sit in fenced
+;; code blocks between the tool/result sentinels.  `sprig-mode' hides the
+;; sentinels behind overlay "chrome" -- a `\U0001F527' header per tool
+;; call, a `↳ result' header per result, a faint rule between turns --
+;; and folds each tool body to its header (C-c C-f toggles).  The files
+;; are meant for Emacs, not GitHub.
 ;;
 ;; Today the transport is the `claude' CLI's stream-json protocol over
 ;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
-;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription),
-;; so no API key is required.  The agent runs with its normal tools, so
-;; a reply may run commands and edit files; Sprig renders each tool call
-;; and its result as a nested, collapsed `<details>' block inline in the
-;; transcript.
+;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription), so
+;; no API key is required.  The agent runs with its normal tools, so a
+;; reply may run commands and edit files.
 ;;
 ;; One buffer is one branch.  Connect with `sprig-connect', type a
-;; message below the last reply, and send it with `sprig-send'
-;; (C-c C-c).  The reply streams into a new `<details>' block.  The CLI
-;; session id is stored in the file's YAML frontmatter (`claude_session')
-;; so the conversation survives an Emacs restart and reconnects with
-;; --resume.
+;; message below the last reply, and send it with `sprig-send' (C-c C-c).
+;; The CLI session id is stored in the file's YAML frontmatter
+;; (`claude_session') so the conversation survives an Emacs restart and
+;; reconnects with --resume.
 ;;
-;; Design note: the CLI keeps conversation memory server-side and
-;; resumes by session id, so `sprig-send' transmits only the new user
-;; turn.  The intended "context is the whole file" model from DESIGN.md
-;; (needed for fork-by-copy) wants a full-transcript replay, which suits
-;; a stateless messages backend.  `sprig--turns' assembles that
-;; role-tagged message list already; wiring it to a stateless backend,
-;; plus the fork-by-copy navigator, is the next slice.
+;; Design note: the CLI keeps conversation memory server-side and resumes
+;; by session id, so `sprig-send' transmits only the new user turn.  The
+;; intended "context is the whole file" model from DESIGN.md (needed for
+;; fork-by-copy) wants a full-transcript replay, which suits a stateless
+;; messages backend.  `sprig--turns' assembles that role-tagged message
+;; list already; wiring it to a stateless backend, plus the fork-by-copy
+;; navigator, is the next slice.
 
 ;;; Code:
 
@@ -78,16 +89,39 @@ When nil, the session runs locally."
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
-(defcustom sprig-assistant-summary "assistant"
-  "Summary label used in the `<details>' block wrapping an agent reply."
-  :type 'string)
-
 (defcustom sprig-fold-tool-calls t
-  "When non-nil, fold tool-call and result blocks to their summary line.
-Folding only hides the body in this buffer; the full content is still
-written to the file and expands on GitHub.  Toggle the block at point
-with `sprig-toggle-fold', or use `sprig-fold-all' / `sprig-unfold-all'."
+  "When non-nil, fold tool-call and result blocks to their header.
+Folding hides the body in this buffer only; the full content stays in
+the file.  Toggle the block at point with `sprig-toggle-fold', or use
+`sprig-fold-all' / `sprig-unfold-all'."
   :type 'boolean)
+
+(defcustom sprig-hide-sentinels t
+  "When non-nil, hide the `sprig:' comment sentinels behind overlay chrome.
+Each tool/result sentinel is replaced by a header line and the reply
+sentinel by a rule.  Set nil to see the raw sentinels (e.g. debugging)."
+  :type 'boolean)
+
+(defcustom sprig-reply-divider t
+  "When non-nil, draw a faint rule where each reply begins and ends."
+  :type 'boolean)
+
+(defcustom sprig-highlight-user-input t
+  "When non-nil, give your typed turns the `sprig-user-input' face.
+This sets them off from the agent's replies (the gaps between an `end'
+sentinel and the next `reply')."
+  :type 'boolean)
+
+(defface sprig-tool '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for tool-call and result header labels.")
+
+(defface sprig-divider '((t :inherit shadow))
+  "Face for the rule drawn at the start of a reply.")
+
+(defface sprig-user-input '((t :slant italic))
+  "Face for your typed turns, distinguishing them from agent replies.
+The default sets only the slant so Markdown's own colouring shows through;
+customise it (e.g. add a background) to taste.")
 
 ;;;; Buffer-local state
 
@@ -99,15 +133,33 @@ with `sprig-toggle-fold', or use `sprig-fold-all' / `sprig-unfold-all'."
   "Marker where streamed reply text is inserted.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
+(defvar-local sprig--reply-id nil
+  "Id of the reply currently streaming, e.g. \"r3\".")
 (defvar-local sprig--emitted nil
   "Non-nil once the current reply has had text inserted.
-Used to separate consecutive text content blocks (e.g. the prose
-before and after a tool use) with a paragraph break.")
+Used to separate consecutive content blocks with a paragraph break.")
 (defvar-local sprig--blocks nil
-  "Alist of in-flight streaming content blocks, keyed by block index.
-Only `tool_use' blocks are tracked, as (INDEX :name NAME :json ACC),
-where ACC accumulates the streamed `input_json_delta' fragments until
-the block closes and the call is rendered.")
+  "Alist of in-flight streaming tool-use blocks, keyed by block index.
+Each entry is (INDEX :id ID :name NAME :json ACC), where ACC accumulates
+the streamed `input_json_delta' fragments until the block closes.")
+
+;;;; Sentinel grammar
+
+;; Structural markers.  Always an HTML comment, alone on its line, at
+;; column 0.  The KIND alternation lists the `-end' variants first so a
+;; `tool-end' line is never misread as `tool'.
+(defconst sprig--sentinel-re
+  "^<!-- sprig:\\(reply\\|end\\|tool-end\\|tool\\|result-end\\|result\\)\\([^\n]*?\\) *-->[ \t]*$"
+  "Regexp matching any `sprig:' sentinel line.
+Group 1 is the kind, group 2 the attribute text (id, name, flags).")
+(defconst sprig--reply-open-re "^<!-- sprig:reply\\b[^\n]*-->[ \t]*$"
+  "Regexp matching a reply-open sentinel line.")
+(defconst sprig--reply-end-re "^<!-- sprig:end\\b[^\n]*-->[ \t]*$"
+  "Regexp matching a reply-close sentinel line.")
+(defconst sprig--tool-open-re "^<!-- sprig:\\(?:tool\\|result\\) "
+  "Regexp matching a tool-call or result open sentinel line.")
+(defconst sprig--tool-close-re "^<!-- sprig:\\(?:tool\\|result\\)-end\\b"
+  "Regexp matching a tool-call or result close sentinel line.")
 
 ;;;; Command construction
 
@@ -150,62 +202,38 @@ the block closes and the call is rendered.")
             (point-min)))
       (point-min))))
 
-(defconst sprig--block-open-re "^<details><summary>\\(.*?\\)</summary>[ \t]*$"
-  "Regexp matching the opening line of an assistant `<details>' block.")
-(defconst sprig--block-close-re "^</details>[ \t]*$"
-  "Regexp matching the closing line of an assistant `<details>' block.")
-(defconst sprig--block-delim-re
-  "^\\(?:<details><summary>.*?</summary>\\|</details>\\)[ \t]*$"
-  "Regexp matching either a `<details>' open or close line.
-Used to find an assistant block's matching close while stepping over
-the nested `<details>' blocks that render tool calls.")
-(defconst sprig--tool-summary-re "^<details><summary>\\(?:\U0001F527\\|↳\\)"
-  "Regexp matching the summary line of a tool-call or result block.")
-
-(defun sprig--strip-reply-marker (text)
-  "Remove a leading `<!-- sprig:reply ... -->' marker line from TEXT."
+(defun sprig--clean-reply (text)
+  "Strip tool and result blocks from reply TEXT, leaving prose."
   (string-trim
    (replace-regexp-in-string
-    "\\`[ \t\n]*<!--[ \t]*sprig:reply[^>]*-->[ \t]*\n?" "" text)))
-
-(defun sprig--matching-close ()
-  "From just inside an open block (depth 1), find its matching close.
-Steps over nested `<details>' blocks (rendered tool calls).  Returns the
-buffer position of the closing line, leaving point at that line's end, or
-nil if the block is unterminated (point is then left unmoved)."
-  (let ((depth 1) (found nil))
-    (while (and (> depth 0)
-                (re-search-forward sprig--block-delim-re nil t))
-      (if (save-excursion (goto-char (match-beginning 0))
-                          (looking-at-p sprig--block-close-re))
-          (setq depth (1- depth))
-        (setq depth (1+ depth)))
-      (when (= depth 0)
-        (setq found (match-beginning 0))))
-    found))
+    "\n\\{3,\\}" "\n\n"
+    (replace-regexp-in-string
+     "<!-- sprig:\\(?:tool\\|result\\)\\b\\(?:.\\|\n\\)*?<!-- sprig:\\(?:tool\\|result\\)-end[^\n]*-->[ \t]*\n?"
+     "" text))))
 
 (defun sprig--turns ()
   "Parse the buffer body into an ordered list of (ROLE . TEXT) turns.
-ROLE is `user' or `assistant'.  Blank user turns are skipped.  This is
-the role-tagged message list a stateless backend would send verbatim."
+ROLE is `user' or `assistant'.  Blank user turns are skipped.  Assistant
+text has its tool/result blocks stripped.  This is the role-tagged
+message list a stateless backend would send verbatim."
   (let ((turns '()))
     (save-excursion
       (goto-char (sprig--body-start))
       (let ((pos (point)))
-        (while (re-search-forward sprig--block-open-re nil t)
+        (while (re-search-forward sprig--reply-open-re nil t)
           (let ((user-text (buffer-substring-no-properties pos (match-beginning 0)))
-                (body-beg (progn (forward-line 1) (point)))
-                (close-beg (sprig--matching-close)))
+                (reply-beg (progn (forward-line 1) (point))))
             (when (string-match-p "[^ \t\n]" user-text)
               (push (cons 'user (string-trim user-text)) turns))
-            (if close-beg
-                (let ((atext (buffer-substring-no-properties body-beg close-beg)))
-                  (push (cons 'assistant (sprig--strip-reply-marker atext)) turns)
+            (if (re-search-forward sprig--reply-end-re nil t)
+                (let ((atext (buffer-substring-no-properties
+                              reply-beg (match-beginning 0))))
+                  (push (cons 'assistant (sprig--clean-reply atext)) turns)
                   (forward-line 1)
                   (setq pos (point)))
-              ;; Unterminated block (a reply still streaming): take the rest.
-              (let ((atext (buffer-substring-no-properties body-beg (point-max))))
-                (push (cons 'assistant (sprig--strip-reply-marker atext)) turns)
+              ;; Unterminated reply (still streaming): take the rest.
+              (let ((atext (buffer-substring-no-properties reply-beg (point-max))))
+                (push (cons 'assistant (sprig--clean-reply atext)) turns)
                 (goto-char (point-max))
                 (setq pos (point))))))
         (let ((tail (buffer-substring-no-properties pos (point-max))))
@@ -259,6 +287,8 @@ the role-tagged message list a stateless backend would send verbatim."
              ((and (equal .event.type "content_block_start")
                    (equal .event.content_block.type "tool_use"))
               (push (list .event.index
+                          :id (or .event.content_block.id
+                                  (format "t%d" .event.index))
                           :name .event.content_block.name
                           :json "")
                     sprig--blocks))
@@ -280,7 +310,8 @@ the role-tagged message list a stateless backend would send verbatim."
              ((equal .event.type "content_block_stop")
               (let ((blk (assq .event.index sprig--blocks)))
                 (when blk
-                  (sprig--emit-tool-call (plist-get (cdr blk) :name)
+                  (sprig--emit-tool-call (plist-get (cdr blk) :id)
+                                         (plist-get (cdr blk) :name)
                                          (plist-get (cdr blk) :json))
                   (setq sprig--blocks
                         (assq-delete-all .event.index sprig--blocks)))))))
@@ -305,8 +336,8 @@ the role-tagged message list a stateless backend would send verbatim."
     (setq sprig--emitted t)))
 
 (defun sprig--block-separator ()
-  "Put exactly one blank line before a new text block.
-No-op until the reply has already emitted text, so it never disturbs
+  "Put exactly one blank line before a new block.
+No-op until the reply has already emitted content, so it never disturbs
 the scaffold that precedes the first block."
   (when (and sprig--emitted sprig--marker (marker-buffer sprig--marker))
     (save-excursion
@@ -339,44 +370,48 @@ the scaffold that precedes the first block."
                content ""))
    (t (format "%S" content))))
 
-(defun sprig--ensure-invisibility ()
-  "Make sure this buffer's invisibility spec honours `sprig-fold'.
-Registers the spec if it is missing, so folding works even when the
-code is reloaded while `sprig-mode' is already on."
-  (unless (and (listp buffer-invisibility-spec)
-               (assq 'sprig-fold buffer-invisibility-spec))
-    (add-to-invisibility-spec '(sprig-fold . t))))
+(defun sprig--tool-input (name json)
+  "Return (LANG . BODY) for how to render tool NAME's input JSON.
+Shows the command for Bash, the path for file tools, else pretty JSON."
+  (let ((obj (ignore-errors
+               (json-parse-string
+                (if (string-empty-p (string-trim (or json ""))) "{}" json)
+                :object-type 'alist :null-object nil :false-object nil))))
+    (cond
+     ((and (equal name "Bash") (alist-get 'command obj))
+      (cons "bash" (alist-get 'command obj)))
+     ((and (member name '("Read" "Edit" "Write" "NotebookEdit"))
+           (alist-get 'file_path obj))
+      (cons "" (alist-get 'file_path obj)))
+     (t (cons "json" (sprig--pretty-json json))))))
 
-(defun sprig--fold-block (beg end)
-  "Hide the body of the block between BEG and END, keeping its first line.
-BEG is the start of the `<details>' summary line, END just past the
-matching `</details>'.  Idempotent: re-folding the same block is a no-op."
-  (sprig--ensure-invisibility)
-  (save-excursion
-    (goto-char beg)
-    (let ((body-beg (line-end-position)))
-      (when (< body-beg end)
-        (remove-overlays body-beg end 'sprig-fold t)
-        (let ((ov (make-overlay body-beg end)))
-          (overlay-put ov 'invisible 'sprig-fold)
-          (overlay-put ov 'sprig-fold t)
-          (overlay-put ov 'evaporate t))))))
+;;;; Rendering: sentinel-delimited fenced blocks
 
-(defun sprig--emit-tool-block (text)
-  "Insert a rendered tool TEXT block, folding its body when enabled."
+(defun sprig--emit-block (open lang body end)
+  "Insert an OPEN..END sentinel pair wrapping a fenced BODY, then decorate.
+LANG is the fence info string.  When folding is on, the body is folded."
   (when (and sprig--marker (marker-buffer sprig--marker))
-    (let ((beg (marker-position sprig--marker)))
-      (sprig--emit text)
-      (when sprig-fold-tool-calls
-        (sprig--fold-block beg (marker-position sprig--marker))))))
+    (sprig--block-separator)
+    (save-excursion
+      (goto-char sprig--marker)
+      (let ((inhibit-read-only t)
+            (open-bol (point)))
+        (insert open "\n"
+                "```" (or lang "") "\n" body "\n```\n"
+                end)
+        (set-marker sprig--marker (point))
+        (setq sprig--emitted t)
+        (when sprig-fold-tool-calls
+          (sprig--fold-block-at open-bol))))
+    (sprig--decorate)))
 
-(defun sprig--emit-tool-call (name json)
-  "Render a collapsed tool-call block for tool NAME with input JSON."
-  (sprig--block-separator)
-  (sprig--emit-tool-block
-   (concat "<details><summary>\U0001F527 " (or name "tool") "</summary>\n\n"
-           "```json\n" (sprig--pretty-json json) "\n```\n\n"
-           "</details>")))
+(defun sprig--emit-tool-call (id name json)
+  "Render a tool-call block for tool NAME (id ID) with input JSON."
+  (let ((in (sprig--tool-input name json)))
+    (sprig--emit-block
+     (format "<!-- sprig:tool id=%s name=%s -->" (or id "t") (or name "tool"))
+     (car in) (cdr in)
+     (format "<!-- sprig:tool-end id=%s -->" (or id "t")))))
 
 (defun sprig--emit-tool-results (content)
   "Render every tool_result block found in message CONTENT (a block list)."
@@ -385,14 +420,13 @@ matching `</details>'.  Idempotent: re-folding the same block is a no-op."
       (when (consp block)
         (let-alist block
           (when (equal .type "tool_result")
-            (sprig--block-separator)
-            (sprig--emit-tool-block
-             (concat "<details><summary>↳ result"
-                     (if .is_error " [error]" "") "</summary>\n\n"
-                     "```\n"
-                     (string-trim (sprig--tool-result-text .content))
-                     "\n```\n\n"
-                     "</details>"))))))))
+            (let ((id (or .tool_use_id "t")))
+              (sprig--emit-block
+               (format "<!-- sprig:result id=%s%s -->" id
+                       (if .is_error " error" ""))
+               ""
+               (string-trim (sprig--tool-result-text .content))
+               (format "<!-- sprig:result-end id=%s -->" id)))))))))
 
 (defun sprig--finish-turn (cost is-error)
   "Close out the current turn.  COST and IS-ERROR come from the result event."
@@ -414,6 +448,176 @@ matching `</details>'.  Idempotent: re-folding the same block is a no-op."
                 sprig--busy nil)
           (message "sprig: session ended (%s)" (string-trim event)))))))
 
+;;;; Overlay chrome: hide sentinels, show headers and rules
+
+(defun sprig--ensure-invisibility ()
+  "Make sure this buffer honours the `sprig-fold' and `sprig-chrome' specs.
+Registers them if missing, so display works even when the code is
+reloaded while `sprig-mode' is already on."
+  (unless (and (listp buffer-invisibility-spec)
+               (assq 'sprig-fold buffer-invisibility-spec))
+    (add-to-invisibility-spec '(sprig-fold . t)))     ; folds show an ellipsis
+  (unless (and (listp buffer-invisibility-spec)
+               (memq 'sprig-chrome buffer-invisibility-spec))
+    (add-to-invisibility-spec 'sprig-chrome)))         ; sentinels just vanish
+
+(defun sprig--divider (&optional suffix)
+  "Return a faint horizontal rule, with optional trailing SUFFIX text."
+  (propertize (concat (make-string 48 ?─) (or suffix ""))
+              'face 'sprig-divider))
+
+(defun sprig--sentinel-label (kind attrs)
+  "Return the display string for a sentinel of KIND with ATTRS, or nil.
+The reply-open and reply-end sentinels become a rule, tool/result opens a
+header line; the remaining close sentinels return nil (hidden)."
+  ;; Labels carry no trailing newline: the sentinel line's own newline is
+  ;; kept visible (see `sprig--decorate') so point can land after the header.
+  (cond
+   ((equal kind "reply")
+    (when sprig-reply-divider
+      (sprig--divider (if (string-match-p "interrupted" attrs)
+                          "  (interrupted)" ""))))
+   ((equal kind "end")
+    (when sprig-reply-divider (sprig--divider)))
+   ((equal kind "tool")
+    (let ((name (and (string-match "name=\\(\\S-+\\)" attrs)
+                     (match-string 1 attrs))))
+      (propertize (concat "\U0001F527 " (or name "tool"))
+                  'face 'sprig-tool)))
+   ((equal kind "result")
+    (propertize (concat "↳ result"
+                        (if (string-match-p "error" attrs) " [error]" ""))
+                'face 'sprig-tool))
+   (t nil)))
+
+(defun sprig--face-user (beg end)
+  "Overlay the user-turn text in BEG..END with `sprig-user-input'.
+Leading and trailing blank lines are trimmed so only real text is faced."
+  (save-excursion
+    (goto-char beg) (skip-chars-forward " \t\n") (setq beg (point))
+    (goto-char end) (skip-chars-backward " \t\n" beg) (setq end (point))
+    (when (< beg end)
+      ;; Rear-advance so appending to a turn keeps the face.
+      (let ((ov (make-overlay beg end nil nil t)))
+        (overlay-put ov 'sprig-user t)
+        (overlay-put ov 'face 'sprig-user-input)
+        (overlay-put ov 'evaporate t)))))
+
+(defun sprig--refresh-pending-face (&rest _)
+  "Re-face the trailing user turn as it is typed.
+Runs from `after-change-functions', so the text you type below the last
+reply is faced live.  Only the pending region (after the last `end'
+sentinel) is rescanned; settled turns are handled by `sprig--decorate'."
+  (when (and sprig-highlight-user-input (not sprig--busy))
+    (save-excursion
+      (goto-char (point-max))
+      (let ((beg (if (re-search-backward sprig--reply-end-re nil t)
+                     (min (point-max) (1+ (line-end-position)))
+                   (sprig--body-start))))
+        (remove-overlays beg (point-max) 'sprig-user t)
+        (sprig--face-user beg (point-max))))))
+
+(defun sprig--decorate-user-turns ()
+  "Face every user turn -- the gaps outside each reply..end span."
+  (remove-overlays (point-min) (point-max) 'sprig-user t)
+  (when sprig-highlight-user-input
+    (save-excursion
+      (goto-char (sprig--body-start))
+      (let ((gap-beg (point)))
+        (while (re-search-forward sprig--reply-open-re nil t)
+          (sprig--face-user gap-beg (match-beginning 0))
+          (if (re-search-forward sprig--reply-end-re nil t)
+              (setq gap-beg (min (point-max) (1+ (point))))
+            (setq gap-beg (point-max))
+            (goto-char (point-max))))
+        (sprig--face-user gap-beg (point-max))))))
+
+(defun sprig--decorate ()
+  "Rebuild the chrome and user-turn overlays from the buffer's sentinels.
+Hides each sentinel line and, for open sentinels, shows a header or rule
+in its place; faces the user turns between replies.  Leaves the fold
+overlays untouched."
+  (sprig--decorate-user-turns)
+  (when sprig-hide-sentinels
+    (sprig--ensure-invisibility)
+    (remove-overlays (point-min) (point-max) 'sprig-chrome t)
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward sprig--sentinel-re nil t)
+        ;; Capture the match bounds first: `sprig--sentinel-label' runs
+        ;; `string-match' internally, which would clobber the match data.
+        (let* ((mb (match-beginning 0))
+               (me (match-end 0))
+               (label (sprig--sentinel-label (match-string 1) (match-string 2)))
+               ;; A labeled sentinel leaves its terminating newline visible so
+               ;; point has somewhere to rest and vertical motion can cross the
+               ;; header; an unlabeled (hidden) one swallows the newline so the
+               ;; whole line disappears.
+               (end (if label me (min (point-max) (1+ me))))
+               (ov (make-overlay mb end)))
+          (overlay-put ov 'sprig-chrome t)
+          (overlay-put ov 'invisible 'sprig-chrome)
+          (overlay-put ov 'evaporate t)
+          (overlay-put ov 'modification-hooks '(sprig--edit-guard))
+          (when label
+            (overlay-put ov 'before-string label)
+            ;; The sentinel's terminating newline is left visible (so point
+            ;; can cross the header); guard just that char so it can't be
+            ;; deleted, which would merge the next line into the hidden line.
+            (when (< me (point-max))
+              (let ((g (make-overlay me (1+ me))))
+                (overlay-put g 'sprig-chrome t)
+                (overlay-put g 'evaporate t)
+                (overlay-put g 'modification-hooks '(sprig--edit-guard))))))))))
+
+;;;; Folding
+
+(defun sprig--edit-guard (_ov after _beg _end &optional _len)
+  "Refuse interactive edits that would corrupt sprig's hidden structure.
+A modification-hook shared by the fold overlays and the chrome sentinel
+overlays: it fires before the change (AFTER nil) and aborts it, so a
+stray DEL or backspace at a boundary cannot silently delete a folded
+body or a hidden sentinel and break parsing.  Sprig's own writes bind
+`inhibit-read-only', which opts out."
+  (unless (or after inhibit-read-only)
+    (user-error "Protected sprig structure here (unfold the block first if folded)")))
+
+(defun sprig--fold-region (beg end)
+  "Create (or refresh) a fold overlay hiding BEG..END."
+  (sprig--ensure-invisibility)
+  (when (< beg end)
+    (remove-overlays beg end 'sprig-fold t)
+    (let ((ov (make-overlay beg end)))
+      (overlay-put ov 'invisible 'sprig-fold)
+      (overlay-put ov 'sprig-fold t)
+      (overlay-put ov 'evaporate t)
+      (overlay-put ov 'modification-hooks '(sprig--edit-guard)))))
+
+(defun sprig--fold-block-at (open-bol)
+  "Fold the tool/result block whose open sentinel starts at OPEN-BOL.
+The body runs from the end of the open line to the matching close
+sentinel, so it is delimited by sentinels -- fences or `</details>' in
+the tool output cannot move the boundary."
+  (save-excursion
+    (goto-char open-bol)
+    (let ((fold-beg (line-end-position)))
+      (forward-line 1)
+      (when (re-search-forward sprig--tool-close-re nil t)
+        (sprig--fold-region fold-beg (line-beginning-position))))))
+
+(defun sprig--tool-block-at-point ()
+  "Return the open-sentinel start of the tool block containing point, or nil.
+Works from the header line or anywhere in the body."
+  (let ((orig (point)))
+    (save-excursion
+      (end-of-line)
+      (when (re-search-backward sprig--tool-open-re nil t)
+        (let ((beg (line-beginning-position)))
+          (forward-line 1)
+          (when (re-search-forward sprig--tool-close-re nil t)
+            (when (<= orig (line-end-position))
+              beg)))))))
+
 ;;;; Reply scaffolding
 
 (defun sprig--next-reply-id ()
@@ -421,43 +625,46 @@ matching `</details>'.  Idempotent: re-folding the same block is a no-op."
   (save-excursion
     (goto-char (point-min))
     (let ((n 0))
-      (while (re-search-forward "<!--[ \t]*sprig:reply" nil t)
+      (while (re-search-forward "^<!-- sprig:reply\\b" nil t)
         (setq n (1+ n)))
       (format "r%d" (1+ n)))))
 
 (defun sprig--start-reply ()
-  "Insert an assistant `<details>' scaffold at end of buffer, arm the marker."
-  (let ((id (sprig--next-reply-id)))
-    (goto-char (point-max))
-    (skip-chars-backward " \t\n")
-    (delete-region (point) (point-max))
-    (let ((inhibit-read-only t))
-      (insert "\n\n"
-              "<details><summary>" sprig-assistant-summary "</summary>\n"
-              "<!-- sprig:reply id=" id " -->\n\n"))
-    (setq sprig--marker (copy-marker (point) t))
-    (setq sprig--emitted nil)
-    (setq sprig--blocks nil)))
+  "Open a reply sentinel at end of buffer and arm the marker."
+  (setq sprig--reply-id (sprig--next-reply-id))
+  (goto-char (point-max))
+  (skip-chars-backward " \t\n")
+  (delete-region (point) (point-max))
+  (let ((inhibit-read-only t))
+    (insert "\n\n<!-- sprig:reply id=" sprig--reply-id " -->\n\n"))
+  (setq sprig--marker (copy-marker (point) t))
+  (setq sprig--emitted nil)
+  (setq sprig--blocks nil)
+  (sprig--decorate))
 
 (defun sprig--close-reply (&optional interrupted)
-  "Close the current reply block.  With INTERRUPTED, flag the reply marker."
+  "Close the current reply.  With INTERRUPTED, flag the reply sentinel."
   (when (and sprig--marker (marker-buffer sprig--marker))
     (goto-char sprig--marker)
     (let ((inhibit-read-only t))
-      (insert "\n</details>\n\n"))
+      (skip-chars-backward " \t\n")
+      (delete-region (point) (marker-position sprig--marker))
+      (insert "\n<!-- sprig:end id=" (or sprig--reply-id "r") " -->\n"))
     (set-marker sprig--marker (point))
-    (when interrupted (sprig--flag-interrupted))))
+    (when interrupted (sprig--flag-interrupted)))
+  (sprig--decorate))
 
 (defun sprig--flag-interrupted ()
-  "Add an `interrupted' flag to the most recent reply marker."
+  "Add an `interrupted' flag to the current reply's open sentinel."
   (save-excursion
-    (when (and sprig--marker (marker-buffer sprig--marker))
-      (goto-char sprig--marker))
+    (goto-char (if (and sprig--marker (marker-buffer sprig--marker))
+                   (marker-position sprig--marker)
+                 (point-max)))
     (when (re-search-backward
-           "\\(<!--[ \t]*sprig:reply\\)\\([^>]*?\\)[ \t]*-->" nil t)
-      (unless (string-match-p "interrupted" (match-string 2))
+           "^<!-- sprig:reply\\b\\([^\n]*?\\) *-->[ \t]*$" nil t)
+      (unless (string-match-p "interrupted" (match-string 1))
         (let ((inhibit-read-only t))
-          (replace-match "\\1\\2 interrupted -->"))))))
+          (replace-match "<!-- sprig:reply\\1 interrupted -->"))))))
 
 ;;;; Session-id persistence via YAML frontmatter
 
@@ -572,36 +779,15 @@ The pending turn is the prose typed after the last reply."
 
 ;;;; Folding commands
 
-(defun sprig--fold-block-at (beg)
-  "Fold the tool block whose summary line starts at BEG."
-  (save-excursion
-    (goto-char beg)
-    (forward-line 1)
-    (when (re-search-forward sprig--block-close-re nil t)
-      (sprig--fold-block beg (line-end-position)))))
-
-(defun sprig--tool-block-at-point ()
-  "Return the summary-line start of the tool block containing point, or nil.
-Works from anywhere inside the block, not just the summary line."
-  (let ((orig (point)))
-    (save-excursion
-      (end-of-line)
-      (when (re-search-backward sprig--tool-summary-re nil t)
-        (let ((beg (line-beginning-position)))
-          (forward-line 1)
-          (when (re-search-forward sprig--block-close-re nil t)
-            (when (<= orig (line-end-position))
-              beg)))))))
-
 ;;;###autoload
 (defun sprig-fold-all ()
-  "Fold every tool-call and result block in the buffer to its summary.
-Re-hides blocks that already have a (possibly expanded) fold overlay and
-scans to create overlays for any that lack one, e.g. in a reopened file."
+  "Fold every tool-call and result block in the buffer to its header.
+Re-hides blocks that already have an overlay and scans to create
+overlays for any that lack one, e.g. in a reopened file."
   (interactive)
   (save-excursion
     (goto-char (point-min))
-    (while (re-search-forward sprig--tool-summary-re nil t)
+    (while (re-search-forward sprig--tool-open-re nil t)
       (let* ((beg (line-beginning-position))
              (ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
                            (overlays-in beg (1+ (line-end-position))))))
@@ -619,17 +805,16 @@ scans to create overlays for any that lack one, e.g. in a reopened file."
 
 ;;;###autoload
 (defun sprig-toggle-fold ()
-  "Toggle folding of the tool block whose summary is on the current line."
+  "Toggle folding of the tool block at point.
+Works from the header line or anywhere in the body."
   (interactive)
   (let ((ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
                       (overlays-in (line-beginning-position)
                                    (1+ (line-end-position))))))
     (cond
      ;; A fold overlay covers this line: flip its visibility.  The overlay
-     ;; spans the body whether shown or hidden, so this works from the
-     ;; summary line (folded) or anywhere in the body (unfolded), and never
-     ;; re-searches for a boundary that tool output might fake with its own
-     ;; `</details>' line.
+     ;; spans the body whether shown or hidden, so no boundary re-search is
+     ;; needed and tool output cannot fake a delimiter.
      (ov (overlay-put ov 'invisible
                       (and (not (overlay-get ov 'invisible)) 'sprig-fold)))
      ;; No overlay yet (e.g. a reopened buffer): create one by scanning.
@@ -658,10 +843,17 @@ scans to create overlays for any that lack one, e.g. in a reopened file."
   :keymap sprig-mode-map
   (if sprig-mode
       (progn
+        (add-to-invisibility-spec 'sprig-chrome)
         (add-to-invisibility-spec '(sprig-fold . t))
+        (add-hook 'after-change-functions #'sprig--refresh-pending-face nil t)
+        (sprig--decorate)
         (when sprig-fold-tool-calls (sprig-fold-all)))
+    (remove-hook 'after-change-functions #'sprig--refresh-pending-face t)
+    (remove-from-invisibility-spec 'sprig-chrome)
     (remove-from-invisibility-spec '(sprig-fold . t))
-    (sprig-unfold-all)))
+    (remove-overlays (point-min) (point-max) 'sprig-chrome t)
+    (remove-overlays (point-min) (point-max) 'sprig-fold t)
+    (remove-overlays (point-min) (point-max) 'sprig-user t)))
 
 (provide 'sprig)
 ;;; sprig.el ends here
