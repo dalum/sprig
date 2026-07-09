@@ -1,7 +1,7 @@
 ;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.3.0
+;; Version: 0.3.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -25,6 +25,12 @@
 ;; call, a `↳ result' header per result, a faint rule between turns --
 ;; and folds each tool body to its header (C-c C-f toggles).  The files
 ;; are meant for Emacs, not GitHub.
+;;
+;; Tool activity can be verbose, so `sprig-render-tools' (default
+;; `calls': show each tool call but not its result) controls how much
+;; lands in the transcript.  A file overrides it with a `sprig_tools:'
+;; frontmatter line (none / calls / full), or `M-x sprig-set-tool-display'
+;; sets it.  The setting affects only turns rendered afterwards.
 ;;
 ;; Today the transport is the `claude' CLI's stream-json protocol over
 ;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
@@ -95,6 +101,19 @@ Folding hides the body in this buffer only; the full content stays in
 the file.  Toggle the block at point with `sprig-toggle-fold', or use
 `sprig-fold-all' / `sprig-unfold-all'."
   :type 'boolean)
+
+(defcustom sprig-render-tools 'calls
+  "How much tool activity to render into the transcript.
+`none'   -- omit tool calls and results entirely.
+`calls'  -- show each tool call, omit its (often large) result.
+`full'   -- show tool calls and their results.
+
+A file overrides this in its YAML frontmatter with a `sprig_tools:' line
+whose value is none, calls, or full.  Because results are omitted rather
+than hidden, the setting affects only turns rendered after it is set."
+  :type '(choice (const :tag "None" none)
+                 (const :tag "Calls only" calls)
+                 (const :tag "Calls and results" full)))
 
 (defcustom sprig-hide-sentinels t
   "When non-nil, hide the `sprig:' comment sentinels behind overlay chrome.
@@ -406,16 +425,19 @@ LANG is the fence info string.  When folding is on, the body is folded."
     (sprig--decorate)))
 
 (defun sprig--emit-tool-call (id name json)
-  "Render a tool-call block for tool NAME (id ID) with input JSON."
-  (let ((in (sprig--tool-input name json)))
-    (sprig--emit-block
-     (format "<!-- sprig:tool id=%s name=%s -->" (or id "t") (or name "tool"))
-     (car in) (cdr in)
-     (format "<!-- sprig:tool-end id=%s -->" (or id "t")))))
+  "Render a tool-call block for tool NAME (id ID) with input JSON.
+Skipped when `sprig--tool-display' is `none'."
+  (unless (eq (sprig--tool-display) 'none)
+    (let ((in (sprig--tool-input name json)))
+      (sprig--emit-block
+       (format "<!-- sprig:tool id=%s name=%s -->" (or id "t") (or name "tool"))
+       (car in) (cdr in)
+       (format "<!-- sprig:tool-end id=%s -->" (or id "t"))))))
 
 (defun sprig--emit-tool-results (content)
-  "Render every tool_result block found in message CONTENT (a block list)."
-  (when (listp content)
+  "Render every tool_result block found in message CONTENT (a block list).
+Rendered only when `sprig--tool-display' is `full'."
+  (when (and (eq (sprig--tool-display) 'full) (listp content))
     (dolist (block content)
       (when (consp block)
         (let-alist block
@@ -677,29 +699,49 @@ Works from the header line or anywhere in the body."
       (when (re-search-forward "^---[ \t]*$" nil t)
         (line-beginning-position)))))
 
-(defun sprig--buffer-session-id ()
-  "Return the `claude_session' id from the YAML frontmatter, or nil."
+(defun sprig--frontmatter-get (key)
+  "Return the value of KEY in the YAML frontmatter, or nil."
   (let ((end (sprig--frontmatter-end)))
     (when end
       (save-excursion
         (goto-char (point-min))
-        (when (re-search-forward "^claude_session:[ \t]*\\(.+\\)$" end t)
+        (when (re-search-forward
+               (concat "^" (regexp-quote key) ":[ \t]*\\(.+\\)$") end t)
           (string-trim (match-string 1)))))))
+
+(defun sprig--frontmatter-set (key value)
+  "Set KEY to VALUE in the YAML frontmatter, creating frontmatter if absent."
+  (save-excursion
+    (let ((inhibit-read-only t)
+          (end (sprig--frontmatter-end))
+          (line (concat key ": " value)))
+      (if end
+          (if (progn (goto-char (point-min))
+                     (re-search-forward
+                      (concat "^" (regexp-quote key) ":.*$") end t))
+              (replace-match line t t)
+            (goto-char (point-min))
+            (forward-line 1)
+            (insert line "\n"))
+        (goto-char (point-min))
+        (insert "---\n" line "\n---\n\n")))))
+
+(defun sprig--buffer-session-id ()
+  "Return the `claude_session' id from the YAML frontmatter, or nil."
+  (sprig--frontmatter-get "claude_session"))
 
 (defun sprig--save-session-id (id)
   "Store ID as `claude_session' in the buffer's YAML frontmatter."
-  (save-excursion
-    (let ((inhibit-read-only t)
-          (end (sprig--frontmatter-end)))
-      (if end
-          (if (progn (goto-char (point-min))
-                     (re-search-forward "^claude_session:.*$" end t))
-              (replace-match (concat "claude_session: " id))
-            (goto-char (point-min))
-            (forward-line 1)
-            (insert "claude_session: " id "\n"))
-        (goto-char (point-min))
-        (insert "---\nclaude_session: " id "\n---\n\n")))))
+  (sprig--frontmatter-set "claude_session" id))
+
+(defun sprig--tool-display ()
+  "Return the effective tool-render level for this buffer.
+A `sprig_tools:' frontmatter line (none, calls, or full) overrides the
+`sprig-render-tools' default."
+  (let ((v (sprig--frontmatter-get "sprig_tools")))
+    (if (member v '("none" "calls" "full"))
+        (intern v)
+      sprig-render-tools)))
 
 ;;;; Public commands
 
@@ -776,6 +818,19 @@ The pending turn is the prose typed after the last reply."
              (setq sprig--process nil sprig--busy nil)
              (message "sprig: disconnected"))
     (message "sprig: no live session")))
+
+;;;###autoload
+(defun sprig-set-tool-display (level)
+  "Set this file's tool-render LEVEL and record it in the frontmatter.
+LEVEL is `none' (no tool blocks), `calls' (calls only), or `full' (calls
+and results).  It applies to turns rendered from now on; blocks already
+omitted are not recovered."
+  (interactive
+   (list (intern (completing-read
+                  "Tool display: " '("none" "calls" "full") nil t nil nil
+                  (symbol-name (sprig--tool-display))))))
+  (sprig--frontmatter-set "sprig_tools" (symbol-name level))
+  (message "sprig: tool display -> %s (applies to new turns)" level))
 
 ;;;; Folding commands
 
