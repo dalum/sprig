@@ -15,8 +15,10 @@
 ;; Today the transport is the `claude' CLI's stream-json protocol over
 ;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
 ;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription),
-;; so no API key is required.  Tools are disabled, so the agent answers
-;; in text and does not edit files.
+;; so no API key is required.  The agent runs with its normal tools, so
+;; a reply may run commands and edit files; Sprig renders each tool call
+;; and its result as a nested, collapsed `<details>' block inline in the
+;; transcript.
 ;;
 ;; One buffer is one branch.  Connect with `sprig-connect', type a
 ;; message below the last reply, and send it with `sprig-send'
@@ -89,6 +91,15 @@ When nil, the session runs locally."
   "Marker where streamed reply text is inserted.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
+(defvar-local sprig--emitted nil
+  "Non-nil once the current reply has had text inserted.
+Used to separate consecutive text content blocks (e.g. the prose
+before and after a tool use) with a paragraph break.")
+(defvar-local sprig--blocks nil
+  "Alist of in-flight streaming content blocks, keyed by block index.
+Only `tool_use' blocks are tracked, as (INDEX :name NAME :json ACC),
+where ACC accumulates the streamed `input_json_delta' fragments until
+the block closes and the call is rendered.")
 
 ;;;; Command construction
 
@@ -99,8 +110,7 @@ When nil, the session runs locally."
          "--input-format" "stream-json"
          "--output-format" "stream-json"
          "--include-partial-messages"
-         "--verbose"
-         "--allowedTools" "")           ; chat-only: no tool use
+         "--verbose")           ; tools follow the CLI's own permission config
    (when sprig-model (list "--model" sprig-model))
    (when sprig-system-prompt
      (list "--append-system-prompt" sprig-system-prompt))
@@ -136,12 +146,33 @@ When nil, the session runs locally."
   "Regexp matching the opening line of an assistant `<details>' block.")
 (defconst sprig--block-close-re "^</details>[ \t]*$"
   "Regexp matching the closing line of an assistant `<details>' block.")
+(defconst sprig--block-delim-re
+  "^\\(?:<details><summary>.*?</summary>\\|</details>\\)[ \t]*$"
+  "Regexp matching either a `<details>' open or close line.
+Used to find an assistant block's matching close while stepping over
+the nested `<details>' blocks that render tool calls.")
 
 (defun sprig--strip-reply-marker (text)
   "Remove a leading `<!-- sprig:reply ... -->' marker line from TEXT."
   (string-trim
    (replace-regexp-in-string
     "\\`[ \t\n]*<!--[ \t]*sprig:reply[^>]*-->[ \t]*\n?" "" text)))
+
+(defun sprig--matching-close ()
+  "From just inside an open block (depth 1), find its matching close.
+Steps over nested `<details>' blocks (rendered tool calls).  Returns the
+buffer position of the closing line, leaving point at that line's end, or
+nil if the block is unterminated (point is then left unmoved)."
+  (let ((depth 1) (found nil))
+    (while (and (> depth 0)
+                (re-search-forward sprig--block-delim-re nil t))
+      (if (save-excursion (goto-char (match-beginning 0))
+                          (looking-at-p sprig--block-close-re))
+          (setq depth (1- depth))
+        (setq depth (1+ depth)))
+      (when (= depth 0)
+        (setq found (match-beginning 0))))
+    found))
 
 (defun sprig--turns ()
   "Parse the buffer body into an ordered list of (ROLE . TEXT) turns.
@@ -153,12 +184,12 @@ the role-tagged message list a stateless backend would send verbatim."
       (let ((pos (point)))
         (while (re-search-forward sprig--block-open-re nil t)
           (let ((user-text (buffer-substring-no-properties pos (match-beginning 0)))
-                (body-beg (progn (forward-line 1) (point))))
+                (body-beg (progn (forward-line 1) (point)))
+                (close-beg (sprig--matching-close)))
             (when (string-match-p "[^ \t\n]" user-text)
               (push (cons 'user (string-trim user-text)) turns))
-            (if (re-search-forward sprig--block-close-re nil t)
-                (let ((atext (buffer-substring-no-properties
-                              body-beg (match-beginning 0))))
+            (if close-beg
+                (let ((atext (buffer-substring-no-properties body-beg close-beg)))
                   (push (cons 'assistant (sprig--strip-reply-marker atext)) turns)
                   (forward-line 1)
                   (setq pos (point)))
@@ -206,12 +237,46 @@ the role-tagged message list a stateless backend would send verbatim."
             (when (and .session_id (not sprig--session-id))
               (setq sprig--session-id .session_id)
               (sprig--save-session-id .session_id)))
-           ;; Streaming text delta.
+           ;; Streaming assistant content (text and tool-use blocks).
            ((equal .type "stream_event")
-            (when (and (equal .event.type "content_block_delta")
-                       (equal .event.delta.type "text_delta")
-                       .event.delta.text)
-              (sprig--emit .event.delta.text)))
+            (cond
+             ;; A new text block after earlier text (e.g. prose resuming
+             ;; after a tool use): separate them with a paragraph break.
+             ((and (equal .event.type "content_block_start")
+                   (equal .event.content_block.type "text"))
+              (sprig--block-separator))
+             ;; A tool-use block opens: start accumulating its input JSON.
+             ((and (equal .event.type "content_block_start")
+                   (equal .event.content_block.type "tool_use"))
+              (push (list .event.index
+                          :name .event.content_block.name
+                          :json "")
+                    sprig--blocks))
+             ;; Text delta.
+             ((and (equal .event.type "content_block_delta")
+                   (equal .event.delta.type "text_delta")
+                   .event.delta.text)
+              (sprig--emit .event.delta.text))
+             ;; Tool-input delta: append to the block's accumulator.
+             ((and (equal .event.type "content_block_delta")
+                   (equal .event.delta.type "input_json_delta")
+                   .event.delta.partial_json)
+              (let ((blk (assq .event.index sprig--blocks)))
+                (when blk
+                  (plist-put (cdr blk) :json
+                             (concat (plist-get (cdr blk) :json)
+                                     .event.delta.partial_json)))))
+             ;; Block closes: if it was a tracked tool-use, render it now.
+             ((equal .event.type "content_block_stop")
+              (let ((blk (assq .event.index sprig--blocks)))
+                (when blk
+                  (sprig--emit-tool-call (plist-get (cdr blk) :name)
+                                         (plist-get (cdr blk) :json))
+                  (setq sprig--blocks
+                        (assq-delete-all .event.index sprig--blocks)))))))
+           ;; Tool results come back as a `user' message; render them.
+           ((equal .type "user")
+            (sprig--emit-tool-results .message.content))
            ;; Turn complete.
            ((equal .type "result")
             (sprig--finish-turn .total_cost_usd .is_error))
@@ -226,7 +291,67 @@ the role-tagged message list a stateless backend would send verbatim."
       (goto-char sprig--marker)
       (let ((inhibit-read-only t))
         (insert text))
+      (set-marker sprig--marker (point)))
+    (setq sprig--emitted t)))
+
+(defun sprig--block-separator ()
+  "Put exactly one blank line before a new text block.
+No-op until the reply has already emitted text, so it never disturbs
+the scaffold that precedes the first block."
+  (when (and sprig--emitted sprig--marker (marker-buffer sprig--marker))
+    (save-excursion
+      (goto-char sprig--marker)
+      (let ((inhibit-read-only t))
+        (skip-chars-backward " \t\n")
+        (delete-region (point) (marker-position sprig--marker))
+        (insert "\n\n"))
       (set-marker sprig--marker (point)))))
+
+(defun sprig--pretty-json (raw)
+  "Pretty-print RAW JSON text; return it trimmed if it will not parse."
+  (let ((s (string-trim (or raw ""))))
+    (if (string-empty-p s)
+        "{}"
+      (condition-case nil
+          (with-temp-buffer
+            (insert s)
+            (json-pretty-print-buffer)
+            (string-trim (buffer-string)))
+        (error s)))))
+
+(defun sprig--tool-result-text (content)
+  "Flatten a tool_result CONTENT field (string or block list) to text."
+  (cond
+   ((stringp content) content)
+   ((listp content)
+    (mapconcat (lambda (b)
+                 (if (stringp b) b (let-alist b (or .text ""))))
+               content ""))
+   (t (format "%S" content))))
+
+(defun sprig--emit-tool-call (name json)
+  "Render a collapsed tool-call block for tool NAME with input JSON."
+  (sprig--block-separator)
+  (sprig--emit
+   (concat "<details><summary>\U0001F527 " (or name "tool") "</summary>\n\n"
+           "```json\n" (sprig--pretty-json json) "\n```\n\n"
+           "</details>")))
+
+(defun sprig--emit-tool-results (content)
+  "Render every tool_result block found in message CONTENT (a block list)."
+  (when (listp content)
+    (dolist (block content)
+      (when (consp block)
+        (let-alist block
+          (when (equal .type "tool_result")
+            (sprig--block-separator)
+            (sprig--emit
+             (concat "<details><summary>↳ result"
+                     (if .is_error " [error]" "") "</summary>\n\n"
+                     "```\n"
+                     (string-trim (sprig--tool-result-text .content))
+                     "\n```\n\n"
+                     "</details>"))))))))
 
 (defun sprig--finish-turn (cost is-error)
   "Close out the current turn.  COST and IS-ERROR come from the result event."
@@ -269,7 +394,9 @@ the role-tagged message list a stateless backend would send verbatim."
       (insert "\n\n"
               "<details><summary>" sprig-assistant-summary "</summary>\n"
               "<!-- sprig:reply id=" id " -->\n\n"))
-    (setq sprig--marker (copy-marker (point) t))))
+    (setq sprig--marker (copy-marker (point) t))
+    (setq sprig--emitted nil)
+    (setq sprig--blocks nil)))
 
 (defun sprig--close-reply (&optional interrupted)
   "Close the current reply block.  With INTERRUPTED, flag the reply marker."
