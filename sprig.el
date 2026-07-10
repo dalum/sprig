@@ -785,6 +785,10 @@ Works from the header line or anywhere in the body."
 (defun sprig--start-reply ()
   "Open a reply sentinel at end of buffer and arm the marker."
   (setq sprig--reply-id (sprig--next-reply-id))
+  ;; Bracket every edit this turn makes (scaffold, streamed tokens, close
+  ;; sentinel) so the whole reply collapses to one undo step, instead of
+  ;; leaving hundreds of per-token entries in the undo history.
+  (setq sprig--undo-handle (prepare-change-group))
   (goto-char (point-max))
   (skip-chars-backward " \t\n")
   (delete-region (point) (point-max))
@@ -805,6 +809,12 @@ Works from the header line or anywhere in the body."
       (insert "\n<!-- sprig:end id=" (or sprig--reply-id "r") " -->\n"))
     (set-marker sprig--marker (point))
     (when interrupted (sprig--flag-interrupted)))
+  ;; Fold the turn's edits into a single undo boundary.  Both the normal
+  ;; finish and the interrupt path reach here; an unexpected process death
+  ;; skips it, leaving ordinary per-edit undo for that partial reply.
+  (when sprig--undo-handle
+    (undo-amalgamate-change-group sprig--undo-handle)
+    (setq sprig--undo-handle nil))
   (sprig--decorate))
 
 (defun sprig--flag-interrupted ()
