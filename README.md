@@ -113,6 +113,7 @@ A single file can override the working directory with a `working_dir:` line in i
 
 - v0.2, written against `claude` 2.1.205. The protocol round-trip (streaming, multi-turn memory, session resume) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - Single file, one turn at a time per buffer.
+- Session ids are per-host: a file created against one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the transcript in the file is kept, but the new session does not carry the earlier turns' server-side memory (transcript replay is future work, see [DESIGN.md](DESIGN.md)).
 - `sprig-interrupt` currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
 - Forking, the `sprig-status` navigator, and concurrent streams from [DESIGN.md](DESIGN.md) are not built yet.
 - Loading the full CLAUDE.md/skills context on the session host adds cost per turn; a `--bare`-style lean mode is a possible future option, but `--bare` currently forces API-key auth, so it is off by the subscription path.

@@ -524,6 +524,13 @@ HEADER names what failed; BODY is the captured stderr or detail text."
                           "(no stderr output)")))))
     (display-buffer buf)))
 
+(defconst sprig--session-not-found-re
+  "No conversation found with session ID"
+  "Substring the CLI prints when a `--resume' id does not exist on the host.
+Session ids are per-host, so a file created on one machine (or the SSH
+host) cannot resume locally.  Sprig treats this as a signal to start a
+fresh session rather than fail.")
+
 (defun sprig--sentinel (proc event)
   "Report PROC lifecycle EVENT, logging stderr on an abnormal exit."
   (let ((buf (process-get proc :conv-buffer))
@@ -543,6 +550,18 @@ HEADER names what failed; BODY is the captured stderr or detail text."
              ((or deliberate (and (eq (process-status proc) 'exit)
                                   (zerop status)))
               (message "sprig: session ended (%s)" (string-trim event)))
+             ;; Stale/foreign resume id: the session does not exist on this
+             ;; host.  Drop it and reconnect fresh so the user is not stuck;
+             ;; the transcript in the file is kept, and the new session's id
+             ;; overwrites the stale one on init.  Only server-side memory of
+             ;; the prior turns is lost, and that was already gone.
+             ((and err sprig--session-id
+                   (string-match-p sprig--session-not-found-re err))
+              (let ((stale sprig--session-id))
+                (sprig--clear-session-id)
+                (message "sprig: session %s not found here; starting fresh (prior turns are not replayed)"
+                         stale)
+                (sprig-connect)))
              ;; An unexpected exit: surface why in the error buffer.
              (t
               (sprig--log-error
@@ -806,6 +825,17 @@ Works from the header line or anywhere in the body."
         (goto-char (point-min))
         (insert "---\n" line "\n---\n\n")))))
 
+(defun sprig--frontmatter-remove (key)
+  "Delete KEY's line from the YAML frontmatter, if present."
+  (save-excursion
+    (let ((inhibit-read-only t)
+          (end (sprig--frontmatter-end)))
+      (when end
+        (goto-char (point-min))
+        (when (re-search-forward
+               (concat "^" (regexp-quote key) ":.*\n?") end t)
+          (replace-match ""))))))
+
 (defun sprig--buffer-session-id ()
   "Return the `claude_session' id from the YAML frontmatter, or nil."
   (sprig--frontmatter-get "claude_session"))
@@ -813,6 +843,13 @@ Works from the header line or anywhere in the body."
 (defun sprig--save-session-id (id)
   "Store ID as `claude_session' in the buffer's YAML frontmatter."
   (sprig--frontmatter-set "claude_session" id))
+
+(defun sprig--clear-session-id ()
+  "Forget this buffer's session id, in memory and in the frontmatter.
+Used when a stored id no longer resolves on the session host, so the next
+connect starts a fresh session instead of resuming a dead one."
+  (setq sprig--session-id nil)
+  (sprig--frontmatter-remove "claude_session"))
 
 (defun sprig--tool-display ()
   "Return the effective tool-render level for this buffer.
