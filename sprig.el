@@ -957,7 +957,7 @@ Works from the header line or anywhere in the body."
         (goto-char (point-min))
         (when (re-search-forward
                (concat "^" (regexp-quote key) ":[ \t]*\\(.+\\)$") end t)
-          (string-trim (match-string 1)))))))
+          (string-trim (match-string-no-properties 1)))))))
 
 (defun sprig--frontmatter-set (key value)
   "Set KEY to VALUE in the YAML frontmatter, creating frontmatter if absent."
