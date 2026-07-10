@@ -430,13 +430,19 @@ message list a stateless backend would send verbatim."
 No-op until the reply has already emitted content, so it never disturbs
 the scaffold that precedes the first block."
   (when (and sprig--emitted sprig--marker (marker-buffer sprig--marker))
-    (save-excursion
-      (goto-char sprig--marker)
-      (let ((inhibit-read-only t))
-        (skip-chars-backward " \t\n")
-        (delete-region (point) (marker-position sprig--marker))
-        (insert "\n\n"))
-      (set-marker sprig--marker (point)))))
+    (let (line-beg)
+      (save-excursion
+        (goto-char sprig--marker)
+        (let ((inhibit-read-only t))
+          (skip-chars-backward " \t\n")
+          (setq line-beg (line-beginning-position))
+          (delete-region (point) (marker-position sprig--marker))
+          (insert "\n\n"))
+        (set-marker sprig--marker (point)))
+      ;; The line we backed onto may be a hidden `-end' sentinel whose
+      ;; trailing newline this rewrite just displaced; re-chrome it so the
+      ;; sentinel stays swallowed rather than surfacing as a blank line.
+      (sprig--decorate-region line-beg (marker-position sprig--marker)))))
 
 (defun sprig--pretty-json (raw)
   "Pretty-print RAW JSON text; return it trimmed if it will not parse."
@@ -482,18 +488,22 @@ Shows the command for Bash, the path for file tools, else pretty JSON."
 LANG is the fence info string.  When folding is on, the body is folded."
   (when (and sprig--marker (marker-buffer sprig--marker))
     (sprig--block-separator)
-    (save-excursion
-      (goto-char sprig--marker)
-      (let ((inhibit-read-only t)
-            (open-bol (point)))
-        (insert open "\n"
-                "```" (or lang "") "\n" body "\n```\n"
-                end)
-        (set-marker sprig--marker (point))
-        (setq sprig--emitted t)
-        (when sprig-fold-tool-calls
-          (sprig--fold-block-at open-bol))))
-    (sprig--decorate)))
+    (let (open-bol)
+      (save-excursion
+        (goto-char sprig--marker)
+        (setq open-bol (point))
+        (let ((inhibit-read-only t))
+          ;; The trailing newline completes the hidden END sentinel's line
+          ;; now, so `sprig--decorate-region' can swallow it; the separator
+          ;; before the next block normalises the whitespace away again.
+          (insert open "\n"
+                  "```" (or lang "") "\n" body "\n```\n"
+                  end "\n")
+          (set-marker sprig--marker (point))
+          (setq sprig--emitted t)
+          (when sprig-fold-tool-calls
+            (sprig--fold-block-at open-bol))))
+      (sprig--decorate-region open-bol (marker-position sprig--marker)))))
 
 (defun sprig--emit-tool-call (id name json)
   "Render a tool-call block for tool NAME (id ID) with input JSON.
@@ -791,43 +801,68 @@ sentinel) is rescanned; settled turns are handled by `sprig--decorate'."
             (goto-char (point-max))))
         (sprig--face-user gap-beg (point-max))))))
 
+(defun sprig--decorate-sentinels (beg end)
+  "Give every `sprig:' sentinel line within BEG..END its chrome overlay.
+The caller clears any existing chrome in the region first; BEG and END
+should already bound whole lines.  Fold overlays are left untouched."
+  (save-excursion
+    (goto-char beg)
+    (while (re-search-forward sprig--sentinel-re end t)
+      ;; Capture the match bounds first: `sprig--sentinel-label' runs
+      ;; `string-match' internally, which would clobber the match data.
+      (let* ((mb (match-beginning 0))
+             (me (match-end 0))
+             (label (sprig--sentinel-label (match-string 1) (match-string 2)))
+             ;; A labeled sentinel leaves its terminating newline visible so
+             ;; point has somewhere to rest and vertical motion can cross the
+             ;; header; an unlabeled (hidden) one swallows the newline so the
+             ;; whole line disappears.
+             (ov-end (if label me (min (point-max) (1+ me))))
+             (ov (make-overlay mb ov-end)))
+        (overlay-put ov 'sprig-chrome t)
+        (overlay-put ov 'invisible 'sprig-chrome)
+        (overlay-put ov 'evaporate t)
+        (overlay-put ov 'modification-hooks '(sprig--edit-guard))
+        (when label
+          (overlay-put ov 'before-string label)
+          ;; The sentinel's terminating newline is left visible (so point
+          ;; can cross the header); guard just that char so it can't be
+          ;; deleted, which would merge the next line into the hidden line.
+          (when (< me (point-max))
+            (let ((g (make-overlay me (1+ me))))
+              (overlay-put g 'sprig-chrome t)
+              (overlay-put g 'evaporate t)
+              (overlay-put g 'modification-hooks '(sprig--edit-guard)))))))))
+
 (defun sprig--decorate ()
-  "Rebuild the chrome and user-turn overlays from the buffer's sentinels.
+  "Rebuild the chrome and user-turn overlays across the whole buffer.
 Hides each sentinel line and, for open sentinels, shows a header or rule
 in its place; faces the user turns between replies.  Leaves the fold
-overlays untouched."
+overlays untouched.  Used on mode enable and when reopening a file; the
+streaming paths use `sprig--decorate-region' to stay bounded."
   (sprig--decorate-user-turns)
   (when sprig-hide-sentinels
     (sprig--ensure-invisibility)
     (remove-overlays (point-min) (point-max) 'sprig-chrome t)
+    (sprig--decorate-sentinels (point-min) (point-max))))
+
+(defun sprig--decorate-region (beg end)
+  "Re-apply sentinel chrome to the whole lines spanned by BEG..END.
+Bounded counterpart to `sprig--decorate' for a streamed insertion: a
+reply that emits many tool blocks re-chromes each block's own lines
+instead of rescanning the buffer, so decoration cost stays proportional
+to the insertion, not the transcript.  User-turn faces are left alone,
+since streamed content lands inside a reply span, never in a user gap."
+  (when sprig-hide-sentinels
+    (sprig--ensure-invisibility)
     (save-excursion
-      (goto-char (point-min))
-      (while (re-search-forward sprig--sentinel-re nil t)
-        ;; Capture the match bounds first: `sprig--sentinel-label' runs
-        ;; `string-match' internally, which would clobber the match data.
-        (let* ((mb (match-beginning 0))
-               (me (match-end 0))
-               (label (sprig--sentinel-label (match-string 1) (match-string 2)))
-               ;; A labeled sentinel leaves its terminating newline visible so
-               ;; point has somewhere to rest and vertical motion can cross the
-               ;; header; an unlabeled (hidden) one swallows the newline so the
-               ;; whole line disappears.
-               (end (if label me (min (point-max) (1+ me))))
-               (ov (make-overlay mb end)))
-          (overlay-put ov 'sprig-chrome t)
-          (overlay-put ov 'invisible 'sprig-chrome)
-          (overlay-put ov 'evaporate t)
-          (overlay-put ov 'modification-hooks '(sprig--edit-guard))
-          (when label
-            (overlay-put ov 'before-string label)
-            ;; The sentinel's terminating newline is left visible (so point
-            ;; can cross the header); guard just that char so it can't be
-            ;; deleted, which would merge the next line into the hidden line.
-            (when (< me (point-max))
-              (let ((g (make-overlay me (1+ me))))
-                (overlay-put g 'sprig-chrome t)
-                (overlay-put g 'evaporate t)
-                (overlay-put g 'modification-hooks '(sprig--edit-guard))))))))))
+      (goto-char beg) (setq beg (line-beginning-position))
+      ;; Extend END past the final line's newline so the removal sweeps up
+      ;; any newline-guard overlay a labeled sentinel left there; otherwise
+      ;; re-chroming the line would duplicate the guard.
+      (goto-char end) (setq end (min (point-max) (1+ (line-end-position))))
+      (remove-overlays beg end 'sprig-chrome t)
+      (sprig--decorate-sentinels beg end))))
 
 ;;;; Folding
 
@@ -898,30 +933,37 @@ Works from the header line or anywhere in the body."
   (goto-char (point-max))
   (skip-chars-backward " \t\n")
   (delete-region (point) (point-max))
-  (let ((inhibit-read-only t))
-    (insert "\n\n<!-- sprig:reply id=" sprig--reply-id " -->\n\n"))
-  (setq sprig--marker (copy-marker (point) t))
-  (setq sprig--emitted nil)
-  (setq sprig--blocks nil)
-  (sprig--decorate))
+  (let ((beg (point))
+        (inhibit-read-only t))
+    (insert "\n\n<!-- sprig:reply id=" sprig--reply-id " -->\n\n")
+    (setq sprig--marker (copy-marker (point) t))
+    (setq sprig--emitted nil)
+    (setq sprig--blocks nil)
+    ;; The user turn just above keeps its live-typed face; only the new
+    ;; reply-open line needs chrome, so a bounded decorate suffices.
+    (sprig--decorate-region beg (point))))
 
 (defun sprig--close-reply (&optional interrupted)
   "Close the current reply.  With INTERRUPTED, flag the reply sentinel."
   (when (and sprig--marker (marker-buffer sprig--marker))
     (goto-char sprig--marker)
-    (let ((inhibit-read-only t))
+    (let ((inhibit-read-only t)
+          beg)
       (skip-chars-backward " \t\n")
+      (setq beg (point))
       (delete-region (point) (marker-position sprig--marker))
-      (insert "\n<!-- sprig:end id=" (or sprig--reply-id "r") " -->\n"))
-    (set-marker sprig--marker (point))
-    (when interrupted (sprig--flag-interrupted)))
+      (insert "\n<!-- sprig:end id=" (or sprig--reply-id "r") " -->\n")
+      (set-marker sprig--marker (point))
+      ;; `sprig--flag-interrupted' re-chromes the reply-open line it edits,
+      ;; so here we only need to chrome the freshly inserted end sentinel.
+      (when interrupted (sprig--flag-interrupted))
+      (sprig--decorate-region beg (point))))
   ;; Fold the turn's edits into a single undo boundary.  Both the normal
   ;; finish and the interrupt path reach here; an unexpected process death
   ;; skips it, leaving ordinary per-edit undo for that partial reply.
   (when sprig--undo-handle
     (undo-amalgamate-change-group sprig--undo-handle)
-    (setq sprig--undo-handle nil))
-  (sprig--decorate))
+    (setq sprig--undo-handle nil)))
 
 (defun sprig--flag-interrupted ()
   "Add an `interrupted' flag to the current reply's open sentinel."
@@ -932,7 +974,11 @@ Works from the header line or anywhere in the body."
     (when (re-search-backward sprig--reply-open-re nil t)
       (unless (string-match-p "interrupted" (match-string 1))
         (let ((inhibit-read-only t))
-          (replace-match "<!-- sprig:reply\\1 interrupted -->"))))))
+          (replace-match "<!-- sprig:reply\\1 interrupted -->"))
+        ;; The edit evaporated this line's old chrome; re-chrome it so the
+        ;; divider picks up the "(interrupted)" suffix.
+        (sprig--decorate-region (line-beginning-position)
+                                (line-end-position))))))
 
 ;;;; Session-id persistence via YAML frontmatter
 
