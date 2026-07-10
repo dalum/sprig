@@ -122,12 +122,15 @@ With `use-package` and a local checkout:
 | `sprig-assistant-summary` | `"assistant"` | Label in the reply `<details>` summary |
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
+| `sprig-auto-title` | `t` | After the first reply, name a titleless branch from the opening exchange |
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 | `sprig-show-cost` | `nil` | Append the turn's notional cost to the done message (off, since it is not real spend on a subscription) |
 | `sprig-status-directories` | `nil` | Directories the navigator scans for branch files (nil = open buffers' dirs plus `sprig-directory`) |
 | `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
 
 A single file can override the working directory with a `working_dir:` line in its YAML frontmatter, so one branch can run against a different project than the `sprig-directory` default. The value may use `~` and, for a remote session, is resolved on the SSH host.
+
+The navigator's Title column comes from a `title:` frontmatter line, falling back to the file name. With `sprig-auto-title` on, a branch that has no `title:` yet gets one after its first reply: a short throwaway `claude` run (using `sprig-model`) turns the opening user turn and reply into a label, the same recipe the CLI uses to name its own sessions. A `title:` you write by hand is always left alone.
 
 ## Status / caveats
 

@@ -110,6 +110,14 @@ for a remote session, is interpreted on the SSH host."
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
+(defcustom sprig-auto-title t
+  "When non-nil, name a titleless buffer after its first reply.
+A short side query (a throwaway `claude' run using `sprig-model') turns
+the first exchange into a label, stored as a `title:' frontmatter line
+and shown in the `sprig-status' navigator.  A `title:' you set by hand
+is always left untouched."
+  :type 'boolean)
+
 (defcustom sprig-fold-tool-calls t
   "When non-nil, fold tool-call and result blocks to their header.
 Folding hides the body in this buffer only; the full content stays in
@@ -209,6 +217,8 @@ the streamed `input_json_delta' fragments until the block closes.")
   "Change-group handle bracketing the in-flight turn's edits.
 Opened in `sprig--start-reply' and amalgamated in `sprig--close-reply' so
 a whole streamed reply collapses to a single undo step.")
+(defvar-local sprig--title-process nil
+  "In-flight side process generating this buffer's `title:', or nil.")
 
 ;;;; Sentinel grammar
 
@@ -523,7 +533,106 @@ Rendered only when `sprig--tool-display' is `full'."
   (message "sprig: turn done%s%s"
            (if (and sprig-show-cost cost) (format " ($%.4f)" cost) "")
            (if is-error " [error]" ""))
+  (unless is-error (sprig--maybe-generate-title))
   (sprig--status-refresh))
+
+;;;; Auto title
+
+(defun sprig--truncate (s n)
+  "Return the first N characters of S."
+  (if (> (length s) n) (substring s 0 n) s))
+
+(defun sprig--truncate-words (s n)
+  "Truncate S to at most N characters, backing off to a word boundary.
+A back-off happens only when the cut falls inside a word, so a label that
+ends cleanly at the limit is kept whole."
+  (if (<= (length s) n) s
+    (let ((cut (substring s 0 n)))
+      (if (and (not (string-match-p "\\s-" (substring s n (1+ n))))
+               (string-match-p "\\s-" cut))
+          (replace-regexp-in-string "\\s-+\\S-*\\'" "" cut)
+        cut))))
+
+(defun sprig--title-prompt (user reply)
+  "Build the naming prompt from the first USER turn and first REPLY.
+Mirrors the CLI's own session-naming recipe: the opening exchange plus an
+instruction to answer with only a short, specific label."
+  (concat "User: \"" (sprig--truncate (string-trim user) 300) "\""
+          (if (and reply (not (string-empty-p (string-trim reply))))
+              (concat "\nAgent: \"" (sprig--truncate (string-trim reply) 300) "\"")
+            "")
+          "\n\nGenerate a short label (2-5 words) naming this conversation. "
+          "Include the MOST SPECIFIC identifier (component/file/feature). "
+          "Skip generic verbs like fix/add/update. Respond with ONLY the label."))
+
+(defun sprig--title-command (prompt)
+  "Command vector for a throwaway `claude' run that answers PROMPT.
+No session resume, no tools, plain-text output; SSH-wrapped like a session
+when `sprig-remote' is set."
+  (let ((args (append (list sprig-program "-p" prompt "--allowedTools" "")
+                      (when sprig-model (list "--model" sprig-model)))))
+    (if sprig-remote
+        (append (list sprig-ssh-program) sprig-ssh-args
+                (list sprig-remote (mapconcat #'shell-quote-argument args " ")))
+      args)))
+
+(defun sprig--clean-title (raw)
+  "Normalise RAW model output into a session label, or nil if degenerate.
+Takes the first non-empty line, strips surrounding quotes, lower-cases it,
+and caps it at 40 characters, matching the CLI's post-processing."
+  (let ((line (seq-find (lambda (l) (not (string-empty-p l)))
+                        (mapcar #'string-trim (split-string (or raw "") "\n")))))
+    (when line
+      (let ((s (string-trim
+                (replace-regexp-in-string "\\`[\"'`]+\\|[\"'`.]+\\'" ""
+                                          (downcase line)))))
+        (when (string-match-p "[a-z0-9]" s)
+          (sprig--truncate-words s 40))))))
+
+(defun sprig--maybe-generate-title ()
+  "Start async title generation for a titleless buffer, if warranted.
+No-op when `sprig-auto-title' is off, a `title:' already exists, a
+generation is already in flight, or there is no user turn to summarise."
+  (when (and sprig-auto-title
+             (not (sprig--frontmatter-get "title"))
+             (not (process-live-p sprig--title-process)))
+    (let ((turns (sprig--turns)))
+      (let ((user (cdr (assq 'user turns)))
+            (reply (cdr (assq 'assistant turns))))
+        (when (and user (not (string-empty-p (string-trim user))))
+          (sprig--start-title-generation user reply))))))
+
+(defun sprig--start-title-generation (user reply)
+  "Spawn the side query that names this buffer from USER and REPLY."
+  (let ((conv (current-buffer))
+        (out (generate-new-buffer " *sprig-title*")))
+    (setq sprig--title-process
+          (make-process
+           :name "sprig-title"
+           :buffer out
+           :command (sprig--title-command (sprig--title-prompt user reply))
+           :connection-type 'pipe
+           :coding 'utf-8-unix
+           :noquery t
+           :stderr (make-pipe-process :name "sprig-title-stderr" :buffer nil
+                                      :noquery t :filter #'ignore :sentinel #'ignore)
+           :sentinel (lambda (proc _event)
+                       (unless (process-live-p proc)
+                         (sprig--title-finish conv proc)))))))
+
+(defun sprig--title-finish (conv proc)
+  "Apply PROC's output as CONV's `title:', unless one appeared meanwhile."
+  (let ((raw (and (buffer-live-p (process-buffer proc))
+                  (with-current-buffer (process-buffer proc) (buffer-string)))))
+    (when (buffer-live-p (process-buffer proc))
+      (kill-buffer (process-buffer proc)))
+    (when (buffer-live-p conv)
+      (with-current-buffer conv
+        (setq sprig--title-process nil)
+        (let ((label (sprig--clean-title raw)))
+          (when (and label (not (sprig--frontmatter-get "title")))
+            (sprig--frontmatter-set "title" label)
+            (sprig--status-refresh)))))))
 
 (defun sprig--make-stderr ()
   "Return a pipe process that accumulates the session's stderr.
