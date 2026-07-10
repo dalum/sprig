@@ -59,6 +59,7 @@
 (require 'json)
 (require 'seq)
 (require 'subr-x)
+(require 'tabulated-list)
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
@@ -148,6 +149,20 @@ sentinel and the next `reply')."
 When a session exits abnormally, its command, exit status, and captured
 stderr are appended here and the buffer is displayed."
   :type 'string)
+
+(defcustom sprig-show-cost nil
+  "When non-nil, append each turn's reported cost to the done message.
+The CLI's `total_cost_usd' is a notional API-equivalent figure, not real
+spend on a Pro/Max subscription, so it is off by default."
+  :type 'boolean)
+
+(defcustom sprig-status-directories nil
+  "Directories the `sprig-status' navigator scans for branch files.
+When nil, scan the directories of the open Sprig buffers plus
+`sprig-directory' (skipped for a remote session, whose files live on the
+SSH host).  Each entry may use a leading `~'."
+  :type '(choice (const :tag "Auto (open buffers + sprig-directory)" nil)
+                 (repeat directory)))
 
 (defface sprig-tool '((t :inherit font-lock-keyword-face :weight bold))
   "Face for tool-call and result header labels.")
@@ -491,8 +506,9 @@ Rendered only when `sprig--tool-display' is `full'."
   (when (and sprig--marker (marker-buffer sprig--marker))
     (goto-char sprig--marker))
   (message "sprig: turn done%s%s"
-           (if cost (format " ($%.4f)" cost) "")
-           (if is-error " [error]" "")))
+           (if (and sprig-show-cost cost) (format " ($%.4f)" cost) "")
+           (if is-error " [error]" ""))
+  (sprig--status-refresh))
 
 (defun sprig--make-stderr ()
   "Return a pipe process that accumulates the session's stderr.
@@ -545,6 +561,7 @@ fresh session rather than fail.")
           (with-current-buffer buf
             (setq sprig--process nil
                   sprig--busy nil)
+            (sprig--status-refresh)
             (cond
              ;; A clean, expected teardown: interrupt, disconnect, or exit 0.
              ((or deliberate (and (eq (process-status proc) 'exit)
@@ -905,7 +922,8 @@ environment variable is resolved wherever the session runs."
     (message "sprig: %s (%s%s)"
              (if sprig--session-id "resuming session" "new session")
              (if sprig-remote (concat "ssh " sprig-remote) "local")
-             (if dir (concat " in " dir) ""))))
+             (if dir (concat " in " dir) ""))
+    (sprig--status-refresh)))
 
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
@@ -933,7 +951,8 @@ The pending turn is the prose typed after the last reply."
       (user-error "No pending message: type below the last reply first"))
     (setq sprig--busy t)
     (sprig--start-reply)
-    (sprig--send-user text)))
+    (sprig--send-user text)
+    (sprig--status-refresh)))
 
 ;;;###autoload
 (defun sprig-interrupt ()
@@ -948,7 +967,8 @@ The pending turn is the prose typed after the last reply."
     (sprig--close-reply t)
     (when (and sprig--marker (marker-buffer sprig--marker))
       (goto-char sprig--marker))
-    (message "sprig: interrupted (session resumes on next send)")))
+    (message "sprig: interrupted (session resumes on next send)")
+    (sprig--status-refresh)))
 
 ;;;###autoload
 (defun sprig-disconnect ()
@@ -958,7 +978,8 @@ The pending turn is the prose typed after the last reply."
       (progn (process-put sprig--process :deliberate t)
              (delete-process sprig--process)
              (setq sprig--process nil sprig--busy nil)
-             (message "sprig: disconnected"))
+             (message "sprig: disconnected")
+             (sprig--status-refresh))
     (message "sprig: no live session")))
 
 ;;;###autoload
@@ -1020,6 +1041,311 @@ Works from the header line or anywhere in the body."
               (sprig--fold-block-at beg)
             (user-error "Not on a tool-call block")))))))
 
+;;;; Status navigator
+
+(defconst sprig-status-buffer-name "*sprig-status*"
+  "Name of the buffer showing the `sprig-status' navigator.")
+
+(defconst sprig--status-scan-bytes 8192
+  "Leading bytes of a candidate .md file read when scanning for branches.")
+
+(defconst sprig--status-glyphs
+  '((streaming    . "▶")
+    (idle         . "●")
+    (interrupted  . "◼")
+    (disconnected . "○"))
+  "Glyph shown in the status column for each session state.")
+
+;;; Enumeration and per-buffer status
+
+(defun sprig--conversation-buffer-p (buf)
+  "Non-nil if BUF is a live Sprig conversation buffer.
+Keys on `sprig-mode' or lingering session state, so the `*sprig-status*'
+buffer (a major-mode buffer with no sprig state) never qualifies."
+  (and (buffer-live-p buf)
+       (or (buffer-local-value 'sprig-mode buf)
+           (buffer-local-value 'sprig--process buf)
+           (buffer-local-value 'sprig--session-id buf))))
+
+(defun sprig--conversation-buffers ()
+  "Return the list of live Sprig conversation buffers."
+  (seq-filter #'sprig--conversation-buffer-p (buffer-list)))
+
+(defun sprig--last-reply-interrupted-p ()
+  "Non-nil if the buffer's last reply-open sentinel carries `interrupted'.
+Cheap: `re-search-backward' from `point-max' stops at the last reply."
+  (save-excursion
+    (goto-char (point-max))
+    (and (re-search-backward sprig--reply-open-re nil t)
+         (string-match-p "\\binterrupted\\b"
+                         (buffer-substring-no-properties
+                          (line-beginning-position) (line-end-position))))))
+
+(defun sprig--buffer-status (&optional buf)
+  "Return the status of conversation BUF.
+One of `streaming', `idle', `interrupted', or `disconnected'.  Cheapest
+checks first; the interrupted scan is reached only when no process lives."
+  (with-current-buffer (or buf (current-buffer))
+    (cond
+     (sprig--busy 'streaming)
+     ((process-live-p sprig--process) 'idle)
+     ((sprig--last-reply-interrupted-p) 'interrupted)
+     (t 'disconnected))))
+
+(defun sprig--buffer-title (&optional buf)
+  "Return BUF's display title: `title' frontmatter, else a name fallback."
+  (with-current-buffer (or buf (current-buffer))
+    (or (sprig--frontmatter-get "title")
+        (and buffer-file-name (file-name-base buffer-file-name))
+        (buffer-name))))
+
+;;; On-disk branch-file scan
+
+(defmacro sprig--with-file-head (file &rest body)
+  "Run BODY in a temp buffer holding the leading bytes of FILE."
+  (declare (indent 1) (debug (form body)))
+  `(with-temp-buffer
+     (insert-file-contents ,file nil 0 sprig--status-scan-bytes)
+     ,@body))
+
+(defun sprig--branch-file-p (file)
+  "Non-nil if FILE looks like a Sprig branch file.
+True when its head carries a `claude_session:' frontmatter key or a
+`sprig:reply' sentinel.  Reads only the leading bytes; a plain Markdown
+file (even one with a `title:') is skipped."
+  (ignore-errors
+    (sprig--with-file-head file
+      (goto-char (point-min))
+      (or (re-search-forward "^claude_session:[ \t]*\\S-" nil t)
+          (re-search-forward "^<!-- sprig:reply\\b" nil t)))))
+
+(defun sprig--file-frontmatter-get (file key)
+  "Read KEY from FILE's YAML frontmatter without visiting it."
+  (ignore-errors
+    (sprig--with-file-head file (sprig--frontmatter-get key))))
+
+(defun sprig--status-scan-directories ()
+  "Resolve the directories to scan for branch files, deduped by truename.
+When `sprig-status-directories' is nil, use the directories of the open
+Sprig buffers plus `sprig-directory' (skipped for a remote session)."
+  (let ((dirs (if sprig-status-directories
+                  (mapcar #'expand-file-name sprig-status-directories)
+                (append
+                 (and sprig-directory (not sprig-remote)
+                      (list (expand-file-name sprig-directory)))
+                 (delq nil
+                       (mapcar (lambda (b)
+                                 (let ((f (buffer-local-value 'buffer-file-name b)))
+                                   (and f (file-name-directory f))))
+                               (sprig--conversation-buffers)))))))
+    (seq-uniq (delq nil (mapcar (lambda (d)
+                                  (and (file-directory-p d) (file-truename d)))
+                                dirs))
+              #'string=)))
+
+(defun sprig--scan-branch-files ()
+  "Return the Sprig branch files under `sprig--status-scan-directories'.
+Non-recursive; unreadable files are skipped."
+  (let (files)
+    (dolist (dir (sprig--status-scan-directories))
+      (dolist (f (ignore-errors (directory-files dir t "\\.md\\'" t)))
+        (when (and (file-regular-p f) (sprig--branch-file-p f))
+          (push f files))))
+    files))
+
+;;; Merge open buffers and on-disk files into rows
+
+(defun sprig--status-collect ()
+  "Return status plists for all sessions, deduped by file truename.
+Each plist has :key, :buffer (or nil), :file (or nil), :title, :status,
+and :session.  An open buffer wins over its on-disk file."
+  (let ((table (make-hash-table :test 'equal))
+        (order '()))
+    (dolist (buf (sprig--conversation-buffers))
+      (let* ((file (buffer-local-value 'buffer-file-name buf))
+             (key (if file (file-truename file) buf)))
+        (unless (gethash key table)
+          (push key order)
+          (puthash key
+                   (list :key key :buffer buf :file file
+                         :title (sprig--buffer-title buf)
+                         :status (sprig--buffer-status buf)
+                         :session (buffer-local-value 'sprig--session-id buf))
+                   table))))
+    (dolist (file (sprig--scan-branch-files))
+      (let ((key (file-truename file)))
+        (unless (gethash key table)
+          (push key order)
+          (puthash key
+                   (list :key key :buffer nil :file file
+                         :title (or (sprig--file-frontmatter-get file "title")
+                                    (file-name-base file))
+                         :status 'disconnected
+                         :session (sprig--file-frontmatter-get file "claude_session"))
+                   table))))
+    (mapcar (lambda (k) (gethash k table)) (nreverse order))))
+
+;;; tabulated-list rendering
+
+(defun sprig--status-face (status)
+  "Return the face used for STATUS."
+  (pcase status
+    ('streaming 'warning)
+    ('idle 'success)
+    ('interrupted 'font-lock-comment-face)
+    (_ 'shadow)))
+
+(defvar-local sprig--status-index nil
+  "Hash mapping the current render's entry ids to their status plists.")
+
+(defun sprig--status-entries ()
+  "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
+The entry id is the file path (a stable string) when there is one, else
+the buffer object; both are stable across refreshes so point is kept."
+  (let ((index (make-hash-table :test 'equal))
+        rows)
+    (dolist (e (sprig--status-collect))
+      (let* ((id (or (plist-get e :file) (plist-get e :buffer)))
+             (status (plist-get e :status))
+             (file (plist-get e :file))
+             (session (plist-get e :session))
+             (glyph (propertize (or (alist-get status sprig--status-glyphs) "?")
+                                'face (sprig--status-face status))))
+        (puthash id e index)
+        (push (list id
+                    (vector glyph
+                            (or (plist-get e :title) "")
+                            (if file (file-name-nondirectory file) "(no file)")
+                            (if (and session (> (length session) 0))
+                                (substring session 0 (min 8 (length session)))
+                              "-")))
+              rows)))
+    (setq sprig--status-index index)
+    (nreverse rows)))
+
+;;; Major mode, verbs, and the entry command
+
+(defvar sprig-status-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-status-mode'.")
+
+;; Bound at top level so reloading the file refreshes the bindings.
+;; `g' (revert) and `q' (quit-window) are inherited from tabulated-list-mode.
+(define-key sprig-status-mode-map (kbd "RET") #'sprig-status-open)
+(define-key sprig-status-mode-map (kbd "o")   #'sprig-status-open)
+(define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
+(define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
+(define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
+(define-key sprig-status-mode-map (kbd "f")   #'sprig-status-fork)
+(define-key sprig-status-mode-map (kbd "r")   #'sprig-status-rename)
+(define-key sprig-status-mode-map (kbd "x")   #'sprig-status-prune)
+(define-key sprig-status-mode-map (kbd "?")   #'describe-mode)
+
+(define-derived-mode sprig-status-mode tabulated-list-mode "Sprig-Status"
+  "Major mode listing Sprig conversations and their live status.
+\\<sprig-status-mode-map>Open with \\[sprig-status-open], connect with
+\\[sprig-status-connect], interrupt with \\[sprig-status-interrupt],
+disconnect with \\[sprig-status-disconnect], refresh with \\[revert-buffer]."
+  (setq tabulated-list-format
+        [("S" 2 t)
+         ("Title" 28 t)
+         ("File" 28 t)
+         ("Session" 9 nil)]
+        tabulated-list-padding 1
+        tabulated-list-sort-key '("Title" . nil)
+        tabulated-list-entries #'sprig--status-entries)
+  (tabulated-list-init-header))
+
+(defun sprig--status-refresh ()
+  "Re-render the `*sprig-status*' navigator if it is live; else do nothing.
+Called from session lifecycle points, so a stream finishing in a buffer
+you are not viewing still updates the list.  A no-op, and thus free, when
+the navigator is not open."
+  (let ((buf (get-buffer sprig-status-buffer-name)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when (derived-mode-p 'sprig-status-mode)
+          (tabulated-list-print t))))))
+
+(defun sprig--status-refresh-deferred ()
+  "Refresh the navigator on the next idle moment.
+Used from `kill-buffer-hook', which runs while the dying buffer is still
+live and listed; deferring lets it drop from the list first."
+  (run-at-time 0 nil #'sprig--status-refresh))
+
+(defun sprig--status-entry-at-point ()
+  "Return the status plist for the row at point, or signal an error."
+  (let ((id (tabulated-list-get-id)))
+    (or (and id sprig--status-index (gethash id sprig--status-index))
+        (user-error "No Sprig session on this line"))))
+
+(defun sprig--status-buffer-at-point (&optional create)
+  "Return the live conversation buffer for the row at point, or nil.
+With CREATE, open the row's on-disk file when it has no live buffer."
+  (let* ((e (sprig--status-entry-at-point))
+         (buf (plist-get e :buffer))
+         (file (plist-get e :file)))
+    (cond ((buffer-live-p buf) buf)
+          ((and create file) (find-file-noselect file))
+          (t nil))))
+
+(defun sprig-status-open ()
+  "Visit the conversation on the current line."
+  (interactive)
+  (let ((buf (sprig--status-buffer-at-point t)))
+    (if buf (pop-to-buffer buf) (user-error "Nothing to open here"))))
+
+(defun sprig-status-connect ()
+  "Connect the session on the current line, opening its file if needed."
+  (interactive)
+  (with-current-buffer (or (sprig--status-buffer-at-point t)
+                           (user-error "No file to connect here"))
+    (unless (bound-and-true-p sprig-mode) (sprig-mode 1))
+    (sprig-connect))
+  (sprig--status-refresh))
+
+(defun sprig-status-interrupt ()
+  "Interrupt the streaming session on the current line."
+  (interactive)
+  (let ((buf (sprig--status-buffer-at-point)))
+    (unless buf (user-error "That row is not a connected session"))
+    (with-current-buffer buf (sprig-interrupt))
+    (sprig--status-refresh)))
+
+(defun sprig-status-disconnect ()
+  "Disconnect the session on the current line."
+  (interactive)
+  (let ((buf (sprig--status-buffer-at-point)))
+    (unless buf (user-error "That row is not a connected session"))
+    (with-current-buffer buf (sprig-disconnect))
+    (sprig--status-refresh)))
+
+(defun sprig-status-fork ()
+  "Fork the branch on the current line (not implemented yet)."
+  (interactive)
+  (user-error "sprig: fork is not implemented yet (planned; see DESIGN.md)"))
+
+(defun sprig-status-rename ()
+  "Rename the branch on the current line (not implemented yet)."
+  (interactive)
+  (user-error "sprig: rename is not implemented yet"))
+
+(defun sprig-status-prune ()
+  "Prune the branch on the current line (not implemented yet)."
+  (interactive)
+  (user-error "sprig: prune is not implemented yet"))
+
+;;;###autoload
+(defun sprig-status ()
+  "Open the `*sprig-status*' navigator listing Sprig sessions.
+Lists every open conversation buffer with its live status, plus unopened
+branch files found under `sprig-status-directories'."
+  (interactive)
+  (let ((buf (get-buffer-create sprig-status-buffer-name)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'sprig-status-mode) (sprig-status-mode))
+      (tabulated-list-print t))
+    (pop-to-buffer buf)))
+
 ;;;; Minor mode / keymap
 
 (defvar sprig-mode-map (make-sparse-keymap)
@@ -1033,19 +1359,30 @@ Works from the header line or anywhere in the body."
 (define-key sprig-mode-map (kbd "C-c C-a C-k") #'sprig-disconnect)
 (define-key sprig-mode-map (kbd "C-c C-f")     #'sprig-toggle-fold)
 
+(defun sprig--mode-line ()
+  "Return the `sprig-mode' lighter reflecting this buffer's live status.
+Kept cheap: reads only `sprig--busy' and the process handle (it runs on
+every redisplay), never the interrupted scan."
+  (concat " Sprig"
+          (cond (sprig--busy ":▶")
+                ((process-live-p sprig--process) ":●")
+                (t ""))))
+
 ;;;###autoload
 (define-minor-mode sprig-mode
   "Minor mode for conversing with an agent in a Markdown buffer."
-  :lighter " Sprig"
+  :lighter (:eval (sprig--mode-line))
   :keymap sprig-mode-map
   (if sprig-mode
       (progn
         (add-to-invisibility-spec 'sprig-chrome)
         (add-to-invisibility-spec '(sprig-fold . t))
         (add-hook 'after-change-functions #'sprig--refresh-pending-face nil t)
+        (add-hook 'kill-buffer-hook #'sprig--status-refresh-deferred nil t)
         (sprig--decorate)
         (when sprig-fold-tool-calls (sprig-fold-all)))
     (remove-hook 'after-change-functions #'sprig--refresh-pending-face t)
+    (remove-hook 'kill-buffer-hook #'sprig--status-refresh-deferred t)
     (remove-from-invisibility-spec 'sprig-chrome)
     (remove-from-invisibility-spec '(sprig-fold . t))
     (remove-overlays (point-min) (point-max) 'sprig-chrome t)
