@@ -1,7 +1,7 @@
 ;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.3.2
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -36,7 +36,9 @@
 ;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
 ;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription), so
 ;; no API key is required.  The agent runs with its normal tools, so a
-;; reply may run commands and edit files.
+;; reply may run commands and edit files.  It works in the conversation
+;; file's directory unless a `working_dir:' frontmatter line (or the
+;; `sprig-directory' default) points it elsewhere.
 ;;
 ;; One buffer is one branch.  Connect with `sprig-connect', type a
 ;; message below the last reply, and send it with `sprig-send' (C-c C-c).
@@ -81,6 +83,14 @@ When nil, the session runs locally."
   "Extra arguments passed to SSH (before the destination).
 `-T' disables pseudo-tty allocation, which is what we want for a pipe."
   :type '(repeat string))
+
+(defcustom sprig-directory nil
+  "Working directory for the agent session, or nil.
+When nil, a local session runs in the conversation file's directory and
+a remote session in the SSH login directory.  A file overrides this with
+a `working_dir:' line in its YAML frontmatter.  The value may use `~' and,
+for a remote session, is interpreted on the SSH host."
+  :type '(choice (const :tag "Default" nil) (directory :tag "Directory")))
 
 (defcustom sprig-model "claude-opus-4-8"
   "Model id, or nil to let the CLI choose its default."
@@ -197,14 +207,30 @@ Group 1 is the kind, group 2 the attribute text (id, name, flags).")
      (list "--resume" sprig--session-id))
    sprig-extra-args))
 
+(defun sprig--remote-dir-arg (dir)
+  "Return DIR shell-quoted for a remote `cd', keeping a leading `~' live.
+`shell-quote-argument' would escape a leading tilde and defeat the remote
+shell's home expansion, so quote only the part after any `~' prefix."
+  (if (string-match "\\`\\(~[^/]*\\)\\(.*\\)\\'" dir)
+      (let ((rest (match-string 2 dir)))
+        (concat (match-string 1 dir)
+                (if (string-empty-p rest) "" (shell-quote-argument rest))))
+    (shell-quote-argument dir)))
+
 (defun sprig--command ()
-  "Full command vector for `make-process', local or via SSH."
-  (let ((args (cons sprig-program (sprig--base-args))))
+  "Full command vector for `make-process', local or via SSH.
+A local session's working directory is set by `sprig-connect' binding
+`default-directory'; a remote session's is set here by prefixing a `cd'."
+  (let ((args (cons sprig-program (sprig--base-args)))
+        (dir (sprig--directory)))
     (if sprig-remote
-        (append (list sprig-ssh-program)
-                sprig-ssh-args
-                (list sprig-remote
-                      (mapconcat #'shell-quote-argument args " ")))
+        (let ((remote (mapconcat #'shell-quote-argument args " ")))
+          (when dir
+            (setq remote (concat "cd " (sprig--remote-dir-arg dir)
+                                 " && exec " remote)))
+          (append (list sprig-ssh-program)
+                  sprig-ssh-args
+                  (list sprig-remote remote)))
       args)))
 
 ;;;; Buffer parsing: frontmatter, turns
@@ -743,6 +769,15 @@ A `sprig_tools:' frontmatter line (none, calls, or full) overrides the
         (intern v)
       sprig-render-tools)))
 
+(defun sprig--directory ()
+  "Return the working directory configured for this buffer, or nil.
+A `working_dir:' frontmatter line overrides the `sprig-directory' default.
+The raw string is returned unexpanded, so a leading `~' or an
+environment variable is resolved wherever the session runs."
+  (let ((v (or (sprig--frontmatter-get "working_dir") sprig-directory)))
+    (unless (or (null v) (string-empty-p (string-trim v)))
+      (string-trim v))))
+
 ;;;; Public commands
 
 ;;;###autoload
@@ -752,20 +787,31 @@ A `sprig_tools:' frontmatter line (none, calls, or full) overrides the
   (when (process-live-p sprig--process)
     (user-error "This buffer already has a live session"))
   (setq sprig--session-id (sprig--buffer-session-id))
-  (let ((proc (make-process
-               :name "sprig"
-               :buffer nil
-               :command (sprig--command)
-               :connection-type 'pipe
-               :coding 'utf-8-unix
-               :noquery t
-               :filter #'sprig--filter
-               :sentinel #'sprig--sentinel)))
+  (let* ((dir (sprig--directory))
+         ;; Local sessions inherit `default-directory'; a configured dir
+         ;; overrides it.  Remote sessions get their `cd' in `sprig--command'.
+         (default-directory
+          (if (and dir (not sprig-remote))
+              (let ((expanded (file-name-as-directory (expand-file-name dir))))
+                (unless (file-directory-p expanded)
+                  (user-error "sprig: no such directory: %s" expanded))
+                expanded)
+            default-directory))
+         (proc (make-process
+                :name "sprig"
+                :buffer nil
+                :command (sprig--command)
+                :connection-type 'pipe
+                :coding 'utf-8-unix
+                :noquery t
+                :filter #'sprig--filter
+                :sentinel #'sprig--sentinel)))
     (process-put proc :conv-buffer (current-buffer))
     (setq sprig--process proc)
-    (message "sprig: %s (%s)"
+    (message "sprig: %s (%s%s)"
              (if sprig--session-id "resuming session" "new session")
-             (if sprig-remote (concat "ssh " sprig-remote) "local"))))
+             (if sprig-remote (concat "ssh " sprig-remote) "local")
+             (if dir (concat " in " dir) ""))))
 
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."

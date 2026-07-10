@@ -99,11 +99,14 @@ With `use-package` and a local checkout:
 |---|---|---|
 | `sprig-remote` | `nil` | SSH destination, or nil for local |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
+| `sprig-directory` | `nil` | Working directory for the session, or nil for the file's directory |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
 | `sprig-system-prompt` | short Markdown hint | Appended system prompt, or nil |
 | `sprig-assistant-summary` | `"assistant"` | Label in the reply `<details>` summary |
 | `sprig-ssh-args` | `("-T")` | Extra SSH args |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
+
+A single file can override the working directory with a `working_dir:` line in its YAML frontmatter, so one branch can run against a different project than the `sprig-directory` default. The value may use `~` and, for a remote session, is resolved on the SSH host.
 
 ## Status / caveats
 
