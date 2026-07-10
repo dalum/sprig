@@ -19,6 +19,14 @@ Two surfaces, cleanly separated.
 - No in-file tree, no nesting, no drawers-as-branches. A long conversation stays a flat, readable file.
 - The model emits Markdown, so its output lands with zero conversion. This was the "models emit Markdown, not Org" friction; it is gone.
 
+### A branch can start in memory
+
+A branch does not need a file to exist. A branch is defined by `sprig-mode` being on in a buffer, not by `buffer-file-name`. `sprig-new` opens a *scratch branch*: a live conversation in an unsaved buffer. It connects, streams, titles, and shows up in the navigator like any other branch, because all persistence (session id, title, working directory) is written into the buffer's frontmatter, which rides along the moment the buffer is saved.
+
+`sprig-save` writes a scratch branch to disk, defaulting the filename to a slug of its `title:` under a navigator scan directory. From then on it is an ordinary file branch. Saving is optional: a scratch branch you never save is a deliberate throwaway. To keep that from being a silent accident, killing an unsaved scratch branch that still holds a transcript or a live session asks first; an empty or already-saved buffer is killed without a prompt.
+
+So the "one branch is one Markdown file" model holds for anything you keep, while a conversation can begin with zero ceremony, the Magit-scratch gesture: start now, name and file it later, or not at all. Forking (below) still produces files, since it copies frozen ancestry; scratch branches are only about deferring the file for a *new* root.
+
 ### The structure is a forest of files
 
 - A *directory* is the forest: a set of branch files plus their fork links.
@@ -73,6 +81,7 @@ Each fork freezes its parent by copying…
 - Delimiters are inserted by `send`, not hand-typed. You type prose below the last reply; `send` opens a reply span and streams into it.
 - Each reply span carries a stable id (`r1`, `r2`, …) for references: fork anchors, status, and the interrupted flag.
 - Frontmatter holds the CLI session id and display settings today; the fork machinery will add branch identity and the fork link (`id:`, `parent:`, `forked_at:`).
+- A titleless branch is named automatically after its first exchange: a short throwaway agent run turns the opening user turn and reply into a `title:`, the same recipe the CLI uses to name its own sessions. A hand-written `title:` is left alone. This is what gives a scratch branch a real navigator name, and a good default filename, before it is ever saved.
 
 ## In-file structure: sentinels, not prose
 
@@ -154,8 +163,8 @@ Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>`
 
 ## Build status
 
-- **Done (v0.3):** the sentinel-based Markdown transcript and turn parser (`sprig--turns`), streaming replies plus inline tool calls and results, the editor chrome (hidden sentinels, tool/result headers, reply rules, user-input face), tool-body folding with the structural edit guard, a per-file tool-render level, session persistence in frontmatter, and interrupt. Single file, one turn at a time, over the `claude` CLI (local or via SSH with `sprig-remote`).
-- **Next slice:** fork-by-copy plus the `sprig-status` navigator, and the stateless-backend replay path that makes "context is the whole file" literal.
+- **Done:** the sentinel-based Markdown transcript and turn parser (`sprig--turns`), streaming replies plus inline tool calls and results, the editor chrome (hidden sentinels, tool/result headers, reply rules, user-input face), tool-body folding with the structural edit guard, a per-file tool-render level, session persistence in frontmatter, interrupt, automatic titling of a titleless branch, and the `sprig-status` navigator in a first flat-list form (open / connect / interrupt / disconnect / preview, plus scratch branches via `sprig-new` / `sprig-save` and a kill guard). Single file, one turn at a time, over the `claude` CLI (local or via SSH with `sprig-remote`); several buffers can stream at once.
+- **Next slice:** fork-by-copy (and the rename / prune verbs it unblocks, plus the `id:` / `parent:` / `forked_at:` fork links), then the stateless-backend replay path that makes "context is the whole file" literal.
 
 ## First build slice (as shipped)
 

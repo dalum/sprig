@@ -2,11 +2,11 @@
 
 Sprig is an Emacs interface for conversing with an LLM agent, aimed at breaking out of linear chat.
 
-**Where it is today:** a chat client where one conversation branch is a plain **Markdown file** you edit directly. You type your turns as prose; the agent's replies stream in wrapped in `<details>` blocks that fold in the editor and collapse on GitHub. The transport is a persistent **Claude Code session**, local or over **SSH**, via the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed).
+**Where it is today:** one conversation branch is a plain **Markdown file** you edit directly. You type your turns as prose; the agent's replies stream in as Markdown, delimited by invisible `sprig:` HTML-comment sentinels that `sprig-mode` hides behind chat-like chrome (the raw sentinels stay in the file, so a reopened buffer still parses and folds correctly). The transport is a persistent **Claude Code session**, local or over **SSH**, via the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed).
 
 **Where it is going:** a non-linear, forkable model where you hold many conversations at once, fork any of them to explore several directions in parallel, and drive the whole forest from a Magit-like `sprig-status` navigator. That design is written up in [DESIGN.md](DESIGN.md). Forking (the fork forest) is **not yet implemented**, but the `sprig-status` navigator now ships in a first, flat-list form, and concurrent streams already work since each conversation is an independent buffer. Each buffer still runs one turn at a time.
 
-This is a *chat* client: tools are disabled, so the agent answers in text and never edits your files. If you want agentic edits from Emacs, use `claude-code-ide.el` instead.
+Tools are not force-disabled. The agent's tool use follows the `claude` CLI's own permission configuration, and any tool calls and their results render inline in the transcript (see `sprig-render-tools`), so the agent can read, run, and edit as far as your CLI setup allows, not only answer in prose.
 
 ## How it works
 
@@ -14,10 +14,10 @@ Emacs runs one long-lived process per conversation buffer:
 
 ```
 claude -p --input-format stream-json --output-format stream-json \
-       --include-partial-messages --verbose --allowedTools ""
+       --include-partial-messages --verbose
 ```
 
-You write a user-message JSON line to its stdin; it streams assistant token deltas back on stdout, which get inserted into the buffer live under a new `<details>` block. The session id is captured from the CLI and stored in the file's YAML frontmatter as `claude_session:`, so the conversation survives an Emacs restart and reconnects with `--resume`.
+Per buffer, Sprig appends `--model`, `--append-system-prompt`, and `--resume` to that command as configured; tools are governed by the CLI's own permission config rather than disabled. You write a user-message JSON line to its stdin; it streams assistant token deltas back on stdout, which get inserted into the buffer live inside a new reply span delimited by `<!-- sprig:reply -->` / `<!-- sprig:end -->` sentinels that `sprig-mode` renders as chat. The session id is captured from the CLI and stored in the file's YAML frontmatter as `claude_session:`, so the conversation survives an Emacs restart and reconnects with `--resume`.
 
 Because the whole protocol is plain stdio, running the session on a remote host is just a matter of prefixing the command with `ssh HOST`. Set `sprig-remote` and the session runs there instead of locally. The remote box is where `claude` must be installed and logged in.
 
@@ -79,7 +79,7 @@ With `use-package` and a local checkout:
 1. Open a `.md` file, or `M-x sprig-new` (`s` in the navigator) to start an in-memory branch you can save later with `sprig-save` (`w`). It becomes your conversation branch. Killing an unsaved in-memory branch that holds a transcript or a live session asks first, so you do not lose it by accident.
 2. `M-x sprig-connect` (`C-c C-a C-o`) to start/resume the session. Starting a new session prompts for the working directory (seeded with the current default) and records it in the file's frontmatter.
 3. Type a message as plain prose at the end of the buffer.
-4. `sprig-send` (`C-c C-c`) sends the prose typed since the last reply. The reply streams into a new `<details>` block.
+4. `sprig-send` (`C-c C-c`) sends the prose typed since the last reply. The reply streams into a new reply span (hidden `sprig:reply` sentinels, shown as chat).
 5. Type your next message below that block and send again.
 6. `sprig-interrupt` (`C-c C-k`) aborts a streaming reply, keeps the partial (marked `interrupted`), and leaves point ready for a redirect.
 7. `sprig-disconnect` (`C-c C-a C-k`) stops the process; the transcript and `claude_session:` id are kept, so reconnecting resumes the conversation.
@@ -94,6 +94,7 @@ With `use-package` and a local checkout:
 | `sprig-send` | `C-c C-c` | Send the prose typed since the last reply |
 | `sprig-interrupt` | `C-c C-k` | Abort a streaming reply, keep and mark the partial |
 | `sprig-disconnect` | `C-c C-a C-k` | Stop the session (conversation kept) |
+| `sprig-set-tool-display` | `M-x` | Set how much tool activity this file renders (`none`/`calls`/`full`) |
 | `sprig-status` | `M-x` | Open the navigator listing all sessions and their status |
 
 ### Navigator
@@ -123,7 +124,12 @@ With `use-package` and a local checkout:
 | `sprig-directory` | `nil` | Working directory for the session, or nil for the file's directory |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
 | `sprig-system-prompt` | short Markdown hint | Appended system prompt, or nil |
-| `sprig-assistant-summary` | `"assistant"` | Label in the reply `<details>` summary |
+| `sprig-render-tools` | `none` | How much tool activity to write to the transcript: `none`, `calls`, or `full` |
+| `sprig-fold-tool-calls` | `t` | Fold tool-call and result blocks to their header on open |
+| `sprig-hide-sentinels` | `t` | Hide the `sprig:` sentinel lines behind chat chrome |
+| `sprig-reply-divider` | `t` | Draw a faint rule at each reply-span boundary |
+| `sprig-highlight-user-input` | `t` | Give the user's own turns a distinguishing face |
+| `sprig-ssh-program` | `"ssh"` | SSH client program |
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
 | `sprig-auto-title` | `t` | After the first reply, name a titleless branch from the opening exchange |
@@ -134,11 +140,13 @@ With `use-package` and a local checkout:
 
 A single file can override the working directory with a `working_dir:` line in its YAML frontmatter, so one branch can run against a different project than the `sprig-directory` default. The value may use `~` and, for a remote session, is resolved on the SSH host.
 
-The navigator's Title column comes from a `title:` frontmatter line, falling back to the file name. With `sprig-auto-title` on, a branch that has no `title:` yet gets one after its first reply: a short throwaway `claude` run (using `sprig-model`) turns the opening user turn and reply into a label, the same recipe the CLI uses to name its own sessions. A `title:` you write by hand is always left alone.
+The navigator's Title column comes from a `title:` frontmatter line, falling back to the file name (or the buffer name for an unsaved scratch branch). With `sprig-auto-title` on, a branch that has no `title:` yet gets one after its first reply: a short throwaway `claude` run (using `sprig-model`) turns the opening user turn and reply into a label, the same recipe the CLI uses to name its own sessions. A `title:` you write by hand is always left alone.
+
+Tool calls and their results are transcript-only: they render inline for you to read but are stripped from the message list sent back to the model (the CLI keeps its own tool memory). `sprig-render-tools` sets how much is written (`none`, `calls`, `full`), and a single file overrides that default with a `sprig_tools:` frontmatter line, set by `M-x sprig-set-tool-display`.
 
 ## Status / caveats
 
-- v0.2, written against `claude` 2.1.205. The protocol round-trip (streaming, multi-turn memory, session resume) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.4.1, written against `claude` 2.1.205. The protocol round-trip (streaming, multi-turn memory, session resume) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - Single file, one turn at a time per buffer (several buffers can stream at once).
 - Session ids are per-host: a file created against one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the transcript in the file is kept, but the new session does not carry the earlier turns' server-side memory (transcript replay is future work, see [DESIGN.md](DESIGN.md)).
 - `sprig-interrupt` currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
