@@ -38,7 +38,9 @@
 ;; no API key is required.  The agent runs with its normal tools, so a
 ;; reply may run commands and edit files.  It works in the conversation
 ;; file's directory unless a `working_dir:' frontmatter line (or the
-;; `sprig-directory' default) points it elsewhere.
+;; `sprig-directory' default) points it elsewhere.  Starting a new
+;; session prompts for that directory and records the answer in the
+;; frontmatter.
 ;;
 ;; One buffer is one branch.  Connect with `sprig-connect', type a
 ;; message below the last reply, and send it with `sprig-send' (C-c C-c).
@@ -203,6 +205,10 @@ Used to separate consecutive content blocks with a paragraph break.")
   "Alist of in-flight streaming tool-use blocks, keyed by block index.
 Each entry is (INDEX :id ID :name NAME :json ACC), where ACC accumulates
 the streamed `input_json_delta' fragments until the block closes.")
+(defvar-local sprig--undo-handle nil
+  "Change-group handle bracketing the in-flight turn's edits.
+Opened in `sprig--start-reply' and amalgamated in `sprig--close-reply' so
+a whole streamed reply collapses to a single undo step.")
 
 ;;;; Sentinel grammar
 
@@ -587,7 +593,7 @@ fresh session rather than fail.")
                 (sprig--clear-session-id)
                 (message "sprig: session %s not found here; starting fresh (prior turns are not replayed)"
                          stale)
-                (sprig-connect)))
+                (sprig-connect t)))
              ;; An unexpected exit: surface why in the error buffer.
              (t
               (sprig--log-error
@@ -895,15 +901,43 @@ environment variable is resolved wherever the session runs."
     (unless (or (null v) (string-empty-p (string-trim v)))
       (string-trim v))))
 
+(defun sprig--save-working-directory (dir)
+  "Record DIR as this buffer's `working_dir:' frontmatter.
+A blank DIR removes the line so the session host's default is used."
+  (if (and dir (not (string-empty-p (string-trim dir))))
+      (sprig--frontmatter-set "working_dir" (string-trim dir))
+    (sprig--frontmatter-remove "working_dir")))
+
+(defun sprig--read-working-directory ()
+  "Prompt for and record this buffer's working directory for a new session.
+The minibuffer is seeded with the directory `sprig--directory' would use.
+A remote directory is read as plain text since it lives on the SSH host;
+a local one is completed against the filesystem."
+  (let* ((current (sprig--directory))
+         (input (if sprig-remote
+                    (read-string
+                     "Working directory (remote, blank = login dir): "
+                     current)
+                  (read-directory-name
+                   "Working directory: "
+                   (and current (file-name-as-directory
+                                 (expand-file-name current)))))))
+    (sprig--save-working-directory input)))
+
 ;;;; Public commands
 
 ;;;###autoload
-(defun sprig-connect ()
-  "Start (or resume) an agent session bound to the current buffer."
+(defun sprig-connect (&optional no-prompt)
+  "Start (or resume) an agent session bound to the current buffer.
+Starting a new session prompts for the working directory and records it
+in the buffer's frontmatter; NO-PROMPT skips that (used by the automatic
+reconnect after a stale resume id)."
   (interactive)
   (when (process-live-p sprig--process)
     (user-error "This buffer already has a live session"))
   (setq sprig--session-id (sprig--buffer-session-id))
+  (unless (or no-prompt sprig--session-id)
+    (sprig--read-working-directory))
   (let* ((dir (sprig--directory))
          ;; Local sessions inherit `default-directory'; a configured dir
          ;; overrides it.  Remote sessions get their `cd' in `sprig--command'.

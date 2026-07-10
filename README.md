@@ -77,7 +77,7 @@ With `use-package` and a local checkout:
 ## Usage
 
 1. Open a `.md` file. It becomes your conversation branch.
-2. `M-x sprig-connect` (`C-c C-a C-o`) to start/resume the session.
+2. `M-x sprig-connect` (`C-c C-a C-o`) to start/resume the session. Starting a new session prompts for the working directory (seeded with the current default) and records it in the file's frontmatter.
 3. Type a message as plain prose at the end of the buffer.
 4. `sprig-send` (`C-c C-c`) sends the prose typed since the last reply. The reply streams into a new `<details>` block.
 5. Type your next message below that block and send again.
