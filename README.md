@@ -100,6 +100,7 @@ With `use-package` and a local checkout:
 
 | Key | Does |
 |---|---|
+| `n` / `p` | Move to the next / previous session, skipping preview lines |
 | `RET` / `o` | Open the conversation on this line |
 | `TAB` | Toggle an inline preview of the session's last reply |
 | `c` | Connect the session (opening its file if needed) |

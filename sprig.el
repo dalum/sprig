@@ -1395,6 +1395,8 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "RET") #'sprig-status-open)
 (define-key sprig-status-mode-map (kbd "o")   #'sprig-status-open)
 (define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
+(define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
+(define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
@@ -1455,6 +1457,33 @@ With CREATE, open the row's on-disk file when it has no live buffer."
     (cond ((buffer-live-p buf) buf)
           ((and create file) (find-file-noselect file))
           (t nil))))
+
+(defun sprig--status-goto-row (dir)
+  "Move point DIR (+1 or -1) session rows, skipping inline preview lines.
+Return non-nil on success; leave point put when there is no further row."
+  (let ((origin (point))
+        found)
+    (while (and (not found) (zerop (forward-line dir)))
+      (when (tabulated-list-get-id)
+        (setq found t)))
+    (if found
+        (progn (beginning-of-line) t)
+      (goto-char origin)
+      nil)))
+
+(defun sprig-status-next (&optional n)
+  "Move to the Nth next Sprig session row, skipping inline preview lines.
+N defaults to 1; a negative N moves to previous rows."
+  (interactive "p")
+  (let* ((n (or n 1))
+         (dir (if (< n 0) -1 1)))
+    (dotimes (_ (abs n))
+      (sprig--status-goto-row dir))))
+
+(defun sprig-status-previous (&optional n)
+  "Move to the Nth previous Sprig session row, skipping inline preview lines."
+  (interactive "p")
+  (sprig-status-next (- (or n 1))))
 
 (defun sprig-status-open ()
   "Visit the conversation on the current line."
