@@ -1087,6 +1087,61 @@ reconnect after a stale resume id)."
              (if dir (concat " in " dir) ""))
     (sprig--status-refresh)))
 
+;;;###autoload
+(defun sprig-new (&optional dont-connect)
+  "Create a fresh in-memory Sprig conversation and switch to it.
+The buffer visits no file: converse now and, if you want to keep it,
+save it later with \\[write-file] (its frontmatter and transcript ride
+along).  Unless DONT-CONNECT, start the session at once, prompting for
+its working directory, the same as `sprig-connect'."
+  (interactive)
+  (let ((buf (generate-new-buffer "*sprig: untitled*"))
+        (dir (or (and sprig-directory (not sprig-remote)
+                      (expand-file-name sprig-directory))
+                 default-directory)))
+    (with-current-buffer buf
+      (when (fboundp 'markdown-mode) (markdown-mode))
+      (setq default-directory (file-name-as-directory dir))
+      (unless (bound-and-true-p sprig-mode) (sprig-mode 1))
+      (unless dont-connect (sprig-connect)))
+    (pop-to-buffer buf)
+    buf))
+
+(defun sprig--title-slug (title)
+  "Return a filesystem-friendly slug for TITLE, or nil when it is empty.
+Lower-cases, collapses non-alphanumerics to single hyphens, and trims
+leading and trailing hyphens."
+  (when title
+    (let ((s (string-trim
+              (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase title))
+              "-+" "-+")))
+      (unless (string-empty-p s) s))))
+
+;;;###autoload
+(defun sprig-save ()
+  "Save this conversation to a file, defaulting the name to a title slug.
+For an in-memory branch this prompts for a filename, seeded from the
+branch `title:' under the first navigator scan directory (or a local
+`sprig-directory'); for a branch already backed by a file it just writes
+pending edits."
+  (interactive)
+  (if buffer-file-name
+      (save-buffer)
+    (let* ((dir (file-name-as-directory
+                 (or (car sprig-status-directories)
+                     (and sprig-directory (not sprig-remote)
+                          (expand-file-name sprig-directory))
+                     default-directory)))
+           (name (concat (or (sprig--title-slug (sprig--frontmatter-get "title"))
+                             "conversation")
+                         ".md"))
+           (file (read-file-name "Save conversation to: " dir name nil name)))
+      (when (file-directory-p file)
+        (user-error "sprig: %s is a directory" file))
+      (write-file file t)
+      (sprig--status-refresh)
+      (message "sprig: saved to %s" (abbreviate-file-name file)))))
+
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
   (unless (process-live-p sprig--process)
@@ -1516,9 +1571,11 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
+(define-key sprig-status-mode-map (kbd "s")   #'sprig-status-new)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
+(define-key sprig-status-mode-map (kbd "w")   #'sprig-status-write)
 (define-key sprig-status-mode-map (kbd "f")   #'sprig-status-fork)
 (define-key sprig-status-mode-map (kbd "r")   #'sprig-status-rename)
 (define-key sprig-status-mode-map (kbd "x")   #'sprig-status-prune)
@@ -1645,6 +1702,24 @@ Shows the tail of that session's last reply, filled to
     (sprig--status-toggle-id id)
     (sprig--status-render)))
 
+(defun sprig-status-new ()
+  "Start a fresh in-memory conversation and open it.
+The new branch visits no file until you save it; it appears in the
+navigator immediately and streams like any other."
+  (interactive)
+  (sprig-new)
+  (sprig--status-refresh))
+
+(defun sprig-status-write ()
+  "Save the conversation on the current line to a file.
+An in-memory branch is prompted for a filename (defaulting to a title
+slug); a branch already backed by a file writes its pending edits."
+  (interactive)
+  (let ((buf (sprig--status-buffer-at-point)))
+    (unless buf (user-error "That row is already an on-disk file"))
+    (with-current-buffer buf (sprig-save))
+    (sprig--status-refresh)))
+
 (defun sprig-status-fork ()
   "Fork the branch on the current line (not implemented yet)."
   (interactive)
@@ -1694,6 +1769,18 @@ every redisplay), never the interrupted scan."
                 ((process-live-p sprig--process) ":●")
                 (t ""))))
 
+(defun sprig--kill-buffer-query ()
+  "Guard against silently losing an unsaved in-memory conversation.
+Returns t (allow the kill) unless this is a file-less conversation
+buffer holding a transcript or a live session id, in which case it asks
+to confirm.  A saved branch, or an empty scratch buffer with nothing to
+lose, is killed without a prompt."
+  (or buffer-file-name
+      (not (sprig--conversation-buffer-p (current-buffer)))
+      (and (not sprig--session-id)
+           (string-empty-p (string-trim (buffer-string))))
+      (yes-or-no-p "This conversation is not saved to a file; kill and lose it? ")))
+
 ;;;###autoload
 (define-minor-mode sprig-mode
   "Minor mode for conversing with an agent in a Markdown buffer."
@@ -1705,10 +1792,12 @@ every redisplay), never the interrupted scan."
         (add-to-invisibility-spec '(sprig-fold . t))
         (add-hook 'after-change-functions #'sprig--refresh-pending-face nil t)
         (add-hook 'kill-buffer-hook #'sprig--status-refresh-deferred nil t)
+        (add-hook 'kill-buffer-query-functions #'sprig--kill-buffer-query nil t)
         (sprig--decorate)
         (when sprig-fold-tool-calls (sprig-fold-all)))
     (remove-hook 'after-change-functions #'sprig--refresh-pending-face t)
     (remove-hook 'kill-buffer-hook #'sprig--status-refresh-deferred t)
+    (remove-hook 'kill-buffer-query-functions #'sprig--kill-buffer-query t)
     (remove-from-invisibility-spec 'sprig-chrome)
     (remove-from-invisibility-spec '(sprig-fold . t))
     (remove-overlays (point-min) (point-max) 'sprig-chrome t)

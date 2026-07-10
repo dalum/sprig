@@ -76,7 +76,7 @@ With `use-package` and a local checkout:
 
 ## Usage
 
-1. Open a `.md` file. It becomes your conversation branch.
+1. Open a `.md` file, or `M-x sprig-new` (`s` in the navigator) to start an in-memory branch you can save later with `sprig-save` (`w`). It becomes your conversation branch. Killing an unsaved in-memory branch that holds a transcript or a live session asks first, so you do not lose it by accident.
 2. `M-x sprig-connect` (`C-c C-a C-o`) to start/resume the session. Starting a new session prompts for the working directory (seeded with the current default) and records it in the file's frontmatter.
 3. Type a message as plain prose at the end of the buffer.
 4. `sprig-send` (`C-c C-c`) sends the prose typed since the last reply. The reply streams into a new `<details>` block.
@@ -88,6 +88,8 @@ With `use-package` and a local checkout:
 
 | Command | Binding | Does |
 |---|---|---|
+| `sprig-new` | `M-x` | Start a fresh in-memory conversation (no file yet) |
+| `sprig-save` | `M-x` | Save an in-memory conversation to a file |
 | `sprig-connect` | `C-c C-a C-o` | Start or resume the session for this buffer |
 | `sprig-send` | `C-c C-c` | Send the prose typed since the last reply |
 | `sprig-interrupt` | `C-c C-k` | Abort a streaming reply, keep and mark the partial |
@@ -101,9 +103,11 @@ With `use-package` and a local checkout:
 | Key | Does |
 |---|---|
 | `n` / `p` | Move to the next / previous session, skipping preview lines |
+| `s` | Start a fresh in-memory conversation (save to a file later, or not) |
 | `RET` / `o` | Open the conversation on this line |
 | `TAB` | Toggle an inline preview of the session's last reply |
 | `c` | Connect the session (opening its file if needed) |
+| `w` | Save an in-memory conversation to a file (default name from its title) |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session |
 | `g` | Refresh the list |
