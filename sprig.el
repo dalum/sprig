@@ -229,8 +229,8 @@ a whole streamed reply collapses to a single undo step.")
   "^<!-- sprig:\\(reply\\|end\\|tool-end\\|tool\\|result-end\\|result\\)\\([^\n]*?\\) *-->[ \t]*$"
   "Regexp matching any `sprig:' sentinel line.
 Group 1 is the kind, group 2 the attribute text (id, name, flags).")
-(defconst sprig--reply-open-re "^<!-- sprig:reply\\b[^\n]*-->[ \t]*$"
-  "Regexp matching a reply-open sentinel line.")
+(defconst sprig--reply-open-re "^<!-- sprig:reply\\b\\([^\n]*?\\) *-->[ \t]*$"
+  "Regexp matching a reply-open sentinel line.  Group 1 is its attribute text.")
 (defconst sprig--reply-end-re "^<!-- sprig:end\\b[^\n]*-->[ \t]*$"
   "Regexp matching a reply-close sentinel line.")
 (defconst sprig--tool-open-re "^<!-- sprig:\\(?:tool\\|result\\) "
@@ -284,15 +284,12 @@ A local session's working directory is set by `sprig-connect' binding
 ;;;; Buffer parsing: frontmatter, turns
 
 (defun sprig--body-start ()
-  "Return the position where the body begins, after any YAML frontmatter."
-  (save-excursion
-    (goto-char (point-min))
-    (if (looking-at-p "^---[ \t]*$")
-        (progn
-          (forward-line 1)
-          (if (re-search-forward "^---[ \t]*$" nil t)
-              (progn (forward-line 1) (point))
-            (point-min)))
+  "Return the position where the body begins, after any YAML frontmatter.
+This is the line after the closing `---', or `point-min' when there is
+no frontmatter."
+  (let ((end (sprig--frontmatter-end)))
+    (if end
+        (save-excursion (goto-char end) (forward-line 1) (point))
       (point-min))))
 
 (defun sprig--clean-reply (text)
@@ -887,7 +884,7 @@ Works from the header line or anywhere in the body."
   (save-excursion
     (goto-char (point-min))
     (let ((n 0))
-      (while (re-search-forward "^<!-- sprig:reply\\b" nil t)
+      (while (re-search-forward sprig--reply-open-re nil t)
         (setq n (1+ n)))
       (format "r%d" (1+ n)))))
 
@@ -932,8 +929,7 @@ Works from the header line or anywhere in the body."
     (goto-char (if (and sprig--marker (marker-buffer sprig--marker))
                    (marker-position sprig--marker)
                  (point-max)))
-    (when (re-search-backward
-           "^<!-- sprig:reply\\b\\([^\n]*?\\) *-->[ \t]*$" nil t)
+    (when (re-search-backward sprig--reply-open-re nil t)
       (unless (string-match-p "interrupted" (match-string 1))
         (let ((inhibit-read-only t))
           (replace-match "<!-- sprig:reply\\1 interrupted -->"))))))
@@ -1147,6 +1143,15 @@ pending edits."
   (unless (process-live-p sprig--process)
     (sprig-connect)))
 
+(defun sprig--teardown-process ()
+  "Stop this buffer's session process deliberately and clear its state.
+The `:deliberate' flag tells `sprig--sentinel' the exit was expected, so
+it reports a clean teardown rather than logging a failure."
+  (when (process-live-p sprig--process)
+    (process-put sprig--process :deliberate t)
+    (delete-process sprig--process))
+  (setq sprig--process nil sprig--busy nil))
+
 (defun sprig--send-user (text)
   "Send TEXT to the session as a user message."
   (let ((json (json-serialize
@@ -1177,10 +1182,7 @@ The pending turn is the prose typed after the last reply."
   (interactive)
   (if (not sprig--busy)
       (message "sprig: nothing to interrupt")
-    (when (process-live-p sprig--process)
-      (process-put sprig--process :deliberate t)
-      (delete-process sprig--process))
-    (setq sprig--process nil sprig--busy nil)
+    (sprig--teardown-process)
     (sprig--close-reply t)
     (when (and sprig--marker (marker-buffer sprig--marker))
       (goto-char sprig--marker))
@@ -1192,9 +1194,7 @@ The pending turn is the prose typed after the last reply."
   "Stop the session for this buffer (the conversation is kept)."
   (interactive)
   (if (process-live-p sprig--process)
-      (progn (process-put sprig--process :deliberate t)
-             (delete-process sprig--process)
-             (setq sprig--process nil sprig--busy nil)
+      (progn (sprig--teardown-process)
              (message "sprig: disconnected")
              (sprig--status-refresh))
     (message "sprig: no live session")))
@@ -1649,6 +1649,14 @@ With CREATE, open the row's on-disk file when it has no live buffer."
           ((and create file) (find-file-noselect file))
           (t nil))))
 
+(defun sprig--status-run (command not-connected)
+  "Run COMMAND in the conversation buffer for the row at point, then refresh.
+Signal NOT-CONNECTED as a `user-error' when the row has no live buffer."
+  (let ((buf (sprig--status-buffer-at-point)))
+    (unless buf (user-error "%s" not-connected))
+    (with-current-buffer buf (funcall command))
+    (sprig--status-refresh)))
+
 (defun sprig--status-goto-row (dir)
   "Move point DIR (+1 or -1) session rows, skipping inline preview lines.
 Return non-nil on success; leave point put when there is no further row."
@@ -1694,18 +1702,12 @@ N defaults to 1; a negative N moves to previous rows."
 (defun sprig-status-interrupt ()
   "Interrupt the streaming session on the current line."
   (interactive)
-  (let ((buf (sprig--status-buffer-at-point)))
-    (unless buf (user-error "That row is not a connected session"))
-    (with-current-buffer buf (sprig-interrupt))
-    (sprig--status-refresh)))
+  (sprig--status-run #'sprig-interrupt "That row is not a connected session"))
 
 (defun sprig-status-disconnect ()
   "Disconnect the session on the current line."
   (interactive)
-  (let ((buf (sprig--status-buffer-at-point)))
-    (unless buf (user-error "That row is not a connected session"))
-    (with-current-buffer buf (sprig-disconnect))
-    (sprig--status-refresh)))
+  (sprig--status-run #'sprig-disconnect "That row is not a connected session"))
 
 (defun sprig-status-toggle-preview ()
   "Toggle an inline preview of the last reply for the row at point.
@@ -1730,10 +1732,7 @@ navigator immediately and streams like any other."
 An in-memory branch is prompted for a filename (defaulting to a title
 slug); a branch already backed by a file writes its pending edits."
   (interactive)
-  (let ((buf (sprig--status-buffer-at-point)))
-    (unless buf (user-error "That row is already an on-disk file"))
-    (with-current-buffer buf (sprig-save))
-    (sprig--status-refresh)))
+  (sprig--status-run #'sprig-save "That row is already an on-disk file"))
 
 (defun sprig-status-fork ()
   "Fork the branch on the current line (not implemented yet)."
