@@ -2,6 +2,7 @@
 *~
 \#*\#
 .\#*
+*.elc
 
 # Scratch conversation buffers
 /diary.md

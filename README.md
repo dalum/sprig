@@ -153,6 +153,14 @@ Tool calls and their results are transcript-only: they render inline for you to 
 - The `sprig-status` navigator ships as a flat session list; the fork forest it will grow into (and forking itself) is not built yet.
 - Loading the full CLAUDE.md/skills context on the session host adds cost per turn; a `--bare`-style lean mode is a possible future option, but `--bare` currently forces API-key auth, so it is off by the subscription path.
 
+## Development
+
+`sprig-tests.el` is an ERT suite covering the process-free layers (frontmatter, turn parsing, the stream-json transport and its event vocabulary, the sink, decoration parity, and the string and command-construction helpers). It runs offline, starting no session:
+
+```
+emacs -Q --batch -L . -l sprig.el -l sprig-tests.el -f ert-run-tests-batch-and-exit
+```
+
 ## Direction
 
 The fork-and-explore model is the point of the project. See [DESIGN.md](DESIGN.md) for the full write-up. In short:
