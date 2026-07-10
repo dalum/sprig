@@ -1,7 +1,7 @@
 ;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.4.0
+;; Version: 0.4.1
 ;; Package-Requires: ((emacs "27.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -79,9 +79,11 @@ When nil, the session runs locally."
   "SSH client used when `sprig-remote' is set."
   :type 'string)
 
-(defcustom sprig-ssh-args '("-T")
+(defcustom sprig-ssh-args '("-T" "-A")
   "Extra arguments passed to SSH (before the destination).
-`-T' disables pseudo-tty allocation, which is what we want for a pipe."
+`-T' disables pseudo-tty allocation, which is what we want for a pipe.
+`-A' forwards your SSH agent so the remote session can use your keys
+\(e.g. for git); drop it if the host should not have that access."
   :type '(repeat string))
 
 (defcustom sprig-directory nil
