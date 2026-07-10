@@ -1473,12 +1473,14 @@ and :session.  An open buffer wins over its on-disk file."
 
 (defun sprig--status-entries ()
   "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
-The entry id is the file path (a stable string) when there is one, else
-the buffer object; both are stable across refreshes so point is kept."
+The entry id is the entry's `:key' (a file's truename, else its buffer):
+canonical and stable across refreshes, so point and inline-preview state
+survive.  Stale ids are pruned from `sprig--status-expanded' so it never
+outlives the row it belongs to."
   (let ((index (make-hash-table :test 'equal))
         rows)
     (dolist (e (sprig--status-collect))
-      (let* ((id (or (plist-get e :file) (plist-get e :buffer)))
+      (let* ((id (plist-get e :key))
              (status (plist-get e :status))
              (file (plist-get e :file))
              (session (plist-get e :session))
@@ -1494,12 +1496,25 @@ the buffer object; both are stable across refreshes so point is kept."
                               "-")))
               rows)))
     (setq sprig--status-index index)
+    (sprig--status-prune-expanded index)
     (nreverse rows)))
 
 ;;; Inline reply previews
 
 (defvar-local sprig--status-expanded nil
   "Hash table of navigator entry ids currently showing an inline preview.")
+
+(defun sprig--status-prune-expanded (index)
+  "Drop ids from `sprig--status-expanded' absent from INDEX.
+An entry's id changes when it flips identity (a scratch buffer saved to a
+file), which would otherwise strand its expanded flag and desync the hash
+from the screen, so a later TAB toggles the phantom instead of the row."
+  (when sprig--status-expanded
+    (let (stale)
+      (maphash (lambda (id _)
+                 (unless (gethash id index) (push id stale)))
+               sprig--status-expanded)
+      (dolist (id stale) (remhash id sprig--status-expanded)))))
 
 (defun sprig--status-toggle-id (id)
   "Toggle inline-preview state for entry ID; return the new state."
