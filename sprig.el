@@ -336,7 +336,24 @@ message list a stateless backend would send verbatim."
   (let ((last (car (last (sprig--turns)))))
     (when (eq (car last) 'user) (cdr last))))
 
-;;;; Process I/O
+;;;; Transport and sink
+;;
+;; The transport turns the backend's raw output lines into a small,
+;; backend-neutral event vocabulary; the sink applies those events to the
+;; conversation buffer.  `sprig--handle' is the seam.  Only the
+;; `sprig--claude-*' functions know the `claude' CLI's stream-json wire
+;; format, so another backend means another parser emitting the same
+;; events, with the sink (`sprig--dispatch' and the emit functions)
+;; untouched.
+;;
+;; An event is a list whose car is the tag:
+;;   (session ID)              session id captured from the backend
+;;   (text-block)              a new text block began; separate it
+;;   (text STR)                assistant text to insert
+;;   (tool-call ID NAME INPUT) a completed tool-use call (INPUT is JSON)
+;;   (tool-result ID ERR TEXT) a tool result (ERR non-nil means error)
+;;   (done COST ERR)           the turn finished
+;;   (error MESSAGE)           a backend error to surface inline
 
 (defun sprig--filter (proc chunk)
   "Accumulate CHUNK from PROC and dispatch complete JSON lines."
@@ -350,70 +367,121 @@ message list a stateless backend would send verbatim."
         (sprig--handle proc line)))))
 
 (defun sprig--handle (proc line)
-  "Parse one JSON LINE from PROC and act on it."
-  (let ((buf (process-get proc :conv-buffer))
-        (ev (condition-case nil
+  "Parse one raw LINE from PROC and apply its events to the conversation.
+The seam: the CLI parser produces backend-neutral events and the sink
+dispatches each, both in the conversation buffer so per-stream transport
+state (`sprig--blocks') stays local to it."
+  (let ((buf (process-get proc :conv-buffer)))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (dolist (event (sprig--claude-parse-line line))
+          (sprig--dispatch event))))))
+
+;;; claude CLI transport: raw stream-json lines -> events
+
+(defun sprig--claude-tool-results (content)
+  "Turn a CLI `user' message CONTENT list into `tool-result' events."
+  (when (listp content)
+    (delq nil
+          (mapcar (lambda (block)
+                    (when (consp block)
+                      (let-alist block
+                        (when (equal .type "tool_result")
+                          (list 'tool-result
+                                (or .tool_use_id "t")
+                                .is_error
+                                (string-trim
+                                 (sprig--tool-result-text .content)))))))
+                  content))))
+
+(defun sprig--claude-parse-line (line)
+  "Parse one stream-json LINE from the `claude' CLI into a list of events.
+Returns the events in order (see the event vocabulary above), or nil.
+Reassembling the CLI's fragmented tool-use input is transport state kept
+in the buffer-local `sprig--blocks'; run this in the conversation buffer."
+  (let ((ev (condition-case nil
                 (json-parse-string line :object-type 'alist :array-type 'list
                                    :null-object nil :false-object nil)
               (error nil))))
-    (when (and ev (buffer-live-p buf))
-      (with-current-buffer buf
-        (let-alist ev
+    (when ev
+      (let-alist ev
+        (cond
+         ;; Session init: report the id; the sink decides whether to keep it.
+         ((and (equal .type "system") (equal .subtype "init"))
+          (when .session_id (list (list 'session .session_id))))
+         ;; Streaming assistant content (text and tool-use blocks).
+         ((equal .type "stream_event")
           (cond
-           ;; Session init: capture and persist the session id.
-           ((and (equal .type "system") (equal .subtype "init"))
-            (when (and .session_id (not sprig--session-id))
-              (setq sprig--session-id .session_id)
-              (sprig--save-session-id .session_id)))
-           ;; Streaming assistant content (text and tool-use blocks).
-           ((equal .type "stream_event")
-            (cond
-             ;; A new text block after earlier text (e.g. prose resuming
-             ;; after a tool use): separate them with a paragraph break.
-             ((and (equal .event.type "content_block_start")
-                   (equal .event.content_block.type "text"))
-              (sprig--block-separator))
-             ;; A tool-use block opens: start accumulating its input JSON.
-             ((and (equal .event.type "content_block_start")
-                   (equal .event.content_block.type "tool_use"))
-              (push (list .event.index
-                          :id (or .event.content_block.id
-                                  (format "t%d" .event.index))
-                          :name .event.content_block.name
-                          :json "")
-                    sprig--blocks))
-             ;; Text delta.
-             ((and (equal .event.type "content_block_delta")
-                   (equal .event.delta.type "text_delta")
-                   .event.delta.text)
-              (sprig--emit .event.delta.text))
-             ;; Tool-input delta: append to the block's accumulator.
-             ((and (equal .event.type "content_block_delta")
-                   (equal .event.delta.type "input_json_delta")
-                   .event.delta.partial_json)
-              (let ((blk (assq .event.index sprig--blocks)))
-                (when blk
-                  (plist-put (cdr blk) :json
-                             (concat (plist-get (cdr blk) :json)
-                                     .event.delta.partial_json)))))
-             ;; Block closes: if it was a tracked tool-use, render it now.
-             ((equal .event.type "content_block_stop")
-              (let ((blk (assq .event.index sprig--blocks)))
-                (when blk
-                  (sprig--emit-tool-call (plist-get (cdr blk) :id)
-                                         (plist-get (cdr blk) :name)
-                                         (plist-get (cdr blk) :json))
-                  (setq sprig--blocks
-                        (assq-delete-all .event.index sprig--blocks)))))))
-           ;; Tool results come back as a `user' message; render them.
-           ((equal .type "user")
-            (sprig--emit-tool-results .message.content))
-           ;; Turn complete.
-           ((equal .type "result")
-            (sprig--finish-turn .total_cost_usd .is_error))
-           ;; Fallback: a non-streamed error surfaced as a result-less error.
-           ((and (equal .type "system") (equal .subtype "error"))
-            (sprig--emit (format "\n[error] %s\n" (or .message line))))))))))
+           ;; A new text block after earlier text (e.g. prose resuming after
+           ;; a tool use): the sink separates them with a paragraph break.
+           ((and (equal .event.type "content_block_start")
+                 (equal .event.content_block.type "text"))
+            (list (list 'text-block)))
+           ;; A tool-use block opens: start accumulating its input JSON.
+           ((and (equal .event.type "content_block_start")
+                 (equal .event.content_block.type "tool_use"))
+            (push (list .event.index
+                        :id (or .event.content_block.id
+                                (format "t%d" .event.index))
+                        :name .event.content_block.name
+                        :json "")
+                  sprig--blocks)
+            nil)
+           ;; Text delta.
+           ((and (equal .event.type "content_block_delta")
+                 (equal .event.delta.type "text_delta")
+                 .event.delta.text)
+            (list (list 'text .event.delta.text)))
+           ;; Tool-input delta: append to the block's accumulator.
+           ((and (equal .event.type "content_block_delta")
+                 (equal .event.delta.type "input_json_delta")
+                 .event.delta.partial_json)
+            (let ((blk (assq .event.index sprig--blocks)))
+              (when blk
+                (plist-put (cdr blk) :json
+                           (concat (plist-get (cdr blk) :json)
+                                   .event.delta.partial_json))))
+            nil)
+           ;; Block closes: emit the reassembled tool-use call.
+           ((equal .event.type "content_block_stop")
+            (let ((blk (assq .event.index sprig--blocks)))
+              (when blk
+                (setq sprig--blocks
+                      (assq-delete-all .event.index sprig--blocks))
+                (list (list 'tool-call
+                            (plist-get (cdr blk) :id)
+                            (plist-get (cdr blk) :name)
+                            (plist-get (cdr blk) :json))))))))
+         ;; Tool results come back as a `user' message.  Read `content' by
+         ;; hand rather than via `.message.content': `let-alist' would bind
+         ;; that eagerly for every line, and a `system'/`error' line whose
+         ;; `message' is a plain string would crash the nested lookup.
+         ((equal .type "user")
+          (sprig--claude-tool-results
+           (and (listp .message) (alist-get 'content .message))))
+         ;; Turn complete.
+         ((equal .type "result")
+          (list (list 'done .total_cost_usd .is_error)))
+         ;; A non-streamed error surfaced as a result-less error.
+         ((and (equal .type "system") (equal .subtype "error"))
+          (list (list 'error (or .message line)))))))))
+
+;;; Sink: apply a normalised event to the conversation buffer
+
+(defun sprig--dispatch (event)
+  "Apply one normalised transport EVENT to the current conversation buffer."
+  (pcase event
+    (`(session ,id)
+     (when (and id (not sprig--session-id))
+       (setq sprig--session-id id)
+       (sprig--save-session-id id)))
+    (`(text-block) (sprig--block-separator))
+    (`(text ,text) (sprig--emit text))
+    (`(tool-call ,id ,name ,input) (sprig--emit-tool-call id name input))
+    (`(tool-result ,id ,is-error ,text)
+     (sprig--emit-tool-result id is-error text))
+    (`(done ,cost ,is-error) (sprig--finish-turn cost is-error))
+    (`(error ,message) (sprig--emit (format "\n[error] %s\n" message)))))
 
 (defun sprig--emit (text)
   "Insert streamed TEXT at the reply marker in the current buffer."
@@ -515,21 +583,14 @@ Skipped when `sprig--tool-display' is `none'."
        (car in) (cdr in)
        (format "<!-- sprig:tool-end id=%s -->" (or id "t"))))))
 
-(defun sprig--emit-tool-results (content)
-  "Render every tool_result block found in message CONTENT (a block list).
+(defun sprig--emit-tool-result (id is-error text)
+  "Render a tool result block (ID, IS-ERROR flag, TEXT body).
 Rendered only when `sprig--tool-display' is `full'."
-  (when (and (eq (sprig--tool-display) 'full) (listp content))
-    (dolist (block content)
-      (when (consp block)
-        (let-alist block
-          (when (equal .type "tool_result")
-            (let ((id (or .tool_use_id "t")))
-              (sprig--emit-block
-               (format "<!-- sprig:result id=%s%s -->" id
-                       (if .is_error " error" ""))
-               ""
-               (string-trim (sprig--tool-result-text .content))
-               (format "<!-- sprig:result-end id=%s -->" id)))))))))
+  (when (eq (sprig--tool-display) 'full)
+    (sprig--emit-block
+     (format "<!-- sprig:result id=%s%s -->" (or id "t") (if is-error " error" ""))
+     "" text
+     (format "<!-- sprig:result-end id=%s -->" (or id "t")))))
 
 (defun sprig--finish-turn (cost is-error)
   "Close out the current turn.  COST and IS-ERROR come from the result event."
