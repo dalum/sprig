@@ -105,6 +105,7 @@ With `use-package` and a local checkout:
 | `sprig-assistant-summary` | `"assistant"` | Label in the reply `<details>` summary |
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
+| `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 
 A single file can override the working directory with a `working_dir:` line in its YAML frontmatter, so one branch can run against a different project than the `sprig-directory` default. The value may use `~` and, for a remote session, is resolved on the SSH host.
 

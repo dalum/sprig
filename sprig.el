@@ -143,6 +143,12 @@ This sets them off from the agent's replies (the gaps between an `end'
 sentinel and the next `reply')."
   :type 'boolean)
 
+(defcustom sprig-error-buffer "*sprig-errors*"
+  "Name of the buffer where session failures are logged.
+When a session exits abnormally, its command, exit status, and captured
+stderr are appended here and the buffer is displayed."
+  :type 'string)
+
 (defface sprig-tool '((t :inherit font-lock-keyword-face :weight bold))
   "Face for tool-call and result header labels.")
 
@@ -488,15 +494,61 @@ Rendered only when `sprig--tool-display' is `full'."
            (if cost (format " ($%.4f)" cost) "")
            (if is-error " [error]" "")))
 
+(defun sprig--make-stderr ()
+  "Return a pipe process that accumulates the session's stderr.
+Routing stderr here keeps its non-JSON diagnostics out of `sprig--filter',
+which would otherwise silently drop them.  The text is read back from the
+process property `:acc' when the main process exits."
+  (make-pipe-process
+   :name "sprig-stderr"
+   :buffer nil
+   :noquery t
+   :coding 'utf-8-unix
+   :filter (lambda (proc chunk)
+             (process-put proc :acc (concat (or (process-get proc :acc) "") chunk)))
+   :sentinel #'ignore))
+
+(defun sprig--log-error (conv-buffer header body)
+  "Append a failure entry to `sprig-error-buffer' and display it.
+HEADER names what failed; BODY is the captured stderr or detail text."
+  (let ((buf (get-buffer-create sprig-error-buffer)))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'special-mode) (special-mode))
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (insert (format "=== %s: %s ===\n%s\n\n"
+                        (buffer-name conv-buffer)
+                        header
+                        (if (and body (not (string-empty-p (string-trim body))))
+                            (string-trim body)
+                          "(no stderr output)")))))
+    (display-buffer buf)))
+
 (defun sprig--sentinel (proc event)
-  "Report PROC lifecycle EVENT."
-  (let ((buf (process-get proc :conv-buffer)))
-    (when (buffer-live-p buf)
-      (with-current-buffer buf
-        (when (memq (process-status proc) '(exit signal))
-          (setq sprig--process nil
-                sprig--busy nil)
-          (message "sprig: session ended (%s)" (string-trim event)))))))
+  "Report PROC lifecycle EVENT, logging stderr on an abnormal exit."
+  (let ((buf (process-get proc :conv-buffer))
+        (stderr-proc (process-get proc :stderr-proc)))
+    (when (memq (process-status proc) '(exit signal))
+      (let ((err (and stderr-proc (process-get stderr-proc :acc)))
+            (status (process-exit-status proc))
+            (deliberate (process-get proc :deliberate)))
+        (when (process-live-p stderr-proc)
+          (delete-process stderr-proc))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (setq sprig--process nil
+                  sprig--busy nil)
+            (cond
+             ;; A clean, expected teardown: interrupt, disconnect, or exit 0.
+             ((or deliberate (and (eq (process-status proc) 'exit)
+                                  (zerop status)))
+              (message "sprig: session ended (%s)" (string-trim event)))
+             ;; An unexpected exit: surface why in the error buffer.
+             (t
+              (sprig--log-error
+               buf (format "session %s" (string-trim event)) err)
+              (message "sprig: session failed (%s); see %s"
+                       (string-trim event) sprig-error-buffer)))))))))
 
 ;;;; Overlay chrome: hide sentinels, show headers and rules
 
@@ -799,6 +851,7 @@ environment variable is resolved wherever the session runs."
                   (user-error "sprig: no such directory: %s" expanded))
                 expanded)
             default-directory))
+         (stderr (sprig--make-stderr))
          (proc (make-process
                 :name "sprig"
                 :buffer nil
@@ -806,9 +859,11 @@ environment variable is resolved wherever the session runs."
                 :connection-type 'pipe
                 :coding 'utf-8-unix
                 :noquery t
+                :stderr stderr
                 :filter #'sprig--filter
                 :sentinel #'sprig--sentinel)))
     (process-put proc :conv-buffer (current-buffer))
+    (process-put proc :stderr-proc stderr)
     (setq sprig--process proc)
     (message "sprig: %s (%s%s)"
              (if sprig--session-id "resuming session" "new session")
@@ -850,6 +905,7 @@ The pending turn is the prose typed after the last reply."
   (if (not sprig--busy)
       (message "sprig: nothing to interrupt")
     (when (process-live-p sprig--process)
+      (process-put sprig--process :deliberate t)
       (delete-process sprig--process))
     (setq sprig--process nil sprig--busy nil)
     (sprig--close-reply t)
@@ -862,7 +918,8 @@ The pending turn is the prose typed after the last reply."
   "Stop the session for this buffer (the conversation is kept)."
   (interactive)
   (if (process-live-p sprig--process)
-      (progn (delete-process sprig--process)
+      (progn (process-put sprig--process :deliberate t)
+             (delete-process sprig--process)
              (setq sprig--process nil sprig--busy nil)
              (message "sprig: disconnected"))
     (message "sprig: no live session")))
