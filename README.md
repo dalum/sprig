@@ -96,11 +96,12 @@ With `use-package` and a local checkout:
 
 ### Navigator
 
-`M-x sprig-status` opens a `*sprig-status*` buffer that lists every open conversation with its live status (`▶` streaming, `●` idle, `◼` interrupted, `○` disconnected), plus unopened branch files found under `sprig-status-directories`. It refreshes itself as sessions start, stream, and finish, so a reply landing in a buffer you are not viewing shows up here. In-buffer keys:
+`M-x sprig-status` opens a `*sprig-status*` buffer that lists every open conversation with its live status (`▶` streaming, `●` idle, `◼` interrupted, `○` disconnected), plus unopened branch files found under `sprig-status-directories`. It refreshes itself as sessions start, stream, and finish, so a reply landing in a buffer you are not viewing shows up here. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply, without leaving the navigator. In-buffer keys:
 
 | Key | Does |
 |---|---|
 | `RET` / `o` | Open the conversation on this line |
+| `TAB` | Toggle an inline preview of the session's last reply |
 | `c` | Connect the session (opening its file if needed) |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session |
@@ -123,6 +124,7 @@ With `use-package` and a local checkout:
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 | `sprig-show-cost` | `nil` | Append the turn's notional cost to the done message (off, since it is not real spend on a subscription) |
 | `sprig-status-directories` | `nil` | Directories the navigator scans for branch files (nil = open buffers' dirs plus `sprig-directory`) |
+| `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
 
 A single file can override the working directory with a `working_dir:` line in its YAML frontmatter, so one branch can run against a different project than the `sprig-directory` default. The value may use `~` and, for a remote session, is resolved on the SSH host.
 

@@ -164,8 +164,17 @@ SSH host).  Each entry may use a leading `~'."
   :type '(choice (const :tag "Auto (open buffers + sprig-directory)" nil)
                  (repeat directory)))
 
+(defcustom sprig-status-preview-max-lines 3
+  "Maximum number of lines shown in a navigator inline reply preview.
+`sprig-status-toggle-preview' (bound to TAB) expands the row at point to
+show the tail of that session's last reply, filled to this many lines."
+  :type 'integer)
+
 (defface sprig-tool '((t :inherit font-lock-keyword-face :weight bold))
   "Face for tool-call and result header labels.")
+
+(defface sprig-status-preview '((t :inherit shadow :slant italic))
+  "Face for the inline reply preview shown under an expanded navigator row.")
 
 (defface sprig-divider '((t :inherit shadow))
   "Face for the rule drawn at the start of a reply.")
@@ -1049,6 +1058,11 @@ Works from the header line or anywhere in the body."
 (defconst sprig--status-scan-bytes 8192
   "Leading bytes of a candidate .md file read when scanning for branches.")
 
+(defconst sprig--status-preview-bytes 65536
+  "Trailing bytes of a branch file read to preview its last reply.
+Large enough to hold the last reply-open sentinel for a typical turn; a
+reply longer than this simply shows no preview.")
+
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
     (idle         . "●")
@@ -1098,6 +1112,57 @@ checks first; the interrupted scan is reached only when no process lives."
     (or (sprig--frontmatter-get "title")
         (and buffer-file-name (file-name-base buffer-file-name))
         (buffer-name))))
+
+;;; Last-reply preview
+
+(defun sprig--last-paragraph (text)
+  "Return the last non-empty paragraph of TEXT, or nil.
+Sentinel lines are dropped and the surviving line breaks collapsed to
+single spaces, so the paragraph can be re-wrapped for display."
+  (let (result)
+    (dolist (para (split-string text "\n[ \t]*\n" t))
+      (let* ((lines (seq-remove (lambda (l) (string-match-p sprig--sentinel-re l))
+                                (split-string para "\n")))
+             (collapsed (string-trim
+                         (replace-regexp-in-string
+                          "[ \t]+" " " (mapconcat #'identity lines " ")))))
+        (unless (string-empty-p collapsed)
+          (setq result collapsed))))
+    result))
+
+(defun sprig--reply-preview-here ()
+  "Return the last paragraph of the last reply in the current buffer, or nil.
+Scans back from `point-max' to the last reply-open sentinel and reads to
+its matching close, or to buffer end for a still-streaming reply."
+  (save-excursion
+    (goto-char (point-max))
+    (when (re-search-backward sprig--reply-open-re nil t)
+      (let ((start (line-beginning-position 2))
+            (end (save-excursion
+                   (if (re-search-forward sprig--reply-end-re nil t)
+                       (line-beginning-position)
+                     (point-max)))))
+        (and (< start end)
+             (sprig--last-paragraph
+              (buffer-substring-no-properties start end)))))))
+
+(defun sprig--reply-preview-from-file (file)
+  "Return the last-reply preview read from FILE's trailing bytes, or nil."
+  (ignore-errors
+    (with-temp-buffer
+      (let* ((size (file-attribute-size (file-attributes file)))
+             (from (max 0 (- size sprig--status-preview-bytes))))
+        (insert-file-contents file nil from size))
+      (sprig--reply-preview-here))))
+
+(defun sprig--entry-preview (entry)
+  "Return the inline reply preview for status ENTRY, or nil.
+Reads the live buffer when ENTRY has one, else the on-disk file's tail."
+  (let ((buf (plist-get entry :buffer))
+        (file (plist-get entry :file)))
+    (cond ((buffer-live-p buf)
+           (with-current-buffer buf (sprig--reply-preview-here)))
+          (file (sprig--reply-preview-from-file file)))))
 
 ;;; On-disk branch-file scan
 
@@ -1223,6 +1288,69 @@ the buffer object; both are stable across refreshes so point is kept."
     (setq sprig--status-index index)
     (nreverse rows)))
 
+;;; Inline reply previews
+
+(defvar-local sprig--status-expanded nil
+  "Hash table of navigator entry ids currently showing an inline preview.")
+
+(defun sprig--status-toggle-id (id)
+  "Toggle inline-preview state for entry ID; return the new state."
+  (unless sprig--status-expanded
+    (setq sprig--status-expanded (make-hash-table :test 'equal)))
+  (if (gethash id sprig--status-expanded)
+      (progn (remhash id sprig--status-expanded) nil)
+    (puthash id t sprig--status-expanded) t))
+
+(defun sprig--status-preview-lines (entry)
+  "Return the propertized display lines for ENTRY's inline preview.
+The last reply's tail is filled to `sprig-status-preview-max-lines' and
+indented; a row with no reply yet shows a single muted placeholder."
+  (let* ((text (sprig--entry-preview entry))
+         (width (max 24 (- (min 100 (window-width)) 6)))
+         (lines (if (and text (not (string-empty-p text)))
+                    (with-temp-buffer
+                      (insert text)
+                      (let ((fill-column width))
+                        (fill-region (point-min) (point-max)))
+                      (split-string (buffer-string) "\n" t))
+                  (list "(no reply yet)"))))
+    (when (> (length lines) sprig-status-preview-max-lines)
+      (setq lines (seq-take lines sprig-status-preview-max-lines))
+      (setcar (last lines) (concat (car (last lines)) " …")))
+    (mapcar (lambda (l)
+              (propertize (concat "     " l) 'face 'sprig-status-preview))
+            lines)))
+
+(defun sprig--status-insert-previews ()
+  "Insert inline preview lines under each expanded row.
+Runs after `tabulated-list-print', which erases prior previews; the
+inserted lines carry no entry id, so navigation and the next reprint
+skip them cleanly."
+  (when (and sprig--status-expanded
+             (> (hash-table-count sprig--status-expanded) 0)
+             sprig--status-index)
+    (let ((inhibit-read-only t))
+      (save-excursion
+        (goto-char (point-min))
+        (while (not (eobp))
+          (let* ((id (tabulated-list-get-id))
+                 (entry (and id (gethash id sprig--status-expanded)
+                             (gethash id sprig--status-index))))
+            (when entry
+              (save-excursion
+                (end-of-line)
+                (insert "\n" (mapconcat #'identity
+                                        (sprig--status-preview-lines entry)
+                                        "\n")))))
+          (forward-line 1))))))
+
+(defun sprig--status-render ()
+  "Reprint the navigator and re-insert its inline previews.
+Every navigator refresh path routes through here so previews survive a
+reprint; point is kept on its row by `tabulated-list-print'."
+  (tabulated-list-print t)
+  (sprig--status-insert-previews))
+
 ;;; Major mode, verbs, and the entry command
 
 (defvar sprig-status-mode-map (make-sparse-keymap)
@@ -1232,6 +1360,7 @@ the buffer object; both are stable across refreshes so point is kept."
 ;; `g' (revert) and `q' (quit-window) are inherited from tabulated-list-mode.
 (define-key sprig-status-mode-map (kbd "RET") #'sprig-status-open)
 (define-key sprig-status-mode-map (kbd "o")   #'sprig-status-open)
+(define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
@@ -1253,7 +1382,12 @@ disconnect with \\[sprig-status-disconnect], refresh with \\[revert-buffer]."
         tabulated-list-padding 1
         tabulated-list-sort-key '("Title" . nil)
         tabulated-list-entries #'sprig--status-entries)
+  (setq-local revert-buffer-function #'sprig--status-revert)
   (tabulated-list-init-header))
+
+(defun sprig--status-revert (&rest _)
+  "Revert the navigator (the `g' / `revert-buffer' path), keeping previews."
+  (sprig--status-render))
 
 (defun sprig--status-refresh ()
   "Re-render the `*sprig-status*' navigator if it is live; else do nothing.
@@ -1264,7 +1398,7 @@ the navigator is not open."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (derived-mode-p 'sprig-status-mode)
-          (tabulated-list-print t))))))
+          (sprig--status-render))))))
 
 (defun sprig--status-refresh-deferred ()
   "Refresh the navigator on the next idle moment.
@@ -1319,6 +1453,16 @@ With CREATE, open the row's on-disk file when it has no live buffer."
     (with-current-buffer buf (sprig-disconnect))
     (sprig--status-refresh)))
 
+(defun sprig-status-toggle-preview ()
+  "Toggle an inline preview of the last reply for the row at point.
+Shows the tail of that session's last reply, filled to
+`sprig-status-preview-max-lines' lines; press again to hide it."
+  (interactive)
+  (let ((id (tabulated-list-get-id)))
+    (unless id (user-error "No Sprig session on this line"))
+    (sprig--status-toggle-id id)
+    (sprig--status-render)))
+
 (defun sprig-status-fork ()
   "Fork the branch on the current line (not implemented yet)."
   (interactive)
@@ -1343,7 +1487,7 @@ branch files found under `sprig-status-directories'."
   (let ((buf (get-buffer-create sprig-status-buffer-name)))
     (with-current-buffer buf
       (unless (derived-mode-p 'sprig-status-mode) (sprig-status-mode))
-      (tabulated-list-print t))
+      (sprig--status-render))
     (pop-to-buffer buf)))
 
 ;;;; Minor mode / keymap
