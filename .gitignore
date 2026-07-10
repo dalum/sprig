@@ -5,3 +5,6 @@
 
 # Scratch conversation buffers
 /diary.md
+
+# Local git worktrees
+/.worktrees/
