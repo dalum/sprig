@@ -192,13 +192,42 @@
 (ert-deftest sprig-review-mode-test-consume-debounces ()
   (with-temp-buffer
     (sprig-review-mode)
+    ;; The first text of a run defers (no tail yet) until a flush.
     (sprig-review-consume '(text "a"))
     (sprig-review-consume '(text "b"))
-    ;; Deferred: the burst has not rendered yet.
     (should-not (string-match-p "ab" (buffer-string)))
-    ;; One flush renders both coalesced events.
     (sprig-review-flush)
     (should (string-match-p "ab" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-text-fast-path ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "Hel"))
+    (sprig-review-flush)                 ; establishes the tail
+    (should (string-match-p "Hel" (buffer-string)))
+    ;; A further delta now appends in place, with no flush and no timer.
+    (should (null sprig-review--timer))
+    (sprig-review-consume '(text "lo"))
+    (should (null sprig-review--timer))
+    (should (string-match-p "Hello" (buffer-string)))
+    ;; A structural event rebuilds from the model to the same text.
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    (should (string-match-p "Hello" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-text-fast-path-newlines ()
+  ;; The in-place append and a full rebuild must agree across a newline
+  ;; boundary in the streamed text.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "line1\n"))
+    (sprig-review-flush)
+    (sprig-review-consume '(text "line2"))   ; fast append after a newline
+    (should (string-match-p "line1\nline2" (buffer-string)))
+    ;; Force a rebuild from the model; it must contain the same.
+    (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
+    (sprig-review-flush)
+    (should (string-match-p "line1\nline2" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
   (let ((model (sprig-review-build

@@ -66,6 +66,22 @@
   "Face for a metadata key in the header."
   :group 'sprig)
 
+;;;; Buffer-local state
+
+(defvar-local sprig-review--events nil
+  "Transport events consumed by this review buffer, most recent first.")
+(defvar-local sprig-review--meta nil
+  "Display-metadata plist feeding this review buffer's header.")
+(defvar-local sprig-review--dirty nil
+  "Non-nil when events have arrived since the last render.")
+(defvar-local sprig-review--timer nil
+  "Pending coalescing-refresh timer for this buffer, or nil.")
+(defvar-local sprig-review--tail nil
+  "Marker where streamed text is appended in place, or nil.
+`sprig-review-render' sets it to the end of the last text section when the
+conversation ends in assistant text, so consecutive `text' events extend
+that section without a full re-render.  Any structural event clears it.")
+
 ;;;; Heading helpers
 
 (defun sprig-review--stat-string (change)
@@ -134,11 +150,25 @@ header instead, so they return nil here."
     (when-let ((result (plist-get block :result)))
       (sprig-review--insert-result result))))
 
-(defun sprig-review--insert-text (block)
-  "Insert an assistant text BLOCK under a foldable role label."
+(defun sprig-review--text-body (text)
+  "Return TEXT with trailing newlines normalised to exactly one.
+Trailing spaces are kept (a streamed delta may legitimately end in one),
+so this matches what the in-place append path produces."
+  (concat (string-trim-right text "[\n]+") "\n"))
+
+(defun sprig-review--insert-text (block &optional open)
+  "Insert an assistant text BLOCK under a foldable role label.
+When OPEN, this is the live streaming block: render its text raw (plus a
+trailing newline) and record the tail (`sprig-review--tail') just before
+that newline, so `sprig-review--append-streamed' and a later full refresh
+produce identical text.  A settled block is normalised for tidy display."
   (magit-insert-section (sprig-text block)
     (magit-insert-heading (propertize "assistant" 'face 'sprig-review-role))
-    (insert (string-trim-right (plist-get block :text)) "\n")))
+    (if open
+        (progn
+          (insert (plist-get block :text) "\n")
+          (setq sprig-review--tail (copy-marker (1- (point)) t)))
+      (insert (sprig-review--text-body (plist-get block :text))))))
 
 (defun sprig-review--insert-user (block)
   "Insert a user-turn BLOCK under a foldable role label."
@@ -188,14 +218,18 @@ META may carry :title, :project, :model, and :status."
 META is an optional plist of display metadata (see
 `sprig-review--insert-headers').  The buffer should already be in
 `sprig-review-mode'."
-  (let ((inhibit-read-only t))
+  (let* ((inhibit-read-only t)
+         (blocks (plist-get model :blocks))
+         (last (car (last blocks))))
+    (setq sprig-review--tail nil)
     (erase-buffer)
     (magit-insert-section (sprig-review)
       (sprig-review--insert-headers model meta)
-      (dolist (block (plist-get model :blocks))
+      (dolist (block blocks)
         (pcase (plist-get block :type)
           ('user     (sprig-review--insert-user block))
-          ('text     (sprig-review--insert-text block))
+          ;; Only the last block, when it is text, is the live tail.
+          ('text     (sprig-review--insert-text block (eq block last)))
           ('thinking (sprig-review--insert-thinking block))
           ('tool     (sprig-review--insert-tool block))
           ('error    (sprig-review--insert-error block)))))
@@ -215,29 +249,27 @@ META is an optional plist of display metadata (see
 ;; visibility cache is keyed by a section's stable ident), and point is
 ;; carried to the same section when it still exists.
 ;;
-;; A full re-render is O(conversation), and a live turn emits many events
-;; per second, so `sprig-review-consume' does not render on each event.
-;; It marks the buffer dirty and arms a short timer; the timer coalesces a
-;; burst of events into a single render (`sprig-review-flush'), capping the
-;; re-render rate during streaming.  `seed'/`reset' render synchronously,
-;; since they are one-shot.
+;; A full re-render is O(conversation), too costly to run per streamed
+;; token in a long session, so `sprig-review-consume' avoids it two ways:
+;;
+;; - Streamed `text' deltas, the high-frequency case, extend the last text
+;;   section in place at `sprig-review--tail', with no re-render at all.
+;; - Structural events (a new tool call, a result, the user turn, done)
+;;   mark the buffer dirty and arm a short timer that coalesces a burst
+;;   into one render (`sprig-review-flush').  That render re-establishes
+;;   the tail, so the following text deltas take the fast path again.
+;;
+;; So the re-render count is bounded by the number of structural events in
+;; a turn, not the number of tokens.  `seed'/`reset' render synchronously,
+;; being one-shot.
 
 (defcustom sprig-review-refresh-delay 0.1
-  "Seconds to coalesce streamed events before re-rendering the review buffer.
-A live turn emits many events per second; batching them into one render at
-this cadence keeps a long conversation from re-rendering per token.  Lower
-is more responsive but re-renders more often."
+  "Seconds to coalesce structural events before re-rendering the review buffer.
+Batching them into one render at this cadence keeps a long conversation
+from re-rendering repeatedly.  Lower is more responsive but renders more
+often.  Streamed text does not wait on this; it appends in place."
   :type 'number
   :group 'sprig)
-
-(defvar-local sprig-review--events nil
-  "Transport events consumed by this review buffer, most recent first.")
-(defvar-local sprig-review--meta nil
-  "Display-metadata plist feeding this review buffer's header.")
-(defvar-local sprig-review--dirty nil
-  "Non-nil when events have arrived since the last render.")
-(defvar-local sprig-review--timer nil
-  "Pending coalescing-refresh timer for this buffer, or nil.")
 
 (defun sprig-review--refresh ()
   "Rebuild the model from accumulated events and re-render in place.
@@ -277,16 +309,34 @@ Called by the coalescing timer, and usable to force a render immediately."
           (setq sprig-review--dirty nil)
           (sprig-review--refresh))))))
 
-(defun sprig-review-consume (event)
-  "Fold transport EVENT into the current review buffer, coalescing renders.
-The buffer is marked dirty and a short timer armed; a burst of events thus
-renders once (see `sprig-review-refresh-delay'), not once per event."
-  (push event sprig-review--events)
+(defun sprig-review--append-streamed (s)
+  "Append streamed text S at the live text tail, without a re-render."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char sprig-review--tail)
+      (insert s))))          ; the type-t tail marker advances past S
+
+(defun sprig-review--schedule ()
+  "Mark the buffer dirty and arm the coalescing refresh timer."
   (setq sprig-review--dirty t)
   (unless sprig-review--timer
     (setq sprig-review--timer
           (run-with-timer sprig-review-refresh-delay nil
                           #'sprig-review-flush (current-buffer)))))
+
+(defun sprig-review-consume (event)
+  "Fold transport EVENT into the current review buffer.
+A streamed `text' delta extends the live text section in place, with no
+re-render, whenever a tail is established.  Every other event, and the
+first `text' of a run, clears the tail and schedules a coalesced render
+\(see `sprig-review-refresh-delay'), which re-establishes the tail."
+  (push event sprig-review--events)
+  (if (and (eq (car event) 'text)
+           sprig-review--tail (marker-position sprig-review--tail))
+      (sprig-review--append-streamed (cadr event))
+    (unless (eq (car event) 'text)
+      (setq sprig-review--tail nil))
+    (sprig-review--schedule)))
 
 (defun sprig-review-reset (&optional meta)
   "Drop this review buffer's accumulated events and render empty.
