@@ -101,6 +101,22 @@ Set by `sprig-review-attach'; the verbs send instructions through it.")
   "SSH destination of the session host, or nil for local.
 Set by `sprig-review-attach' so visiting a file reaches it over TRAMP.")
 
+;;;; Options
+
+(defcustom sprig-review-heading-max-width 80
+  "Maximum width of a tool-call heading before it is truncated with an ellipsis.
+Keeps a long `Bash' command or file path on a single line; the full text
+is one TAB away, since the tool section folds to its heading."
+  :type 'integer
+  :group 'sprig)
+
+(defcustom sprig-review-fontify-markdown t
+  "When non-nil, render user and assistant prose with `markdown-mode' faces.
+Markup characters (`*', `#', ...) are hidden.  Has no effect when
+`markdown-mode' is not installed."
+  :type 'boolean
+  :group 'sprig)
+
 ;;;; Heading helpers
 
 (defun sprig-review--stat-string (change)
@@ -108,14 +124,24 @@ Set by `sprig-review-attach' so visiting a file reaches it over TRAMP.")
   (let ((s (sprig-review-change-stat change)))
     (format "(+%d -%d)" (car s) (cdr s))))
 
+(defun sprig-review--truncate (s width)
+  "Return S truncated to WIDTH columns, ending in an ellipsis when shortened."
+  (if (> (string-width s) width)
+      (truncate-string-to-width s width nil nil "…")
+    s))
+
 (defun sprig-review--input-summary (name input)
   "Return a one-line summary of tool NAME's INPUT, or nil.
-Shows the command for `Bash'; file tools are summarised by their diff
-header instead, so they return nil here."
-  (when (equal name "Bash")
-    (let ((obj (sprig-review--parse-input input)))
-      (when-let ((cmd (alist-get 'command obj)))
-        (car (split-string cmd "\n"))))))
+Shows the command for `Bash'; other non-diff tools fall back to a salient
+input field (path, pattern, query, ...).  File tools that render a diff
+header instead pass their changes in, so this is only reached without one."
+  (let* ((obj (sprig-review--parse-input input))
+         (val (if (equal name "Bash")
+                  (alist-get 'command obj)
+                (seq-some (lambda (k) (alist-get k obj))
+                          '(file_path path pattern query url description prompt)))))
+    (when (stringp val)
+      (car (split-string val "\n")))))
 
 (defun sprig-review--tool-heading (block)
   "Return the single-line heading string for tool BLOCK."
@@ -129,7 +155,8 @@ header instead, so they return nil here."
       (changes
        (let ((c (car changes)))
          (concat "  " (plist-get c :file) "  " (sprig-review--stat-string c))))
-      (summary (concat "  " summary))
+      (summary (concat "  " (sprig-review--truncate
+                             summary sprig-review-heading-max-width)))
       (t ""))
      (if err (propertize "  [error]" 'face 'error) ""))))
 
@@ -161,13 +188,43 @@ header instead, so they return nil here."
         (insert text "\n")))))
 
 (defun sprig-review--insert-tool (block)
-  "Insert tool BLOCK: heading, its file-change diffs, then its result."
-  (magit-insert-section (sprig-tool block)
+  "Insert tool BLOCK: heading, its file-change diffs, then its result.
+A tool with no diff (Read, Bash, Grep, ...) folds to its one-line
+heading, since its body is context, not a change to review; a diff-
+bearing tool stays open so the change is visible at a glance."
+  (magit-insert-section (sprig-tool block (not (plist-get block :changes)))
     (magit-insert-heading (sprig-review--tool-heading block))
     (dolist (change (plist-get block :changes))
       (sprig-review--insert-change change))
     (when-let ((result (plist-get block :result)))
       (sprig-review--insert-result result))))
+
+(defvar markdown-hide-markup)
+(declare-function markdown-mode "markdown-mode" ())
+(declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
+
+(defun sprig-review--fontify-markdown (text)
+  "Return TEXT fontified with `markdown-mode', its markup characters hidden.
+Fontifies in a reusable hidden buffer and copies the propertized string,
+so the `*'/`#' markup carries an `invisible' property the review buffer's
+invisibility spec then hides (see `sprig-review-mode').  Returns TEXT
+unchanged when `sprig-review-fontify-markdown' is nil or markdown-mode is
+not installed."
+  (if (and sprig-review-fontify-markdown
+           (require 'markdown-mode nil t))
+      (with-current-buffer (get-buffer-create " *sprig-review-markdown*")
+        (let ((inhibit-read-only t))
+          (erase-buffer)
+          (delay-mode-hooks (markdown-mode))
+          (setq-local markdown-hide-markup t)
+          ;; The toggle wires markup hiding fully (invisibility spec plus the
+          ;; refontify hooks) where merely setting the flag may not.
+          (when (fboundp 'markdown-toggle-markup-hiding)
+            (ignore-errors (markdown-toggle-markup-hiding 1)))
+          (insert text)
+          (font-lock-ensure)
+          (buffer-string)))
+    text))
 
 (defun sprig-review--text-body (text)
   "Return TEXT with trailing newlines normalised to exactly one.
@@ -184,16 +241,21 @@ produce identical text.  A settled block is normalised for tidy display."
   (magit-insert-section (sprig-text block)
     (magit-insert-heading (propertize "assistant" 'face 'sprig-review-role))
     (if open
+        ;; The live block renders raw so the fast in-place append path and a
+        ;; later full rebuild agree; it gains markdown faces once it settles.
         (progn
           (insert (plist-get block :text) "\n")
           (setq sprig-review--tail (copy-marker (1- (point)) t)))
-      (insert (sprig-review--text-body (plist-get block :text))))))
+      (insert (sprig-review--fontify-markdown
+               (sprig-review--text-body (plist-get block :text)))))))
 
 (defun sprig-review--insert-user (block)
   "Insert a user-turn BLOCK under a foldable role label."
   (magit-insert-section (sprig-user block)
     (magit-insert-heading (propertize "user" 'face 'sprig-review-user))
-    (insert (string-trim-right (plist-get block :text)) "\n")))
+    (insert (sprig-review--fontify-markdown
+             (string-trim-right (plist-get block :text)))
+            "\n")))
 
 (defun sprig-review--insert-thinking (block)
   "Insert a thinking BLOCK, folded by default since it is verbose."
@@ -399,7 +461,14 @@ added on top as they land.")
   "Major mode for reviewing an agent conversation as read-only sections.
 Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   :group 'sprig
-  (setq-local revert-buffer-function #'ignore))
+  (setq-local revert-buffer-function #'ignore)
+  ;; Prose wraps on word boundaries; tool headings are pre-truncated to one
+  ;; line (see `sprig-review-heading-max-width'), so wrapping suits the body.
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  ;; Markdown markup (`*', `#', ...) carries `invisible markdown-markup' from
+  ;; `sprig-review--fontify-markdown'; hide it here so only the styling shows.
+  (add-to-invisibility-spec 'markdown-markup))
 
 (defun sprig-review-show (model &optional meta name)
   "Show review MODEL in a review buffer named NAME and select it.
