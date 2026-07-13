@@ -125,6 +125,8 @@ It is also a steering surface. Marking is the one selection primitive; a verb ac
 
 | Key | Does |
 |---|---|
+| `RET` | Visit the file the section points to (over SSH/TRAMP if remote) |
+| `t` | Retitle the conversation |
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
