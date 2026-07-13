@@ -201,5 +201,33 @@
       (should (re-search-forward "^thinking$" nil t))
       (should (oref (magit-current-section) hidden)))))
 
+(ert-deftest sprig-review-mode-test-open-file ()
+  (let ((file (make-temp-file "sprig-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert (json-serialize (list :type "ai-title" :aiTitle "Fixture"))
+                    "\n"
+                    (json-serialize
+                     (list :type "user" :message (list :content "hello")))
+                    "\n"
+                    (json-serialize
+                     (list :type "assistant"
+                           :message (list :content
+                                          (vector (list :type "text"
+                                                        :text "world")))))
+                    "\n"))
+          (should (= (length (sprig-review-read-session-lines file)) 3))
+          (save-window-excursion
+            (sprig-review-open-file file)
+            (with-current-buffer (format "*sprig-review: %s*"
+                                         (file-name-base file))
+              (should (derived-mode-p 'sprig-review-mode))
+              (let ((s (buffer-string)))
+                (should (string-match-p "Fixture" s))
+                (should (string-match-p "hello" s))
+                (should (string-match-p "world" s))))))
+      (delete-file file))))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here

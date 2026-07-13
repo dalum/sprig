@@ -279,5 +279,23 @@ META is passed to `sprig-review-render'."
       (sprig-review-render model meta))
     (pop-to-buffer buffer)))
 
+(defun sprig-review-read-session-lines (file)
+  "Return the non-empty JSONL lines of session-log FILE."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (split-string (buffer-string) "\n" t)))
+
+;;;###autoload
+(defun sprig-review-open-file (file)
+  "Open a read-only review of a stored `claude' session-log FILE.
+Replays the whole transcript from the log; see `sprig-review-session-model'.
+This is the local-read path.  A remote session's log lives on the SSH host
+and is fetched by the integration layer, not here."
+  (interactive "fSession log (.jsonl): ")
+  (sprig-review-show
+   (sprig-review-session-model (sprig-review-read-session-lines file))
+   nil
+   (format "*sprig-review: %s*" (file-name-base file))))
+
 (provide 'sprig-review-mode)
 ;;; sprig-review-mode.el ends here
