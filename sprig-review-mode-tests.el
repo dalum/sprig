@@ -111,5 +111,75 @@
         (should (string-match-p "ls -la" s))
         (should-not (string-match-p "🔧 Bash.*second" s))))))
 
+;;;; Live sink
+
+(ert-deftest sprig-review-mode-test-consume-incremental ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(session "s1"))
+    (sprig-review-consume '(text "Hel"))
+    (sprig-review-consume '(text "lo"))
+    ;; Text accumulates; no tool yet.
+    (should (string-match-p "Hello" (buffer-string)))
+    (should-not (string-match-p "🔧" (buffer-string)))
+    (let ((input (json-serialize (list :file_path "x" :old_string "a"
+                                       :new_string "b"))))
+      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
+      (sprig-review-consume '(tool-result "t1" nil "ok")))
+    (sprig-review-consume '(done 0.02 nil))
+    (let ((s (buffer-string)))
+      (should (string-match-p "Hello" s))
+      (should (string-match-p "🔧 Edit" s))
+      (should (string-match-p "ok" s))
+      (should (string-match-p "\\$0\\.02" s)))))
+
+(ert-deftest sprig-review-mode-test-consume-preserves-point ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((input (json-serialize (list :file_path "keep.el" :old_string "a"
+                                       :new_string "b"))))
+      (sprig-review-consume '(text "intro"))
+      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
+      (sprig-review-consume '(tool-result "t1" nil "ok")))
+    (goto-char (point-min))
+    (should (re-search-forward "keep\\.el" nil t))
+    (let ((type-before (oref (magit-current-section) type)))
+      ;; A later turn streams in; point must stay in the same section, not
+      ;; bounce to the top of the buffer.
+      (sprig-review-consume '(text-block))
+      (sprig-review-consume '(text "more"))
+      (should (eq (oref (magit-current-section) type) type-before))
+      (should (> (point) (point-min))))))
+
+(ert-deftest sprig-review-mode-test-consume-preserves-folds ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((input (json-serialize (list :file_path "x" :old_string "a"
+                                       :new_string "b"))))
+      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
+      (sprig-review-consume '(tool-result "t1" nil "secret")))
+    (goto-char (point-min))
+    (should (re-search-forward "↳ result" nil t))
+    (let ((sec (magit-current-section)))
+      (should (eq (oref sec type) 'sprig-result))
+      ;; Results fold by default; unfold like a user would.
+      (should (oref sec hidden))
+      (magit-section-show sec)
+      (should-not (oref sec hidden)))
+    ;; A later event refreshes the buffer; the unfold must survive.
+    (sprig-review-consume '(done 0.01 nil))
+    (goto-char (point-min))
+    (should (re-search-forward "↳ result" nil t))
+    (should-not (oref (magit-current-section) hidden))))
+
+(ert-deftest sprig-review-mode-test-reset ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "gone"))
+    (should (string-match-p "gone" (buffer-string)))
+    (sprig-review-reset '(:title "Fresh"))
+    (should-not (string-match-p "gone" (buffer-string)))
+    (should (string-match-p "Fresh" (buffer-string)))))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here

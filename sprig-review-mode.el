@@ -178,6 +178,58 @@ META is an optional plist of display metadata (see
           ('error (sprig-review--insert-error block)))))
     (goto-char (point-min))))
 
+;;;; Live sink: accumulate events, refresh the buffer
+;;
+;; The transport (sprig.el) emits the same backend-neutral events the
+;; Markdown sink consumes; a review buffer folds them into its model and
+;; re-renders.  `sprig-review-consume' is the counterpart of the Markdown
+;; sink's `sprig--dispatch': the transport calls it once per event.
+;;
+;; Refresh rebuilds from the whole event list rather than mutating the
+;; buffer in place.  That reuses the tested renderer verbatim and keeps
+;; the buffer a pure projection of the model.  magit-section makes the
+;; re-render cheap where it matters: user folds survive it (the
+;; visibility cache is keyed by a section's stable ident), and point is
+;; carried to the same section when it still exists.
+
+(defvar-local sprig-review--events nil
+  "Transport events consumed by this review buffer, most recent first.")
+(defvar-local sprig-review--meta nil
+  "Display-metadata plist feeding this review buffer's header.")
+
+(defun sprig-review--refresh ()
+  "Rebuild the model from accumulated events and re-render in place.
+Keep folds (via magit-section's visibility cache) and restore point to
+the same section, or to its previous position when that section is gone."
+  ;; Do not bind `magit-insert-section--oldroot' here: the
+  ;; `magit-insert-section' macro captures it from `magit-root-section'
+  ;; itself, and only then advances `magit-root-section' to the new root.
+  ;; Pre-binding it leaves the root stale and breaks section finishing.
+  (let* ((model (sprig-review-build (reverse sprig-review--events)))
+         (section (magit-current-section))
+         (ident (and section (magit-section-ident section)))
+         (offset (and section (- (point) (oref section start))))
+         (pos (point)))
+    (sprig-review-render model sprig-review--meta)
+    (let ((found (and ident (magit-get-section ident))))
+      (goto-char
+       (if found
+           (min (+ (oref found start) (max 0 (or offset 0)))
+                (or (oref found end) (point-max)))
+         (min pos (point-max)))))))
+
+(defun sprig-review-consume (event)
+  "Fold transport EVENT into the current review buffer and refresh it."
+  (push event sprig-review--events)
+  (sprig-review--refresh))
+
+(defun sprig-review-reset (&optional meta)
+  "Drop this review buffer's accumulated events and render empty.
+With META, replace the header metadata plist."
+  (setq sprig-review--events nil)
+  (when meta (setq sprig-review--meta meta))
+  (sprig-review--refresh))
+
 ;;;; Major mode
 
 (defvar sprig-review-mode-map
