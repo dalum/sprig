@@ -133,9 +133,9 @@ It is also a steering surface. Marking is the one selection primitive; a verb ac
 | `x` | Run: ask the agent to run the marked tool call's command |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Accept: clear the marks (sends nothing, commits nothing) |
-| `c` | Transient: `c c` compose & send, `c r` resend last turn, `c i` interrupt |
+| `c` | Transient: `c c` compose & send, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt |
 
-`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context.
+`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context. `c p` sends the turn in plan mode (the agent returns a plan rather than acting), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one.
 
 ## Options
 
