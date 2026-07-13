@@ -62,6 +62,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
+(require 'sprig-review)                  ; pure data layer; no magit-section
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
@@ -219,6 +220,10 @@ Opened in `sprig--start-reply' and amalgamated in `sprig--close-reply' so
 a whole streamed reply collapses to a single undo step.")
 (defvar-local sprig--title-process nil
   "In-flight side process generating this buffer's `title:', or nil.")
+(defvar-local sprig--review-buffer nil
+  "Attached read-only review buffer mirroring this conversation, or nil.
+When set, `sprig--handle' tees each transport event to it, so a live turn
+streams into the review buffer as well as the Markdown transcript.")
 
 ;;;; Sentinel grammar
 
@@ -375,7 +380,15 @@ state (`sprig--blocks') stays local to it."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (dolist (event (sprig--claude-parse-line line))
-          (sprig--dispatch event))))))
+          (sprig--dispatch event)
+          (sprig--tee-review event))))))
+
+(defun sprig--tee-review (event)
+  "Forward EVENT to this buffer's attached review buffer, if any."
+  (when (and sprig--review-buffer (buffer-live-p sprig--review-buffer)
+             (fboundp 'sprig-review-consume))
+    (with-current-buffer sprig--review-buffer
+      (sprig-review-consume event))))
 
 ;;; claude CLI transport: raw stream-json lines -> events
 
@@ -1281,6 +1294,7 @@ The pending turn is the prose typed after the last reply."
     (setq sprig--busy t)
     (sprig--start-reply)
     (sprig--send-user text)
+    (sprig--tee-review (list 'user text))
     (sprig--status-refresh)))
 
 ;;;###autoload
@@ -1318,6 +1332,74 @@ omitted are not recovered."
                   (symbol-name (sprig--tool-display))))))
   (sprig--frontmatter-set "sprig_tools" (symbol-name level))
   (message "sprig: tool display -> %s (applies to new turns)" level))
+
+;;;; Review buffer
+;;
+;; A read-only, Magit-like view of the conversation (see DESIGN.md).  The
+;; store is the CLI's own session log, so history is replayed from that
+;; file, no sprig store.  It lives on the session host, so a remote
+;; session's log is fetched over the same SSH the transport uses.  The
+;; buffer is then attached (`sprig--review-buffer') so the in-flight turn
+;; tees in live.
+
+(declare-function sprig-review-buffer "sprig-review-mode" (name))
+(declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
+(declare-function sprig-review-consume "sprig-review-mode" (event))
+
+(defun sprig--remote-sh (command)
+  "Run shell COMMAND on the session host via SSH; return stdout.
+Signals if SSH exits non-zero."
+  (with-temp-buffer
+    (let ((status (apply #'call-process sprig-ssh-program nil t nil
+                         (append sprig-ssh-args (list sprig-remote command)))))
+      (unless (eq status 0)
+        (error "sprig: remote command failed (%s): %s"
+               status (string-trim (buffer-string))))
+      (buffer-string))))
+
+(defun sprig--session-log-lines ()
+  "Return the stored session-log lines for this buffer's session.
+Locates the log by session id under ~/.claude/projects on the session
+host (local or over SSH), so the working-directory encoding never has to
+be reproduced.  Signals a `user-error' when there is no id or no log."
+  (let ((id (or (sprig--buffer-session-id)
+                (user-error "sprig: no session id yet; connect first"))))
+    (if sprig-remote
+        (let* ((name (shell-quote-argument (concat id ".jsonl")))
+               (path (string-trim
+                      (sprig--remote-sh
+                       (format "find ~/.claude/projects -name %s -print -quit"
+                               name)))))
+          (when (string-empty-p path)
+            (user-error "sprig: no session log for %s on %s" id sprig-remote))
+          (split-string (sprig--remote-sh
+                         (format "cat %s" (shell-quote-argument path)))
+                        "\n" t))
+      (let ((file (car (directory-files-recursively
+                        (expand-file-name "~/.claude/projects")
+                        (concat "\\`" (regexp-quote id) "\\.jsonl\\'")))))
+        (unless file
+          (user-error "sprig: no session log for %s" id))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (split-string (buffer-string) "\n" t))))))
+
+;;;###autoload
+(defun sprig-review ()
+  "Open a read-only review buffer for this conversation.
+Replays the whole transcript from the CLI's stored session log, then
+attaches so the in-flight turn streams in live."
+  (interactive)
+  (require 'sprig-review-mode)
+  (let* ((events (sprig-review-session-events (sprig--session-log-lines)))
+         (meta (list :title (sprig--buffer-title)
+                     :project (sprig--directory)))
+         (name (format "*sprig-review: %s*" (sprig--buffer-title)))
+         (buffer (sprig-review-buffer name)))
+    (with-current-buffer buffer
+      (sprig-review-seed events meta))
+    (setq sprig--review-buffer buffer)
+    (pop-to-buffer buffer)))
 
 ;;;; Folding commands
 
@@ -1879,6 +1961,7 @@ branch files found under `sprig-status-directories'."
 (define-key sprig-mode-map (kbd "C-c C-a C-o") #'sprig-connect)
 (define-key sprig-mode-map (kbd "C-c C-k")     #'sprig-interrupt)
 (define-key sprig-mode-map (kbd "C-c C-a C-k") #'sprig-disconnect)
+(define-key sprig-mode-map (kbd "C-c C-a C-r") #'sprig-review)
 (define-key sprig-mode-map (kbd "C-c C-f")     #'sprig-toggle-fold)
 
 (defun sprig--mode-line ()

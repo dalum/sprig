@@ -253,6 +253,21 @@ With META, replace the header metadata plist."
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
+(defun sprig-review-seed (events &optional meta)
+  "Seed this review buffer with EVENTS (in order) and refresh.
+Use this to replay history before the live sink appends more, so a later
+`sprig-review-consume' rebuilds from history plus the new event."
+  (setq sprig-review--events (reverse events))
+  (when meta (setq sprig-review--meta meta))
+  (sprig-review--refresh))
+
+(defun sprig-review-buffer (name)
+  "Return a buffer named NAME, put into `sprig-review-mode'."
+  (let ((buffer (get-buffer-create name)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'sprig-review-mode) (sprig-review-mode)))
+    buffer))
+
 ;;;; Major mode
 
 (defvar sprig-review-mode-map
@@ -288,14 +303,16 @@ META is passed to `sprig-review-render'."
 ;;;###autoload
 (defun sprig-review-open-file (file)
   "Open a read-only review of a stored `claude' session-log FILE.
-Replays the whole transcript from the log; see `sprig-review-session-model'.
+Replays the whole transcript from the log; see `sprig-review-session-events'.
 This is the local-read path.  A remote session's log lives on the SSH host
 and is fetched by the integration layer, not here."
   (interactive "fSession log (.jsonl): ")
-  (sprig-review-show
-   (sprig-review-session-model (sprig-review-read-session-lines file))
-   nil
-   (format "*sprig-review: %s*" (file-name-base file))))
+  (let ((buffer (sprig-review-buffer
+                 (format "*sprig-review: %s*" (file-name-base file)))))
+    (with-current-buffer buffer
+      (sprig-review-seed (sprig-review-session-events
+                          (sprig-review-read-session-lines file))))
+    (pop-to-buffer buffer)))
 
 (provide 'sprig-review-mode)
 ;;; sprig-review-mode.el ends here

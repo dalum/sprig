@@ -285,10 +285,13 @@ conversation content."
                                      :null-object nil :false-object nil))))
     (and (consp record) (sprig-review-session-record-events record))))
 
+(defun sprig-review-session-events (lines)
+  "Return the ordered event list parsed from LINES of the session log."
+  (apply #'append (mapcar #'sprig-review-parse-session-line lines)))
+
 (defun sprig-review-session-model (lines)
   "Build a review model from LINES of the stored session log."
-  (sprig-review-build
-   (apply #'append (mapcar #'sprig-review-parse-session-line lines))))
+  (sprig-review-build (sprig-review-session-events lines)))
 
 (provide 'sprig-review)
 ;;; sprig-review.el ends here
