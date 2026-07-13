@@ -117,6 +117,24 @@ With `use-package` and a local checkout:
 | `q` | Bury the navigator |
 | `f` / `r` / `x` | Fork / rename / prune (planned; not yet implemented) |
 
+### Review buffer
+
+`sprig-review` (`C-c C-a C-r`) opens a read-only, Magit-like view of the conversation, built on `magit-section`. It replays the whole transcript from the CLI's own session log (`~/.claude/projects/<cwd>/<id>.jsonl` on the session host, fetched over SSH for a remote session), so Sprig keeps no store of its own, and it attaches to the live session so the in-flight turn streams in. The agent's file edits render inline as a foldable diff, reconstructed from the tool calls. Move with `n` / `p`, fold with `TAB`.
+
+It is also a steering surface. Marking is the one selection primitive; a verb acts on the marked sections, or the section at point when nothing is marked. Every change-touching verb is an instruction sent to the agent (Sprig itself never runs git):
+
+| Key | Does |
+|---|---|
+| `SPC` / `m` | Toggle the mark on the section at point |
+| `U` | Clear all marks |
+| `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
+| `x` | Run: ask the agent to run the marked tool call's command |
+| `C` | Commit: ask the agent to commit the current changes |
+| `a` | Accept: clear the marks (sends nothing, commits nothing) |
+| `c` | Transient: `c c` compose & send, `c r` resend last turn, `c i` interrupt |
+
+`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context.
+
 ## Options
 
 | Variable | Default | Meaning |
