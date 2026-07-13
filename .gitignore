@@ -9,3 +9,7 @@
 
 # Local git worktrees
 /.worktrees/
+
+# Vendored dependencies for offline byte-compile / ERT (not shipped;
+# real installs get these via Package-Requires and straight/package.el)
+/.deps/

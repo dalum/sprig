@@ -25,7 +25,8 @@ Note: the CLI keeps conversation memory server-side and resumes by session id, s
 
 ## Requirements
 
-- Emacs 27.1+ (uses the built-in `json-parse-string` / `json-serialize`).
+- Emacs 28.1+ (uses the built-in `json-parse-string` / `json-serialize`).
+- `magit-section` 4.0+, for the read-only review buffer. It is declared in the package headers, so `package.el` / straight install it (and its own deps) automatically.
 - `claude` CLI v2.1+ on the machine that runs the session (local or the SSH host), logged in (`claude` then `/login`).
 - `markdown-mode` is recommended for the editing buffer, but not required.
 
@@ -155,10 +156,19 @@ Tool calls and their results are transcript-only: they render inline for you to 
 
 ## Development
 
-`sprig-tests.el` is an ERT suite covering the process-free layers (frontmatter, turn parsing, the stream-json transport and its event vocabulary, the sink, decoration parity, and the string and command-construction helpers). It runs offline, starting no session:
+`sprig-tests.el` is an ERT suite covering the process-free layers (frontmatter, turn parsing, the stream-json transport and its event vocabulary, the sink, decoration parity, the review model and tool-payload diff engine, and the string and command-construction helpers). It needs no extra dependencies and runs offline, starting no session:
 
 ```
 emacs -Q --batch -L . -l sprig.el -l sprig-tests.el -f ert-run-tests-batch-and-exit
+```
+
+The read-only review buffer (`sprig-review-mode.el`) has its own suite in `sprig-review-mode-tests.el`, which loads `magit-section`. Point the load path at wherever it is installed (locally, the vendored `.deps/` used for development):
+
+```
+emacs -Q --batch -L . -L .deps/compat -L .deps/cond-let -L .deps/llama \
+      -L .deps/magit-section \
+      -l sprig-review-mode.el -l sprig-review-mode-tests.el \
+      -f ert-run-tests-batch-and-exit
 ```
 
 ## Direction

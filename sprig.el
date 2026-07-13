@@ -2,7 +2,7 @@
 
 ;; Author: you
 ;; Version: 0.4.1
-;; Package-Requires: ((emacs "27.1"))
+;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
 ;;; Commentary:

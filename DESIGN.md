@@ -8,6 +8,102 @@
 
 An Emacs package for conversing with an LLM agent, breaking out of linear chat. You hold many conversations at once and fork any of them to explore several directions in parallel. Conversations are plain Markdown files you edit directly. The non-linear structure lives between files and is driven from a Magit-like control buffer.
 
+## Current direction: the review buffer (2026-07)
+
+A pivot, driven by how the tool is actually used. In practice the workflow is a single, linear history that is never hand-edited and never forked. So editing-in-place and the fork forest are shelved for now. The sections below this one (editable Markdown, fork by copy, the forest) describe the earlier direction and are kept for context, not because they are the plan.
+
+What replaces them: the conversation stops being an editable Markdown file and becomes a **read-only, Magit-like review buffer** whose one job is to review and steer agent work efficiently. Not a chat client. No input line at the bottom. A projection of state you move a cursor around, with convenient shortcuts.
+
+### Shape
+
+- Built on `magit-section`: foldable sections, free cursor movement over read-only text, an actionable metadata header, marks, and a transient for verbs.
+- Section kinds: the metadata header, user turns, assistant turns, thinking blocks, tool calls and results, plan steps, and diff hunks.
+- The metadata header carries title, project directory, model, session id, live status, cost, and tool-render level. It is actionable, not chrome: transients retitle, change the project dir, switch model, the way Magit's header popups work.
+
+### The crux: diff review
+
+The agent operates on a real repository, so the transcript and a review of the agent's diffs are the *same surface*. You read what it did and reject or reference parts of it without leaving the buffer. This is the centre of the design, everything else serves it.
+
+The hard problem is attribution: a conversation is turn-by-turn, but a git working tree is one cumulative diff against `HEAD`. They do not line up. The model is **two sources**:
+
+1. **Tool-call payloads = attribution.** Every `Edit` / `Write` / `MultiEdit` is a before/after already present in the stream-json. Reconstruct per-turn hunks from these. Precise, cheap, turn-attributed, and works even when the target is not a git repo.
+2. **Git working tree = ground truth.** The real uncommitted diff. Catches what payloads cannot: a `Bash` call that runs a formatter, a `sed`, codegen. Changes git shows but no payload explains surface as an **"unattributed changes"** section, which is exactly where the agent did something off-book worth an eyeball.
+
+**v1 uses source 1 only** (tool-payload reconstruction). It needs no git plumbing, works over SSH, and delivers most of the review value. Ground truth via git is a later slice.
+
+A possible phase-2 upgrade makes the metaphor literal: mirror each completed turn as a commit on a hidden ref (`refs/sprig/<session>`), one commit per turn. Turns become commits, attribution and revert come free from git. Costs to weigh first: isolating the user's own uncommitted changes from the agent's, and per-turn snapshot overhead. Note that under the instruction invariant below, Sprig cannot run this git machinery itself, so even the shadow ref would have to be the agent's doing (a per-turn "record a snapshot" instruction), or the invariant relaxed. This tension is why it is deferred.
+
+### Marks as the universal primitive
+
+Marking is the one gesture everything composes through, the way Magit's region-and-stage selects hunks.
+
+- Marking is the index. `c c` attaches whatever is marked as the context of the next message: a hunk, a plan step, a tool result, a paragraph.
+- Marks also drive **actions on the transcript**, with the verb section-type-aware. `c c` is type-agnostic. Type-specific verbs act on the applicable subset: `k` rejects marked hunks (instructs the agent to undo them, see below), `RET` visits, `x` runs a marked code block.
+- Verbs marks unlock: re-send a marked past user turn as a fresh turn (`c r`, no history rewrite); mark a hunk then `c c` to frame the message as "about this change" with the hunk inlined, so reviewing-by-replying is one gesture.
+
+### Sending is committing
+
+There is no input area. Sending mirrors Magit's commit gesture. `c` opens a transient:
+
+- `c c` compose and send. Pops a dedicated `SPRIG_MSG` buffer: your prose on top, a commented preamble below showing exactly what context is attached and what the agent last said, the way `COMMIT_EDITMSG` shows the diff. `C-c C-c` fires, `C-c C-k` aborts. You never guess what you sent.
+- `c p` send in plan mode (the agent must return a plan, not act).
+- `c r` retry or re-send.
+- `c i` interrupt the streaming turn.
+
+### Plan mode
+
+The plan comes back as a markable section tree. Navigate, `TAB` to expand a step, `SPC` / `m` to mark a subset. Annotate a marked step inline ("do this, but keep the old names"). Sending returns a *structured* review: approved steps in order, each with its note, the rest rejected. Plan review becomes staging, not a pasted paragraph of feedback.
+
+### Store versus view
+
+A read-only projection no longer needs the file to double as the editable surface, so store and view separate. The live store becomes the append-only event log (the stream-json the CLI already emits); the buffer is a pure render of it. The `sprig:` sentinels and the edit guard existed to make an editable text file safely re-parseable, and lose their reason to exist. Markdown becomes an *export* format, not the live truth. Frontmatter-style metadata (title, project dir, session id) is still needed and still persists; it feeds the header.
+
+### Sprig sends instructions, the agent acts
+
+The governing invariant: **Sprig never touches the repository itself.** Every effect on the working tree is mediated through the agent over the stream-json channel that is already open. Review verbs compile to instructions, not local git commands.
+
+- **Reject a hunk** (`k`): an instruction to the agent to undo that change, not a local `git apply -R`. Batch with marks: mark the bad hunks, `c c`, "undo these", one turn.
+- **Accept changes**: keep them and clear the review state. A local acknowledgement, no side effect, no commit. Accepting never triggers a commit.
+- **Commit** is a *separate* verb: an explicit instruction to the agent to commit the changes. Kept distinct from accept so accepting can never surprise you with a commit.
+- **Ground truth diff** (the phase-2 git source) also comes from the agent running `git diff` and reporting it, not from Sprig shelling out.
+
+Two consequences fall out for free:
+
+- **Remote works from day one.** Nothing Sprig does needs a local or TRAMP git process, because the agent already sits on the repo's host. Sprig only ever sends text down the channel it already has. This is why the design targets SSH from the start rather than bolting it on. It also retires the earlier "drop into `magit-status` to commit" seam, which never worked cleanly against a remote repo.
+- **Reject is a steer, not an instant revert.** Rejecting costs a round-trip, since the agent does the undo. Marking makes it a batch, but it is still a turn, not a local `git checkout`. That is the honest tradeoff for the invariant.
+
+### Verbs are canned instructions
+
+There is no separate execution engine. Every type-specific verb is sugar over `c c`: it attaches the marked section(s) and fills in a templated instruction instead of making you type it.
+
+- `k` reject = the marked hunk plus a canned "undo this".
+- commit = a canned "commit these changes".
+- `x` run = the marked code block plus a canned "run this". In v1: it needs no new machinery, it is the same shortcut as `k` and commit with a different pre-filled instruction, so there is no reason to defer it.
+
+The payoff is that the model stays tiny. Sprig does exactly one thing, send an instruction with attached context. The verbs are pre-written messages, not special paths, so a new shortcut is cheap and there is no code executor to build or secure.
+
+### Scope discipline
+
+v1 does not replicate Magit. Diff sections support **visit** (`RET`), **reject** (`k`, an instruction to undo), **accept** (keep and clear the review state), **commit** (a separate explicit instruction), **run** (`x`, an instruction to run a marked code block), and **mark**. The job is to review and steer agent work efficiently, not to be Magit and not to do git.
+
+### Verb dispatch on mixed marks
+
+Only *type-specific set verbs* (`k` and `x`) face this. `c c` is type-agnostic, and `RET` is a point op that ignores marks and acts at point. The rule:
+
+- **Act on the applicable subset, never refuse.** `k` on 2 hunks and 3 paragraphs undoes the hunks and leaves the paragraphs.
+- **Always report** what happened ("reject: undoing 2 hunks, ignored 3 non-hunk marks"). Because reject fires a real agent turn, **confirm first when the marked set is heterogeneous**; a pure-hunk batch, the intended flow, goes through without a prompt.
+- **Consume only the marks acted on.** The hunks unmark, the paragraphs stay marked for a follow-up `c c`.
+
+In one sentence: type-specific set verbs act on the applicable subset, report and (for destructive ones) confirm on a mixed set, and consume only the marks they touched.
+
+### Build progress
+
+- **Done (2026-07-13):** the data foundation and the renderer.
+  - `sprig-review.el` (pure, offline-tested): the tool-payload diff engine (`sprig-review-tool-changes`) reconstructs per-file, per-hunk changes from `Edit` / `MultiEdit` / `Write` payloads, with add/remove stats and a unified-diff formatter; the review model (`sprig-review-build`) folds the transport event vocabulary into an ordered block model (coalesced assistant text, tool calls with reconstructed changes and paired results, errors). Reuses sprig.el's transport, needs no live session or git.
+  - `sprig-review-mode.el`: a read-only `magit-section` major mode that projects the model into rows, a metadata header, assistant prose, tool calls whose file changes render as a foldable coloured diff with their (folded) result. Each section carries its model plist on the `value` slot, so the verbs can read the object under point without re-parsing. Its ERT suite loads magit-section and runs separately from the process-free suite.
+  - Packaging: `magit-section` declared in `Package-Requires`; the Emacs floor moved to 28.1 to match. magit-section and its deps (`compat`, `cond-let`, `llama`) are vendored under a gitignored `.deps/` for offline byte-compile and tests only.
+- **Next:** wire the renderer to the live event stream (a review sink beside the Markdown one), then the mark-and-instruction verbs (`c c`, `k`, accept, commit, `x`) and the `c` transient, reading the plist under point.
+
 ## Architecture
 
 Two surfaces, cleanly separated.
