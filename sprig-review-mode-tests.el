@@ -119,6 +119,7 @@
     (sprig-review-consume '(session "s1"))
     (sprig-review-consume '(text "Hel"))
     (sprig-review-consume '(text "lo"))
+    (sprig-review-flush)
     ;; Text accumulates; no tool yet.
     (should (string-match-p "Hello" (buffer-string)))
     (should-not (string-match-p "🔧" (buffer-string)))
@@ -127,6 +128,7 @@
       (sprig-review-consume (list 'tool-call "t1" "Edit" input))
       (sprig-review-consume '(tool-result "t1" nil "ok")))
     (sprig-review-consume '(done 0.02 nil))
+    (sprig-review-flush)
     (let ((s (buffer-string)))
       (should (string-match-p "Hello" s))
       (should (string-match-p "🔧 Edit" s))
@@ -141,6 +143,7 @@
       (sprig-review-consume '(text "intro"))
       (sprig-review-consume (list 'tool-call "t1" "Edit" input))
       (sprig-review-consume '(tool-result "t1" nil "ok")))
+    (sprig-review-flush)
     (goto-char (point-min))
     (should (re-search-forward "keep\\.el" nil t))
     (let ((type-before (oref (magit-current-section) type)))
@@ -148,6 +151,7 @@
       ;; bounce to the top of the buffer.
       (sprig-review-consume '(text-block))
       (sprig-review-consume '(text "more"))
+      (sprig-review-flush)
       (should (eq (oref (magit-current-section) type) type-before))
       (should (> (point) (point-min))))))
 
@@ -158,6 +162,7 @@
                                        :new_string "b"))))
       (sprig-review-consume (list 'tool-call "t1" "Edit" input))
       (sprig-review-consume '(tool-result "t1" nil "secret")))
+    (sprig-review-flush)
     (goto-char (point-min))
     (should (re-search-forward "↳ result" nil t))
     (let ((sec (magit-current-section)))
@@ -168,6 +173,7 @@
       (should-not (oref sec hidden)))
     ;; A later event refreshes the buffer; the unfold must survive.
     (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
     (goto-char (point-min))
     (should (re-search-forward "↳ result" nil t))
     (should-not (oref (magit-current-section) hidden))))
@@ -176,10 +182,23 @@
   (with-temp-buffer
     (sprig-review-mode)
     (sprig-review-consume '(text "gone"))
+    (sprig-review-flush)
     (should (string-match-p "gone" (buffer-string)))
+    ;; reset renders synchronously, no flush needed.
     (sprig-review-reset '(:title "Fresh"))
     (should-not (string-match-p "gone" (buffer-string)))
     (should (string-match-p "Fresh" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-consume-debounces ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "a"))
+    (sprig-review-consume '(text "b"))
+    ;; Deferred: the burst has not rendered yet.
+    (should-not (string-match-p "ab" (buffer-string)))
+    ;; One flush renders both coalesced events.
+    (sprig-review-flush)
+    (should (string-match-p "ab" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
   (let ((model (sprig-review-build

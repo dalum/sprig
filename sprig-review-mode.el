@@ -214,11 +214,30 @@ META is an optional plist of display metadata (see
 ;; re-render cheap where it matters: user folds survive it (the
 ;; visibility cache is keyed by a section's stable ident), and point is
 ;; carried to the same section when it still exists.
+;;
+;; A full re-render is O(conversation), and a live turn emits many events
+;; per second, so `sprig-review-consume' does not render on each event.
+;; It marks the buffer dirty and arms a short timer; the timer coalesces a
+;; burst of events into a single render (`sprig-review-flush'), capping the
+;; re-render rate during streaming.  `seed'/`reset' render synchronously,
+;; since they are one-shot.
+
+(defcustom sprig-review-refresh-delay 0.1
+  "Seconds to coalesce streamed events before re-rendering the review buffer.
+A live turn emits many events per second; batching them into one render at
+this cadence keeps a long conversation from re-rendering per token.  Lower
+is more responsive but re-renders more often."
+  :type 'number
+  :group 'sprig)
 
 (defvar-local sprig-review--events nil
   "Transport events consumed by this review buffer, most recent first.")
 (defvar-local sprig-review--meta nil
   "Display-metadata plist feeding this review buffer's header.")
+(defvar-local sprig-review--dirty nil
+  "Non-nil when events have arrived since the last render.")
+(defvar-local sprig-review--timer nil
+  "Pending coalescing-refresh timer for this buffer, or nil.")
 
 (defun sprig-review--refresh ()
   "Rebuild the model from accumulated events and re-render in place.
@@ -241,23 +260,48 @@ the same section, or to its previous position when that section is gone."
                 (or (oref found end) (point-max)))
          (min pos (point-max)))))))
 
+(defun sprig-review--cancel-timer ()
+  "Cancel this buffer's pending coalescing-refresh timer, if any."
+  (when sprig-review--timer
+    (cancel-timer sprig-review--timer)
+    (setq sprig-review--timer nil)))
+
+(defun sprig-review-flush (&optional buffer)
+  "Render events pending in BUFFER since the last refresh, now.
+Called by the coalescing timer, and usable to force a render immediately."
+  (let ((buf (or buffer (current-buffer))))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (sprig-review--cancel-timer)
+        (when sprig-review--dirty
+          (setq sprig-review--dirty nil)
+          (sprig-review--refresh))))))
+
 (defun sprig-review-consume (event)
-  "Fold transport EVENT into the current review buffer and refresh it."
+  "Fold transport EVENT into the current review buffer, coalescing renders.
+The buffer is marked dirty and a short timer armed; a burst of events thus
+renders once (see `sprig-review-refresh-delay'), not once per event."
   (push event sprig-review--events)
-  (sprig-review--refresh))
+  (setq sprig-review--dirty t)
+  (unless sprig-review--timer
+    (setq sprig-review--timer
+          (run-with-timer sprig-review-refresh-delay nil
+                          #'sprig-review-flush (current-buffer)))))
 
 (defun sprig-review-reset (&optional meta)
   "Drop this review buffer's accumulated events and render empty.
 With META, replace the header metadata plist."
-  (setq sprig-review--events nil)
+  (sprig-review--cancel-timer)
+  (setq sprig-review--events nil sprig-review--dirty nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
 (defun sprig-review-seed (events &optional meta)
-  "Seed this review buffer with EVENTS (in order) and refresh.
+  "Seed this review buffer with EVENTS (in order) and refresh synchronously.
 Use this to replay history before the live sink appends more, so a later
 `sprig-review-consume' rebuilds from history plus the new event."
-  (setq sprig-review--events (reverse events))
+  (sprig-review--cancel-timer)
+  (setq sprig-review--events (reverse events) sprig-review--dirty nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
