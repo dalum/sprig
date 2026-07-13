@@ -1280,6 +1280,24 @@ it reports a clean teardown rather than logging a failure."
                            :content [(:type "text" :text ,text)])))))
     (process-send-string sprig--process (concat json "\n"))))
 
+(defun sprig--send-text (text)
+  "Send TEXT as this buffer's next user turn programmatically.
+Unlike `sprig-send', which sends prose already typed in the buffer, this
+appends TEXT as a user turn first, then streams the reply.  It is how the
+review buffer's verbs steer the conversation (see `sprig-review')."
+  (sprig--ensure)
+  (when sprig--busy
+    (user-error "A turn is already in flight"))
+  (save-excursion
+    (goto-char (point-max))
+    (unless (bolp) (insert "\n"))
+    (insert text "\n"))
+  (setq sprig--busy t)
+  (sprig--start-reply)
+  (sprig--send-user text)
+  (sprig--tee-review (list 'user text))
+  (sprig--status-refresh))
+
 ;;;###autoload
 (defun sprig-send ()
   "Send the pending user turn and stream the reply into a new block.
@@ -1345,6 +1363,7 @@ omitted are not recovered."
 (declare-function sprig-review-buffer "sprig-review-mode" (name))
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
+(declare-function sprig-review-attach "sprig-review-mode" (conversation))
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1391,13 +1410,15 @@ Replays the whole transcript from the CLI's stored session log, then
 attaches so the in-flight turn streams in live."
   (interactive)
   (require 'sprig-review-mode)
-  (let* ((events (sprig-review-session-events (sprig--session-log-lines)))
+  (let* ((conversation (current-buffer))
+         (events (sprig-review-session-events (sprig--session-log-lines)))
          (meta (list :title (sprig--buffer-title)
                      :project (sprig--directory)))
          (name (format "*sprig-review: %s*" (sprig--buffer-title)))
          (buffer (sprig-review-buffer name)))
     (with-current-buffer buffer
-      (sprig-review-seed events meta))
+      (sprig-review-seed events meta)
+      (sprig-review-attach conversation))
     (setq sprig--review-buffer buffer)
     (pop-to-buffer buffer)))
 

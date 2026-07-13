@@ -31,6 +31,11 @@
 (require 'sprig-review)
 (require 'subr-x)
 (require 'eieio)
+(require 'transient)
+(require 'seq)
+
+(declare-function sprig--send-text "sprig" (text))
+(declare-function sprig-interrupt "sprig" ())
 
 ;;;; Faces
 
@@ -66,6 +71,10 @@
   "Face for a metadata key in the header."
   :group 'sprig)
 
+(defface sprig-review-marked '((t :inherit highlight))
+  "Face for the heading of a marked section."
+  :group 'sprig)
+
 ;;;; Buffer-local state
 
 (defvar-local sprig-review--events nil
@@ -81,6 +90,12 @@
 `sprig-review-render' sets it to the end of the last text section when the
 conversation ends in assistant text, so consecutive `text' events extend
 that section without a full re-render.  Any structural event clears it.")
+(defvar-local sprig-review--marks nil
+  "Idents (per `magit-section-ident') of the marked sections.
+Idents rather than section objects, so marks survive a re-render.")
+(defvar-local sprig-review--conversation nil
+  "The sprig conversation buffer this review steers, or nil.
+Set by `sprig-review-attach'; the verbs send instructions through it.")
 
 ;;;; Heading helpers
 
@@ -290,7 +305,8 @@ the same section, or to its previous position when that section is gone."
        (if found
            (min (+ (oref found start) (max 0 (or offset 0)))
                 (or (oref found end) (point-max)))
-         (min pos (point-max)))))))
+         (min pos (point-max)))))
+    (sprig-review--apply-marks)))
 
 (defun sprig-review--cancel-timer ()
   "Cancel this buffer's pending coalescing-refresh timer, if any."
@@ -407,6 +423,265 @@ and is fetched by the integration layer, not here."
       (sprig-review-seed (sprig-review-session-events
                           (sprig-review-read-session-lines file))))
     (pop-to-buffer buffer)))
+
+;;;; Marks
+;;
+;; Marking is the review buffer's one selection primitive (see DESIGN.md):
+;; a verb acts on the marked sections, or on the section at point when
+;; nothing is marked.  Marks are stored as section idents so they survive
+;; a re-render, and re-applied by `sprig-review--refresh'.
+
+(defun sprig-review--apply-marks ()
+  "Highlight the marked sections; drop marks whose section no longer exists."
+  (remove-overlays (point-min) (point-max) 'sprig-review-mark t)
+  (setq sprig-review--marks (seq-filter #'magit-get-section sprig-review--marks))
+  (dolist (ident sprig-review--marks)
+    (let* ((sec (magit-get-section ident))
+           (beg (oref sec start))
+           (end (save-excursion (goto-char beg)
+                                (min (1+ (line-end-position)) (point-max))))
+           (ov (make-overlay beg end)))
+      (overlay-put ov 'sprig-review-mark t)
+      (overlay-put ov 'face 'sprig-review-marked)
+      (overlay-put ov 'before-string (propertize "▸" 'face 'sprig-review-marked)))))
+
+(defun sprig-review-toggle-mark ()
+  "Toggle the mark on the section at point, then move to the next section."
+  (interactive)
+  (when-let ((sec (magit-current-section)))
+    (let ((ident (magit-section-ident sec)))
+      (setq sprig-review--marks
+            (if (member ident sprig-review--marks)
+                (delete ident sprig-review--marks)
+              (cons ident sprig-review--marks))))
+    (sprig-review--apply-marks)
+    (ignore-errors (magit-section-forward))))
+
+(defun sprig-review-unmark-all ()
+  "Clear all marks."
+  (interactive)
+  (setq sprig-review--marks nil)
+  (sprig-review--apply-marks))
+
+(defun sprig-review--marked-sections ()
+  "Return the marked sections, or the section at point if none are marked."
+  (or (let (secs)
+        (dolist (ident (reverse sprig-review--marks))
+          (when-let ((s (magit-get-section ident))) (push s secs)))
+        (nreverse secs))
+      (when-let ((s (magit-current-section))) (list s))))
+
+(defun sprig-review--sections-of-type (sections type)
+  "Return the members of SECTIONS whose section type is TYPE."
+  (seq-filter (lambda (s) (eq (oref s type) type)) sections))
+
+(defun sprig-review--unmark-sections (sections)
+  "Drop the marks on SECTIONS and refresh the highlighting."
+  (dolist (s sections)
+    (setq sprig-review--marks
+          (delete (magit-section-ident s) sprig-review--marks)))
+  (sprig-review--apply-marks))
+
+;;;; Instruction builders
+;;
+;; Every change-touching verb is sugar over a message to the agent (see
+;; DESIGN.md, "Verbs are canned instructions").  These builders are pure:
+;; they turn the object(s) under point or marked into the instruction text.
+
+(defcustom sprig-review-commit-instruction
+  "Please commit the current changes with a suitable commit message."
+  "Instruction the commit verb sends to the agent."
+  :type 'string
+  :group 'sprig)
+
+(defun sprig-review-reject-instruction (changes)
+  "Return an instruction asking the agent to undo CHANGES.
+CHANGES is a list of (FILE . HUNK-PLIST)."
+  (concat
+   (if (cdr changes) "Please undo these changes:\n\n"
+     "Please undo this change:\n\n")
+   (mapconcat
+    (lambda (fc)
+      (format "In `%s`:\n```diff\n%s\n```"
+              (car fc) (sprig-review--format-hunk (cdr fc))))
+    changes "\n\n")))
+
+(defun sprig-review-run-instruction (command)
+  "Return an instruction asking the agent to run COMMAND."
+  (format "Please run:\n```\n%s\n```" command))
+
+;;;; Steering: send through the attached conversation
+
+(defun sprig-review-attach (conversation)
+  "Attach this review buffer to its CONVERSATION buffer, so verbs can steer it."
+  (setq sprig-review--conversation conversation))
+
+(defun sprig-review--send (text)
+  "Send TEXT as a user instruction through the attached conversation."
+  (unless (buffer-live-p sprig-review--conversation)
+    (user-error "This review is not attached to a live conversation"))
+  (with-current-buffer sprig-review--conversation
+    (sprig--send-text text))
+  (message "sprig: sent"))
+
+;;;; Verbs
+
+(defun sprig-review--reject-pairs (sections)
+  "Return (FILE . HUNK) pairs for the hunk SECTIONS."
+  (delq nil
+        (mapcar (lambda (s)
+                  (when (eq (oref s type) 'sprig-hunk)
+                    (cons (plist-get (oref (oref s parent) value) :file)
+                          (oref s value))))
+                sections)))
+
+(defun sprig-review-reject ()
+  "Ask the agent to undo the marked diff hunks, or the hunk at point.
+On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
+  (interactive)
+  (let* ((sections (sprig-review--marked-sections))
+         (pairs (sprig-review--reject-pairs sections)))
+    (unless pairs (user-error "No diff hunk marked or at point"))
+    (when (and sprig-review--marks (< (length pairs) (length sections))
+               (not (y-or-n-p
+                     (format "Reject %d hunk(s), ignoring %d other mark(s)? "
+                             (length pairs) (- (length sections) (length pairs))))))
+      (user-error "Cancelled"))
+    (sprig-review--send (sprig-review-reject-instruction pairs))
+    (sprig-review--unmark-sections
+     (sprig-review--sections-of-type sections 'sprig-hunk))))
+
+(defun sprig-review-commit ()
+  "Ask the agent to commit the current changes."
+  (interactive)
+  (sprig-review--send sprig-review-commit-instruction))
+
+(defun sprig-review-run ()
+  "Ask the agent to run the command of the tool call marked or at point."
+  (interactive)
+  (let* ((sections (sprig-review--marked-sections))
+         (tool (seq-find (lambda (s) (eq (oref s type) 'sprig-tool)) sections)))
+    (unless tool (user-error "No tool call marked or at point"))
+    (let ((cmd (alist-get 'command
+                          (sprig-review--parse-input
+                           (plist-get (oref tool value) :input)))))
+      (unless cmd (user-error "That tool call has no command to run"))
+      (sprig-review--send (sprig-review-run-instruction cmd)))))
+
+(defun sprig-review-accept ()
+  "Accept the changes under review: clear the marks, send nothing, commit nothing."
+  (interactive)
+  (sprig-review-unmark-all)
+  (message "sprig: accepted (marks cleared; commit is a separate verb)"))
+
+(defun sprig-review-retry ()
+  "Re-send the most recent user turn."
+  (interactive)
+  (let* ((model (sprig-review-build (reverse sprig-review--events)))
+         (last-user (seq-find (lambda (b) (eq (plist-get b :type) 'user))
+                              (reverse (plist-get model :blocks)))))
+    (unless last-user (user-error "No previous user turn to resend"))
+    (sprig-review--send (plist-get last-user :text))))
+
+(defun sprig-review-interrupt ()
+  "Interrupt the in-flight turn in the attached conversation."
+  (interactive)
+  (unless (buffer-live-p sprig-review--conversation)
+    (user-error "This review is not attached to a live conversation"))
+  (with-current-buffer sprig-review--conversation (sprig-interrupt)))
+
+;;;; Compose buffer (the c c message)
+
+(defvar-local sprig-review--compose-target nil
+  "Review buffer a compose buffer sends to.")
+(defvar-local sprig-review--compose-context nil
+  "Marked-section context prepended to the composed message, or nil.")
+
+(defvar sprig-review-compose-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-c C-c") #'sprig-review-compose-send)
+    (define-key map (kbd "C-c C-k") #'sprig-review-compose-abort)
+    map)
+  "Keymap for `sprig-review-compose-mode'.")
+
+(define-derived-mode sprig-review-compose-mode text-mode "Sprig-Msg"
+  "Compose a message to send to a sprig conversation.
+\\<sprig-review-compose-mode-map>\\[sprig-review-compose-send] sends, \
+\\[sprig-review-compose-abort] cancels.")
+
+(defun sprig-review--marked-context ()
+  "Return the text of the marked sections as a context string, or nil.
+Uses only real marks, not the section-at-point fallback."
+  (when sprig-review--marks
+    (let ((secs (sprig-review--marked-sections)))
+      (mapconcat (lambda (s)
+                   (string-trim (buffer-substring-no-properties
+                                 (oref s start) (oref s end))))
+                 secs "\n\n"))))
+
+(defun sprig-review-message ()
+  "Compose a message and send it to the attached conversation.
+Any marked sections are attached as context (see DESIGN.md's `c c')."
+  (interactive)
+  (unless (buffer-live-p sprig-review--conversation)
+    (user-error "This review is not attached to a live conversation"))
+  (let ((review (current-buffer))
+        (context (sprig-review--marked-context))
+        (buf (get-buffer-create "*sprig-message*")))
+    (with-current-buffer buf
+      (sprig-review-compose-mode)
+      (erase-buffer)
+      (setq sprig-review--compose-target review
+            sprig-review--compose-context context))
+    (pop-to-buffer buf)
+    (message "%sC-c C-c to send, C-c C-k to cancel"
+             (if context (format "%d section(s) attached.  "
+                                 (length (sprig-review--marked-sections)))
+               ""))))
+
+(defun sprig-review-compose-send ()
+  "Send the composed message (with any attached context) to the conversation."
+  (interactive)
+  (let ((text (string-trim (buffer-substring-no-properties
+                            (point-min) (point-max))))
+        (review sprig-review--compose-target)
+        (context sprig-review--compose-context))
+    (when (string-empty-p text) (user-error "Empty message"))
+    (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+    (quit-window t)
+    (with-current-buffer review
+      (sprig-review--send
+       (if context (format "Regarding:\n\n%s\n\n%s" context text) text)))))
+
+(defun sprig-review-compose-abort ()
+  "Cancel the message compose."
+  (interactive)
+  (quit-window t)
+  (message "sprig: message cancelled"))
+
+;;;; The c transient
+
+(transient-define-prefix sprig-review-dispatch ()
+  "Steer the conversation from the review buffer."
+  [["Message"
+    ("c" "compose & send" sprig-review-message)
+    ("r" "resend last turn" sprig-review-retry)
+    ("i" "interrupt turn" sprig-review-interrupt)]
+   ["Changes (agent instructions)"
+    ("k" "reject / undo" sprig-review-reject)
+    ("a" "accept (clear marks)" sprig-review-accept)
+    ("C" "commit" sprig-review-commit)
+    ("x" "run command" sprig-review-run)]])
+
+;;;; Verb keybindings
+
+(define-key sprig-review-mode-map (kbd "SPC") #'sprig-review-toggle-mark)
+(define-key sprig-review-mode-map (kbd "m")   #'sprig-review-toggle-mark)
+(define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
+(define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
+(define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
+(define-key sprig-review-mode-map (kbd "a")   #'sprig-review-accept)
+(define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
 
 (provide 'sprig-review-mode)
 ;;; sprig-review-mode.el ends here

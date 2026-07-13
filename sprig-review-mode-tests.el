@@ -14,6 +14,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'magit-section)
 (require 'sprig-review-mode)
 
@@ -276,6 +277,95 @@
                 (should (string-match-p "hello" s))
                 (should (string-match-p "world" s))))))
       (delete-file file))))
+
+;;;; Marks and verbs
+
+(ert-deftest sprig-review-mode-test-reject-instruction ()
+  (let ((one (sprig-review-reject-instruction
+              (list (cons "foo.el" (list :old '("a") :new '("b")))))))
+    (should (string-match-p "undo this change" one))
+    (should (string-match-p "foo\\.el" one))
+    (should (string-match-p "-a" one))
+    (should (string-match-p "\\+b" one)))
+  (should (string-match-p
+           "undo these changes"
+           (sprig-review-reject-instruction
+            (list (cons "a" (list :old '("x") :new nil))
+                  (cons "b" (list :old '("y") :new nil)))))))
+
+(ert-deftest sprig-review-mode-test-run-instruction ()
+  (should (string-match-p "make test"
+                          (sprig-review-run-instruction "make test"))))
+
+(ert-deftest sprig-review-mode-test-marking ()
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (goto-char (point-min))
+    (should (re-search-forward "^\\+new$" nil t))
+    (let ((ident (magit-section-ident (magit-current-section))))
+      (sprig-review-toggle-mark)
+      (should (member ident sprig-review--marks))
+      (should (memq (magit-get-section ident) (sprig-review--marked-sections)))
+      ;; Toggling again clears it.
+      (goto-char (point-min))
+      (re-search-forward "^\\+new$")
+      (sprig-review-toggle-mark)
+      (should-not (member ident sprig-review--marks)))))
+
+(ert-deftest sprig-review-mode-test-reject-pairs ()
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (goto-char (point-min))
+    (re-search-forward "^\\+new$")
+    (let ((pairs (sprig-review--reject-pairs (list (magit-current-section)))))
+      (should (= (length pairs) 1))
+      (should (equal (caar pairs) "/tmp/x.el"))
+      (should (equal (plist-get (cdar pairs) :new) '("new"))))))
+
+(ert-deftest sprig-review-mode-test-reject-verb ()
+  ;; The whole verb path: extract the hunk at point, build the instruction,
+  ;; hand it to the send (stubbed here to capture it).
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (goto-char (point-min))
+    (re-search-forward "^\\+new$")
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--send)
+                 (lambda (text) (setq sent text))))
+        (sprig-review-reject))
+      (should (string-match-p "undo this change" sent))
+      (should (string-match-p "/tmp/x\\.el" sent))
+      (should (string-match-p "\\+new" sent)))))
+
+(ert-deftest sprig-review-mode-test-run-verb ()
+  (let ((model (sprig-review-build
+                `((tool-call "b1" "Bash"
+                             ,(json-serialize (list :command "make test")))
+                  (tool-result "b1" nil "ok")))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (re-search-forward "🔧 Bash")
+      (let (sent)
+        (cl-letf (((symbol-function 'sprig-review--send)
+                   (lambda (text) (setq sent text))))
+          (sprig-review-run))
+        (should (string-match-p "make test" sent))))))
+
+(ert-deftest sprig-review-mode-test-commit-verb ()
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--send)
+                 (lambda (text) (setq sent text))))
+        (sprig-review-commit))
+      (should (string-match-p "commit" sent)))))
+
+(ert-deftest sprig-review-mode-test-retry-verb ()
+  (let ((model (sprig-review-build '((user "first ask") (text "reply")))))
+    (sprig-review-tests--rendered model nil
+      ;; retry rebuilds from events; seed them so the model is discoverable.
+      (setq sprig-review--events '((text "reply") (user "first ask")))
+      (let (sent)
+        (cl-letf (((symbol-function 'sprig-review--send)
+                   (lambda (text) (setq sent text))))
+          (sprig-review-retry))
+        (should (equal sent "first ask"))))))
 
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here
