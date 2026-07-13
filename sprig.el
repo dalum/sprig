@@ -1215,12 +1215,13 @@ reconnect after a stale resume id)."
     (sprig--status-refresh)))
 
 ;;;###autoload
-(defun sprig-new (&optional dont-connect)
+(defun sprig-new (&optional dont-connect no-pop)
   "Create a fresh in-memory Sprig conversation and switch to it.
 The buffer visits no file: converse now and, if you want to keep it,
 save it later with \\[write-file] (its frontmatter and transcript ride
 along).  Unless DONT-CONNECT, start the session at once, prompting for
-its working directory, the same as `sprig-connect'."
+its working directory, the same as `sprig-connect'.  Unless NO-POP,
+select the new conversation buffer; either way return it."
   (interactive)
   (let ((buf (generate-new-buffer "*sprig: untitled*"))
         (dir (or (and sprig-directory (not sprig-remote)
@@ -1231,7 +1232,7 @@ its working directory, the same as `sprig-connect'."
       (setq default-directory (file-name-as-directory dir))
       (unless (bound-and-true-p sprig-mode) (sprig-mode 1))
       (unless dont-connect (sprig-connect)))
-    (pop-to-buffer buf)
+    (unless no-pop (pop-to-buffer buf))
     buf))
 
 (defun sprig--title-slug (title)
@@ -1447,7 +1448,10 @@ attaches so the in-flight turn streams in live."
   (interactive)
   (require 'sprig-review-mode)
   (let* ((conversation (current-buffer))
-         (events (sprig-review-session-events (sprig--session-log-lines)))
+         ;; A just-created scratch branch has no session id or stored log
+         ;; yet; open an empty review that the live turn streams into.
+         (lines (ignore-errors (sprig--session-log-lines)))
+         (events (and lines (sprig-review-session-events lines)))
          (meta (list :title (sprig--buffer-title)
                      :project (sprig--directory)))
          (name (format "*sprig-review: %s*" (sprig--buffer-title)))
@@ -1966,11 +1970,13 @@ Shows the tail of that session's last reply, filled to
     (sprig--status-render)))
 
 (defun sprig-status-new ()
-  "Start a fresh in-memory conversation and open it.
+  "Start a fresh in-memory conversation and open its review buffer.
 The new branch visits no file until you save it; it appears in the
-navigator immediately and streams like any other."
+navigator immediately and streams like any other.  You land in the
+read-only review buffer, not the Markdown transport."
   (interactive)
-  (sprig-new)
+  (with-current-buffer (sprig-new nil t)
+    (sprig-review))
   (sprig--status-refresh))
 
 (defun sprig-status-write ()
