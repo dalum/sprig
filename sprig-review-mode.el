@@ -36,6 +36,7 @@
 
 (declare-function sprig--send-text "sprig" (text))
 (declare-function sprig-interrupt "sprig" ())
+(declare-function sprig--frontmatter-set "sprig" (key value))
 
 ;;;; Faces
 
@@ -96,6 +97,9 @@ Idents rather than section objects, so marks survive a re-render.")
 (defvar-local sprig-review--conversation nil
   "The sprig conversation buffer this review steers, or nil.
 Set by `sprig-review-attach'; the verbs send instructions through it.")
+(defvar-local sprig-review--remote nil
+  "SSH destination of the session host, or nil for local.
+Set by `sprig-review-attach' so visiting a file reaches it over TRAMP.")
 
 ;;;; Heading helpers
 
@@ -512,9 +516,12 @@ CHANGES is a list of (FILE . HUNK-PLIST)."
 
 ;;;; Steering: send through the attached conversation
 
-(defun sprig-review-attach (conversation)
-  "Attach this review buffer to its CONVERSATION buffer, so verbs can steer it."
-  (setq sprig-review--conversation conversation))
+(defun sprig-review-attach (conversation &optional remote)
+  "Attach this review buffer to its CONVERSATION buffer, so verbs can steer it.
+REMOTE is the session host's SSH destination (nil when local), used to
+reach files over TRAMP when visiting."
+  (setq sprig-review--conversation conversation
+        sprig-review--remote remote))
 
 (defun sprig-review--send (text)
   "Send TEXT as a user instruction through the attached conversation."
@@ -574,6 +581,16 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
   (sprig-review-unmark-all)
   (message "sprig: accepted (marks cleared; commit is a separate verb)"))
 
+(defun sprig-review-set-title (title)
+  "Set this review's TITLE in the header and the conversation's frontmatter."
+  (interactive
+   (list (read-string "Title: " (plist-get sprig-review--meta :title))))
+  (setq sprig-review--meta (plist-put sprig-review--meta :title title))
+  (when (buffer-live-p sprig-review--conversation)
+    (with-current-buffer sprig-review--conversation
+      (sprig--frontmatter-set "title" title)))
+  (sprig-review--refresh))
+
 (defun sprig-review-retry ()
   "Re-send the most recent user turn."
   (interactive)
@@ -589,6 +606,37 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
   (unless (buffer-live-p sprig-review--conversation)
     (user-error "This review is not attached to a live conversation"))
   (with-current-buffer sprig-review--conversation (sprig-interrupt)))
+
+(defun sprig-review--section-file (section)
+  "Return the file path SECTION refers to, or nil."
+  (and section
+       (pcase (oref section type)
+         ('sprig-hunk (plist-get (oref (oref section parent) value) :file))
+         ('sprig-change (plist-get (oref section value) :file))
+         ('sprig-tool (plist-get (car (plist-get (oref section value) :changes))
+                                 :file))
+         (_ nil))))
+
+(defun sprig-review--file-location (path)
+  "Return PATH, as a TRAMP name on the session host when the session is remote."
+  (if sprig-review--remote (format "/ssh:%s:%s" sprig-review--remote path) path))
+
+(defun sprig-review-visit ()
+  "Visit the file the section at point refers to.
+On a diff hunk, best-effort move point to the first changed line."
+  (interactive)
+  (let* ((section (magit-current-section))
+         (file (sprig-review--section-file section)))
+    (unless file (user-error "No file to visit here"))
+    (find-file (sprig-review--file-location file))
+    (when (eq (oref section type) 'sprig-hunk)
+      (when-let* ((hunk (oref section value))
+                  (anchor (car (or (plist-get hunk :new) (plist-get hunk :old))))
+                  (needle (string-trim-left anchor)))
+        (unless (string-empty-p needle)
+          (goto-char (point-min))
+          (when (search-forward needle nil t)
+            (beginning-of-line)))))))
 
 ;;;; Compose buffer (the c c message)
 
@@ -682,6 +730,8 @@ Any marked sections are attached as context (see DESIGN.md's `c c')."
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 (define-key sprig-review-mode-map (kbd "a")   #'sprig-review-accept)
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
+(define-key sprig-review-mode-map (kbd "RET") #'sprig-review-visit)
+(define-key sprig-review-mode-map (kbd "t")   #'sprig-review-set-title)
 
 (provide 'sprig-review-mode)
 ;;; sprig-review-mode.el ends here

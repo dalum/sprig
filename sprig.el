@@ -1363,7 +1363,7 @@ omitted are not recovered."
 (declare-function sprig-review-buffer "sprig-review-mode" (name))
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
-(declare-function sprig-review-attach "sprig-review-mode" (conversation))
+(declare-function sprig-review-attach "sprig-review-mode" (conversation &optional remote))
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1418,7 +1418,7 @@ attaches so the in-flight turn streams in live."
          (buffer (sprig-review-buffer name)))
     (with-current-buffer buffer
       (sprig-review-seed events meta)
-      (sprig-review-attach conversation))
+      (sprig-review-attach conversation sprig-remote))
     (setq sprig--review-buffer buffer)
     (pop-to-buffer buffer)))
 

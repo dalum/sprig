@@ -367,5 +367,47 @@
           (sprig-review-retry))
         (should (equal sent "first ask"))))))
 
+(ert-deftest sprig-review-mode-test-file-location ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    ;; Local: the path is used as-is.
+    (should (equal (sprig-review--file-location "/a/b.el") "/a/b.el"))
+    ;; Remote: a TRAMP name on the session host.
+    (setq sprig-review--remote "me@host")
+    (should (equal (sprig-review--file-location "/a/b.el")
+                   "/ssh:me@host:/a/b.el"))))
+
+(ert-deftest sprig-review-mode-test-section-file ()
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    ;; On a hunk: the owning change's file.
+    (goto-char (point-min))
+    (re-search-forward "^\\+new$")
+    (should (equal (sprig-review--section-file (magit-current-section))
+                   "/tmp/x.el"))
+    ;; On the change (file) heading: the same file.
+    (goto-char (point-min))
+    (re-search-forward "^/tmp/x\\.el$")
+    (should (equal (sprig-review--section-file (magit-current-section))
+                   "/tmp/x.el")))
+  ;; A Bash tool refers to no file.
+  (let ((model (sprig-review-build
+                `((tool-call "b1" "Bash"
+                             ,(json-serialize (list :command "ls")))
+                  (tool-result "b1" nil "out")))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (re-search-forward "🔧 Bash")
+      (should (null (sprig-review--section-file (magit-current-section)))))))
+
+(ert-deftest sprig-review-mode-test-set-title ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-seed '((text "hi")) '(:title "Old"))
+    (should (string-match-p "Old" (buffer-string)))
+    (sprig-review-set-title "New")
+    (should (equal (plist-get sprig-review--meta :title) "New"))
+    (should (string-match-p "New" (buffer-string)))
+    (should-not (string-match-p "Old" (buffer-string)))))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here
