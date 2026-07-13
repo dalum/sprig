@@ -224,6 +224,11 @@ a whole streamed reply collapses to a single undo step.")
   "Attached read-only review buffer mirroring this conversation, or nil.
 When set, `sprig--handle' tees each transport event to it, so a live turn
 streams into the review buffer as well as the Markdown transcript.")
+(defvar-local sprig--permission-mode nil
+  "The session's current permission mode, tracked from `status' events.
+nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
+(defvar-local sprig--control-counter 0
+  "Monotonic counter for control-request ids on this buffer's session.")
 
 ;;;; Sentinel grammar
 
@@ -358,6 +363,7 @@ message list a stateless backend would send verbatim."
 ;;   (tool-call ID NAME INPUT) a completed tool-use call (INPUT is JSON)
 ;;   (tool-result ID ERR TEXT) a tool result (ERR non-nil means error)
 ;;   (done COST ERR)           the turn finished
+;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (error MESSAGE)           a backend error to surface inline
 
 (defun sprig--filter (proc chunk)
@@ -422,6 +428,10 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; Session init: report the id; the sink decides whether to keep it.
          ((and (equal .type "system") (equal .subtype "init"))
           (when .session_id (list (list 'session .session_id))))
+         ;; A status message reports the current permission mode, e.g. after
+         ;; a `set_permission_mode' control request switches to plan.
+         ((and (equal .type "system") (equal .subtype "status") .permissionMode)
+          (list (list 'mode .permissionMode)))
          ;; Streaming assistant content (text and tool-use blocks).
          ((equal .type "stream_event")
           (cond
@@ -494,6 +504,7 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
     (`(tool-result ,id ,is-error ,text)
      (sprig--emit-tool-result id is-error text))
     (`(done ,cost ,is-error) (sprig--finish-turn cost is-error))
+    (`(mode ,mode) (setq sprig--permission-mode mode))
     (`(error ,message) (sprig--emit (format "\n[error] %s\n" message)))))
 
 (defun sprig--emit (text)
@@ -1280,14 +1291,39 @@ it reports a clean teardown rather than logging a failure."
                            :content [(:type "text" :text ,text)])))))
     (process-send-string sprig--process (concat json "\n"))))
 
-(defun sprig--send-text (text)
+(defun sprig--send-control (request)
+  "Send a control_request carrying REQUEST (a plist) to the session.
+The stream-json input channel accepts these beside user messages; a
+`set_permission_mode' request is how a turn is put into plan mode."
+  (let ((json (json-serialize
+               (list :type "control_request"
+                     :request_id (format "sprig-%d"
+                                          (setq sprig--control-counter
+                                                (1+ sprig--control-counter)))
+                     :request request))))
+    (process-send-string sprig--process (concat json "\n"))))
+
+(defun sprig--set-permission-mode (mode)
+  "Ask the session to switch to permission MODE (e.g. \"plan\", \"auto\")."
+  (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
+  (setq sprig--permission-mode mode))
+
+(defun sprig--send-text (text &optional mode)
   "Send TEXT as this buffer's next user turn programmatically.
 Unlike `sprig-send', which sends prose already typed in the buffer, this
 appends TEXT as a user turn first, then streams the reply.  It is how the
-review buffer's verbs steer the conversation (see `sprig-review')."
+review buffer's verbs steer the conversation (see `sprig-review').
+
+MODE, when given, sets the permission mode first (e.g. \"plan\").  With no
+MODE, a session left in plan mode is returned to \"auto\", so a plain send
+after a plan turn resumes normal execution."
   (sprig--ensure)
   (when sprig--busy
     (user-error "A turn is already in flight"))
+  (cond ((and mode (not (equal mode sprig--permission-mode)))
+         (sprig--set-permission-mode mode))
+        ((and (null mode) (equal sprig--permission-mode "plan"))
+         (sprig--set-permission-mode "auto")))
   (save-excursion
     (goto-char (point-max))
     (unless (bolp) (insert "\n"))

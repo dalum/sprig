@@ -34,7 +34,7 @@
 (require 'transient)
 (require 'seq)
 
-(declare-function sprig--send-text "sprig" (text))
+(declare-function sprig--send-text "sprig" (text &optional mode))
 (declare-function sprig-interrupt "sprig" ())
 (declare-function sprig--frontmatter-set "sprig" (key value))
 
@@ -223,6 +223,9 @@ META may carry :title, :project, :model, and :status."
                    (sprig-review--meta-line "Project" (plist-get meta :project))
                    (sprig-review--meta-line "Model"   (plist-get meta :model))
                    (sprig-review--meta-line "Status"  (plist-get meta :status))
+                   (sprig-review--meta-line
+                    "Mode" (let ((m (plist-get model :mode)))
+                             (unless (member m '(nil "auto" "default" "manual")) m)))
                    (sprig-review--meta-line "Session" (plist-get model :session))
                    (sprig-review--meta-line
                     "Cost" (when (plist-get model :cost)
@@ -523,13 +526,14 @@ reach files over TRAMP when visiting."
   (setq sprig-review--conversation conversation
         sprig-review--remote remote))
 
-(defun sprig-review--send (text)
-  "Send TEXT as a user instruction through the attached conversation."
+(defun sprig-review--send (text &optional mode)
+  "Send TEXT as a user instruction through the attached conversation.
+MODE, when given (e.g. \"plan\"), sets the permission mode for the turn."
   (unless (buffer-live-p sprig-review--conversation)
     (user-error "This review is not attached to a live conversation"))
   (with-current-buffer sprig-review--conversation
-    (sprig--send-text text))
-  (message "sprig: sent"))
+    (sprig--send-text text mode))
+  (message "sprig: sent%s" (if mode (format " (%s mode)" mode) "")))
 
 ;;;; Verbs
 
@@ -644,6 +648,8 @@ On a diff hunk, best-effort move point to the first changed line."
   "Review buffer a compose buffer sends to.")
 (defvar-local sprig-review--compose-context nil
   "Marked-section context prepended to the composed message, or nil.")
+(defvar-local sprig-review--compose-mode nil
+  "Permission mode for the composed message (e.g. \"plan\"), or nil.")
 
 (defvar sprig-review-compose-mode-map
   (let ((map (make-sparse-keymap)))
@@ -667,9 +673,10 @@ Uses only real marks, not the section-at-point fallback."
                                  (oref s start) (oref s end))))
                  secs "\n\n"))))
 
-(defun sprig-review-message ()
+(defun sprig-review-message (&optional plan)
   "Compose a message and send it to the attached conversation.
-Any marked sections are attached as context (see DESIGN.md's `c c')."
+Any marked sections are attached as context (see DESIGN.md's `c c').
+With PLAN non-nil, send the turn in plan mode (`c p')."
   (interactive)
   (unless (buffer-live-p sprig-review--conversation)
     (user-error "This review is not attached to a live conversation"))
@@ -680,12 +687,19 @@ Any marked sections are attached as context (see DESIGN.md's `c c')."
       (sprig-review-compose-mode)
       (erase-buffer)
       (setq sprig-review--compose-target review
-            sprig-review--compose-context context))
+            sprig-review--compose-context context
+            sprig-review--compose-mode (and plan "plan")))
     (pop-to-buffer buf)
-    (message "%sC-c C-c to send, C-c C-k to cancel"
+    (message "%s%sC-c C-c to send, C-c C-k to cancel"
+             (if plan "PLAN mode.  " "")
              (if context (format "%d section(s) attached.  "
                                  (length (sprig-review--marked-sections)))
                ""))))
+
+(defun sprig-review-message-plan ()
+  "Compose a message and send it in plan mode (`c p')."
+  (interactive)
+  (sprig-review-message t))
 
 (defun sprig-review-compose-send ()
   "Send the composed message (with any attached context) to the conversation."
@@ -693,13 +707,15 @@ Any marked sections are attached as context (see DESIGN.md's `c c')."
   (let ((text (string-trim (buffer-substring-no-properties
                             (point-min) (point-max))))
         (review sprig-review--compose-target)
-        (context sprig-review--compose-context))
+        (context sprig-review--compose-context)
+        (mode sprig-review--compose-mode))
     (when (string-empty-p text) (user-error "Empty message"))
     (unless (buffer-live-p review) (user-error "The review buffer is gone"))
     (quit-window t)
     (with-current-buffer review
       (sprig-review--send
-       (if context (format "Regarding:\n\n%s\n\n%s" context text) text)))))
+       (if context (format "Regarding:\n\n%s\n\n%s" context text) text)
+       mode))))
 
 (defun sprig-review-compose-abort ()
   "Cancel the message compose."
@@ -713,6 +729,7 @@ Any marked sections are attached as context (see DESIGN.md's `c c')."
   "Steer the conversation from the review buffer."
   [["Message"
     ("c" "compose & send" sprig-review-message)
+    ("p" "compose in plan mode" sprig-review-message-plan)
     ("r" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn" sprig-review-interrupt)]
    ["Changes (agent instructions)"

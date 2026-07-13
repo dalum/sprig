@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'sprig)
 (require 'sprig-review)
 
@@ -652,6 +653,44 @@ Point starts at `point-min'."
     (should (eq (plist-get (nth 1 blocks) :type) 'thinking))
     (should (equal (plist-get (nth 1 blocks) :text) "t1t2"))
     (should (eq (plist-get (nth 2 blocks) :type) 'text))))
+
+;;;; Permission mode
+
+(ert-deftest sprig-review-test-parse-status-mode ()
+  (sprig-tests--with-buffer ""
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize (list :type "system" :subtype "status"
+                                          :permissionMode "plan")))
+                   '((mode "plan"))))))
+
+(ert-deftest sprig-review-test-session-user-mode ()
+  ;; A stored user record's permissionMode replays as a `mode' event.
+  (should (equal (sprig-review-parse-session-line
+                  (json-serialize (list :type "user" :permissionMode "plan"
+                                        :message (list :content "go"))))
+                 '((mode "plan") (user "go")))))
+
+(ert-deftest sprig-review-test-build-mode ()
+  (should (equal (plist-get (sprig-review-build '((mode "plan") (user "x")))
+                            :mode)
+                 "plan")))
+
+(ert-deftest sprig-review-test-control-request-wire-format ()
+  ;; Pin the exact set_permission_mode control_request shape verified
+  ;; against the real CLI (it replies control_response success).
+  (sprig-tests--with-buffer ""
+    (let (sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--set-permission-mode "plan"))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (request (alist-get 'request obj)))
+        (should (equal (alist-get 'type obj) "control_request"))
+        (should (string-prefix-p "sprig-" (alist-get 'request_id obj)))
+        (should (equal (alist-get 'subtype request) "set_permission_mode"))
+        (should (equal (alist-get 'mode request) "plan")))
+      (should (equal sprig--permission-mode "plan")))))
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

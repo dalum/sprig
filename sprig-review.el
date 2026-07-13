@@ -150,13 +150,14 @@ for tools that touch no files, or when INPUT lacks a file path."
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes."
-  (let ((session nil) (title nil) (cost nil) (error nil) (done nil)
+  (let ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
         (blocks '())        ; built in reverse
         (open nil))         ; the open text/thinking block being coalesced
     (dolist (ev events)
       (pcase ev
         (`(session ,id) (setq session id))
         (`(title ,tt) (setq title tt))
+        (`(mode ,m) (setq mode m))
         (`(text-block) (setq open nil))
         (`(text ,s)
          (if (and open (eq (plist-get open :type) 'text))
@@ -192,7 +193,8 @@ See the section commentary for the event vocabulary and block shapes."
         (`(error ,m)
          (setq open nil)
          (push (list :type 'error :text m) blocks))))
-    (list :session session :title title :cost cost :error error :done done
+    (list :session session :title title :mode mode
+          :cost cost :error error :done done
           :blocks (nreverse blocks))))
 
 ;;;; Reading the CLI's stored session log
@@ -275,8 +277,10 @@ conversation content."
       (sprig-review--assistant-events
        (alist-get 'content (alist-get 'message record))))
      ((equal type "user")
-      (sprig-review--user-events
-       (alist-get 'content (alist-get 'message record)))))))
+      (let ((mode (alist-get 'permissionMode record))
+            (events (sprig-review--user-events
+                     (alist-get 'content (alist-get 'message record)))))
+        (if mode (cons (list 'mode mode) events) events))))))
 
 (defun sprig-review-parse-session-line (line)
   "Parse one JSONL session-log LINE into a list of events, or nil."

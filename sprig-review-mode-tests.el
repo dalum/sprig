@@ -409,5 +409,33 @@
     (should (string-match-p "New" (buffer-string)))
     (should-not (string-match-p "Old" (buffer-string)))))
 
+(ert-deftest sprig-review-mode-test-header-mode ()
+  ;; Plan mode shows in the header; auto (the normal state) does not.
+  (sprig-review-tests--rendered (sprig-review-build '((mode "plan") (user "x"))) nil
+    (should (string-match-p "Mode:" (buffer-string)))
+    (should (string-match-p "plan" (buffer-string))))
+  (sprig-review-tests--rendered (sprig-review-build '((mode "auto") (user "x"))) nil
+    (should-not (string-match-p "Mode:" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-compose-plan-mode ()
+  ;; Composing in plan mode sends the turn with mode "plan".
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((review (current-buffer)))
+      (with-temp-buffer
+        (sprig-review-compose-mode)
+        (insert "make a plan")
+        (setq sprig-review--compose-target review
+              sprig-review--compose-context nil
+              sprig-review--compose-mode "plan")
+        (let (sent-text sent-mode)
+          (cl-letf (((symbol-function 'sprig-review--send)
+                     (lambda (text &optional mode)
+                       (setq sent-text text sent-mode mode)))
+                    ((symbol-function 'quit-window) #'ignore))
+            (sprig-review-compose-send))
+          (should (equal sent-text "make a plan"))
+          (should (equal sent-mode "plan")))))))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here
