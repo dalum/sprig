@@ -95,6 +95,7 @@ With `use-package` and a local checkout:
 | `sprig-send` | `C-c C-c` | Send the prose typed since the last reply |
 | `sprig-interrupt` | `C-c C-k` | Abort a streaming reply, keep and mark the partial |
 | `sprig-disconnect` | `C-c C-a C-k` | Stop the session (conversation kept) |
+| `sprig-review` | `C-c C-a C-r` | Open a read-only review buffer for this conversation |
 | `sprig-set-tool-display` | `M-x` | Set how much tool activity this file renders (`none`/`calls`/`full`) |
 | `sprig-status` | `M-x` | Open the navigator listing all sessions and their status |
 
