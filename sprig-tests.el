@@ -17,6 +17,7 @@
 
 (require 'ert)
 (require 'sprig)
+(require 'sprig-review)
 
 ;;;; Helpers
 
@@ -440,6 +441,122 @@ Point starts at `point-min'."
   (sprig-tests--with-buffer "---\n---\n\nbody\n"
     (let ((sprig-render-tools 'full))
       (should (eq (sprig--tool-display) 'full)))))
+
+;;;; Review model and diff engine (sprig-review.el)
+
+(ert-deftest sprig-review-test-lines ()
+  ;; A trailing newline does not add a spurious final empty line.
+  (should (equal (sprig-review--lines "foo\nbar\n") '("foo" "bar")))
+  (should (equal (sprig-review--lines "foo\nbar") '("foo" "bar")))
+  ;; A blank line inside the text is preserved.
+  (should (equal (sprig-review--lines "a\n\nb") '("a" "" "b")))
+  ;; Empty text is no lines, not one empty line.
+  (should (equal (sprig-review--lines "") nil))
+  (should (equal (sprig-review--lines nil) nil)))
+
+(ert-deftest sprig-review-test-edit-changes ()
+  (let* ((input (json-serialize
+                 (list :file_path "/tmp/x.el" :old_string "old\nline"
+                       :new_string "new\nline\nhere")))
+         (changes (sprig-review-tool-changes "Edit" input))
+         (change (car changes)))
+    (should (= (length changes) 1))
+    (should (equal (plist-get change :file) "/tmp/x.el"))
+    (should (eq (plist-get change :kind) 'edit))
+    (let ((hunk (car (plist-get change :hunks))))
+      (should (equal (plist-get hunk :old) '("old" "line")))
+      (should (equal (plist-get hunk :new) '("new" "line" "here"))))
+    ;; +3 / -2.
+    (should (equal (sprig-review-change-stat change) '(3 . 2)))))
+
+(ert-deftest sprig-review-test-edit-replace-all ()
+  (let* ((input (json-serialize
+                 (list :file_path "/tmp/x.el" :old_string "a"
+                       :new_string "b" :replace_all t)))
+         (hunk (car (plist-get (car (sprig-review-tool-changes "Edit" input))
+                               :hunks))))
+    (should (eq (plist-get hunk :replace-all) t))))
+
+(ert-deftest sprig-review-test-multiedit-changes ()
+  (let* ((input (json-serialize
+                 (list :file_path "/tmp/x.el"
+                       :edits (vector (list :old_string "a" :new_string "b")
+                                      (list :old_string "c" :new_string "d")))))
+         (change (car (sprig-review-tool-changes "MultiEdit" input))))
+    (should (= (length (plist-get change :hunks)) 2))
+    (should (equal (plist-get (nth 1 (plist-get change :hunks)) :old) '("c")))))
+
+(ert-deftest sprig-review-test-write-changes ()
+  (let* ((input (json-serialize
+                 (list :file_path "/tmp/new.el" :content "line1\nline2\n")))
+         (change (car (sprig-review-tool-changes "Write" input))))
+    (should (eq (plist-get change :kind) 'write))
+    (let ((hunk (car (plist-get change :hunks))))
+      ;; A write has no removals, only additions.
+      (should (null (plist-get hunk :old)))
+      (should (equal (plist-get hunk :new) '("line1" "line2"))))
+    (should (equal (sprig-review-change-stat change) '(2 . 0)))))
+
+(ert-deftest sprig-review-test-non-file-tool ()
+  (should (null (sprig-review-tool-changes
+                 "Bash" (json-serialize (list :command "ls")))))
+  ;; A file tool missing its path yields no change rather than an error.
+  (should (null (sprig-review-tool-changes "Edit" "{}"))))
+
+(ert-deftest sprig-review-test-format-change ()
+  (let* ((input (json-serialize
+                 (list :file_path "x" :old_string "a\nb" :new_string "c")))
+         (change (car (sprig-review-tool-changes "Edit" input))))
+    (should (equal (sprig-review-format-change change)
+                   "x\n-a\n-b\n+c"))))
+
+(ert-deftest sprig-review-test-build-coalesces-text ()
+  (let* ((model (sprig-review-build
+                 '((session "s1") (text "Hello, ") (text "world")
+                   (done 0.01 nil))))
+         (blocks (plist-get model :blocks)))
+    (should (equal (plist-get model :session) "s1"))
+    (should (equal (plist-get model :cost) 0.01))
+    (should (eq (plist-get model :done) t))
+    ;; The two text events coalesce into one block.
+    (should (= (length blocks) 1))
+    (should (equal (plist-get (car blocks) :text) "Hello, world"))))
+
+(ert-deftest sprig-review-test-build-text-block-splits ()
+  (let ((blocks (plist-get
+                 (sprig-review-build
+                  '((text "one") (text-block) (text "two")))
+                 :blocks)))
+    (should (= (length blocks) 2))
+    (should (equal (plist-get (nth 0 blocks) :text) "one"))
+    (should (equal (plist-get (nth 1 blocks) :text) "two"))))
+
+(ert-deftest sprig-review-test-build-pairs-tool-result ()
+  (let* ((input (json-serialize (list :file_path "x" :old_string "a"
+                                      :new_string "b")))
+         (blocks (plist-get
+                  (sprig-review-build
+                   `((tool-call "t1" "Edit" ,input)
+                     (tool-result "t1" nil "done")))
+                  :blocks))
+         (tool (car blocks)))
+    (should (= (length blocks) 1))
+    (should (eq (plist-get tool :type) 'tool))
+    (should (equal (plist-get tool :name) "Edit"))
+    ;; The change is reconstructed from the call's payload.
+    (should (plist-get tool :changes))
+    ;; The result pairs onto the same block by id.
+    (should (equal (plist-get (plist-get tool :result) :text) "done"))
+    (should (null (plist-get (plist-get tool :result) :error)))))
+
+(ert-deftest sprig-review-test-build-orphan-result ()
+  ;; A result with no matching call is kept, not dropped.
+  (let ((blocks (plist-get
+                 (sprig-review-build '((tool-result "t9" t "boom")))
+                 :blocks)))
+    (should (= (length blocks) 1))
+    (should (equal (plist-get (plist-get (car blocks) :result) :text) "boom"))
+    (should (eq (plist-get (plist-get (car blocks) :result) :error) t))))
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
