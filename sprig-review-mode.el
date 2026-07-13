@@ -54,6 +54,14 @@
   "Face for an assistant-turn label."
   :group 'sprig)
 
+(defface sprig-review-user '((t :inherit magit-section-secondary-heading :slant italic))
+  "Face for a user-turn label."
+  :group 'sprig)
+
+(defface sprig-review-thinking '((t :inherit shadow :slant italic))
+  "Face for a thinking-block label."
+  :group 'sprig)
+
 (defface sprig-review-meta-key '((t :inherit font-lock-comment-face))
   "Face for a metadata key in the header."
   :group 'sprig)
@@ -132,6 +140,18 @@ header instead, so they return nil here."
     (magit-insert-heading (propertize "assistant" 'face 'sprig-review-role))
     (insert (string-trim-right (plist-get block :text)) "\n")))
 
+(defun sprig-review--insert-user (block)
+  "Insert a user-turn BLOCK under a foldable role label."
+  (magit-insert-section (sprig-user block)
+    (magit-insert-heading (propertize "user" 'face 'sprig-review-user))
+    (insert (string-trim-right (plist-get block :text)) "\n")))
+
+(defun sprig-review--insert-thinking (block)
+  "Insert a thinking BLOCK, folded by default since it is verbose."
+  (magit-insert-section (sprig-thinking block t)
+    (magit-insert-heading (propertize "thinking" 'face 'sprig-review-thinking))
+    (insert (string-trim-right (plist-get block :text)) "\n")))
+
 (defun sprig-review--insert-error (block)
   "Insert an error BLOCK."
   (magit-insert-section (sprig-error block)
@@ -149,7 +169,8 @@ header instead, so they return nil here."
 META may carry :title, :project, :model, and :status."
   (magit-insert-section (sprig-headers)
     (dolist (line (list
-                   (sprig-review--meta-line "Title"   (plist-get meta :title))
+                   (sprig-review--meta-line
+                    "Title" (or (plist-get meta :title) (plist-get model :title)))
                    (sprig-review--meta-line "Project" (plist-get meta :project))
                    (sprig-review--meta-line "Model"   (plist-get meta :model))
                    (sprig-review--meta-line "Status"  (plist-get meta :status))
@@ -173,9 +194,11 @@ META is an optional plist of display metadata (see
       (sprig-review--insert-headers model meta)
       (dolist (block (plist-get model :blocks))
         (pcase (plist-get block :type)
-          ('text  (sprig-review--insert-text block))
-          ('tool  (sprig-review--insert-tool block))
-          ('error (sprig-review--insert-error block)))))
+          ('user     (sprig-review--insert-user block))
+          ('text     (sprig-review--insert-text block))
+          ('thinking (sprig-review--insert-thinking block))
+          ('tool     (sprig-review--insert-tool block))
+          ('error    (sprig-review--insert-error block)))))
     (goto-char (point-min))))
 
 ;;;; Live sink: accumulate events, refresh the buffer

@@ -41,13 +41,20 @@
 ;; a new file has :old nil and a pure deletion has :new nil.
 
 (defun sprig-review--parse-input (json)
-  "Parse a tool-call input JSON string into an alist, or nil on failure.
-Treats blank input as the empty object."
-  (let ((s (string-trim (or json ""))))
-    (ignore-errors
-      (json-parse-string (if (string-empty-p s) "{}" s)
-                         :object-type 'alist :array-type 'list
-                         :null-object nil :false-object nil))))
+  "Return tool-call input JSON as an alist, or nil.
+JSON may be a string (the wire path, parsed here) or an already-parsed
+alist (the stored-session path, passed through).  Blank string is the
+empty object."
+  (cond
+   ((stringp json)
+    (let ((s (string-trim json)))
+      (ignore-errors
+        (json-parse-string (if (string-empty-p s) "{}" s)
+                           :object-type 'alist :array-type 'list
+                           :null-object nil :false-object nil))))
+   ;; nil or an already-parsed alist (nil is the empty object).
+   ((listp json) json)
+   (t nil)))
 
 (defun sprig-review--lines (s)
   "Split S into a list of display lines, or nil when S is empty.
@@ -118,14 +125,19 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; model, a plist (:session ID :cost N :error BOOL :done BOOL :blocks
 ;; BLOCKS).  Each block is one of:
 ;;
-;;   (:type text  :text STR)
-;;   (:type tool  :id ID :name NAME :input JSON :changes CHANGES
-;;                :result (:error BOOL :text STR) | nil)
-;;   (:type error :text STR)
+;;   (:type user     :text STR)
+;;   (:type text     :text STR)
+;;   (:type thinking :text STR)
+;;   (:type tool     :id ID :name NAME :input JSON :changes CHANGES
+;;                   :result (:error BOOL :text STR) | nil)
+;;   (:type error    :text STR)
 ;;
-;; Consecutive `text' events coalesce into one block; a `text-block'
-;; event forces the next `text' to open a fresh one.  A `tool-result'
-;; pairs with the earliest unmatched `tool' block of the same id.
+;; Consecutive `text' (or `thinking') events coalesce into one block; a
+;; `text-block' event, a differing block kind, or any structural event
+;; closes the open one.  A `tool-result' pairs with the earliest
+;; unmatched `tool' block of the same id.  The live wire path never emits
+;; `user' events (sprig sent that turn); the stored-session path does, so
+;; a replayed transcript shows the user's turns too.
 
 (defun sprig-review--find-open-tool (blocks id)
   "Return the tool block in BLOCKS with ID and no result yet, or nil."
@@ -138,26 +150,35 @@ for tools that touch no files, or when INPUT lacks a file path."
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes."
-  (let ((session nil) (cost nil) (error nil) (done nil)
+  (let ((session nil) (title nil) (cost nil) (error nil) (done nil)
         (blocks '())        ; built in reverse
-        (text nil))         ; the currently open text block, or nil
+        (open nil))         ; the open text/thinking block being coalesced
     (dolist (ev events)
       (pcase ev
         (`(session ,id) (setq session id))
-        (`(text-block) (setq text nil))
+        (`(title ,tt) (setq title tt))
+        (`(text-block) (setq open nil))
         (`(text ,s)
-         (if text
-             (plist-put text :text (concat (plist-get text :text) s))
-           (setq text (list :type 'text :text s))
-           (push text blocks)))
+         (if (and open (eq (plist-get open :type) 'text))
+             (plist-put open :text (concat (plist-get open :text) s))
+           (setq open (list :type 'text :text s))
+           (push open blocks)))
+        (`(thinking ,s)
+         (if (and open (eq (plist-get open :type) 'thinking))
+             (plist-put open :text (concat (plist-get open :text) s))
+           (setq open (list :type 'thinking :text s))
+           (push open blocks)))
+        (`(user ,text)
+         (setq open nil)
+         (push (list :type 'user :text text) blocks))
         (`(tool-call ,id ,name ,input)
-         (setq text nil)
+         (setq open nil)
          (push (list :type 'tool :id id :name name :input input
                      :changes (sprig-review-tool-changes name input)
                      :result nil)
                blocks))
         (`(tool-result ,id ,is-error ,rtext)
-         (setq text nil)
+         (setq open nil)
          (let ((blk (sprig-review--find-open-tool blocks id)))
            (if blk
                (plist-put blk :result (list :error is-error :text rtext))
@@ -169,10 +190,105 @@ See the section commentary for the event vocabulary and block shapes."
                    blocks))))
         (`(done ,c ,e) (setq done t cost c error e))
         (`(error ,m)
-         (setq text nil)
+         (setq open nil)
          (push (list :type 'error :text m) blocks))))
-    (list :session session :cost cost :error error :done done
+    (list :session session :title title :cost cost :error error :done done
           :blocks (nreverse blocks))))
+
+;;;; Reading the CLI's stored session log
+;;
+;; The `claude' CLI persists each session as JSONL under
+;;   ~/.claude/projects/<CWD>/<SESSION-ID>.jsonl
+;; on the host where it runs (the SSH host for a remote session), where
+;; <CWD> is the working directory with every `/' and `.' turned into `-'.
+;; That file is a durable event log, so a review buffer can replay full
+;; history without sprig keeping any store of its own.  This is the store
+;; counterpart of the wire parser in sprig.el: both map their own schema
+;; onto the shared event vocabulary that `sprig-review-build' consumes.
+;;
+;; The log is really a tree (records link by uuid/parentUuid) and subagent
+;; transcripts are flagged `isSidechain'; v1 reads the main thread and
+;; skips sidechains.
+
+(defun sprig-review-session-file (cwd session-id)
+  "Return the session-log path (with a leading ~) for CWD and SESSION-ID.
+The path is relative to the session host, so a caller reads it locally or
+over SSH.  CWD is encoded the way the CLI names its project directory."
+  (format "~/.claude/projects/%s/%s.jsonl"
+          (replace-regexp-in-string "[/.]" "-" cwd)
+          session-id))
+
+(defun sprig-review--flatten-content (content)
+  "Flatten a tool_result CONTENT (string or block list) into text."
+  (cond
+   ((stringp content) content)
+   ((listp content)
+    (mapconcat (lambda (b) (if (stringp b) b (or (alist-get 'text b) "")))
+               content ""))
+   (t (format "%S" content))))
+
+(defun sprig-review--assistant-events (content)
+  "Map an assistant message CONTENT block list to events."
+  (when (listp content)
+    (delq nil
+          (mapcar
+           (lambda (b)
+             (pcase (and (consp b) (alist-get 'type b))
+               ("text" (list 'text (or (alist-get 'text b) "")))
+               ("thinking" (list 'thinking (or (alist-get 'thinking b) "")))
+               ("tool_use"
+                (list 'tool-call
+                      (or (alist-get 'id b) "t")
+                      (alist-get 'name b)
+                      (alist-get 'input b)))
+               (_ nil)))
+           content))))
+
+(defun sprig-review--user-result-event (b)
+  "Map a user-message tool_result block B to a `tool-result' event, or nil."
+  (when (and (consp b) (equal (alist-get 'type b) "tool_result"))
+    (list 'tool-result
+          (or (alist-get 'tool_use_id b) "t")
+          (alist-get 'is_error b)
+          (string-trim (sprig-review--flatten-content (alist-get 'content b))))))
+
+(defun sprig-review--user-events (content)
+  "Map a user message CONTENT (string prose or tool_result blocks) to events."
+  (cond
+   ((stringp content)
+    (unless (string-empty-p (string-trim content))
+      (list (list 'user (string-trim content)))))
+   ((listp content)
+    (delq nil (mapcar #'sprig-review--user-result-event content)))))
+
+(defun sprig-review-session-record-events (record)
+  "Map one parsed session-log RECORD (an alist) to a list of events.
+Skips sidechain (subagent) records and bookkeeping records that carry no
+conversation content."
+  (let ((type (alist-get 'type record)))
+    (cond
+     ((equal type "ai-title")
+      (when-let ((tt (alist-get 'aiTitle record))) (list (list 'title tt))))
+     ;; Only the main thread; sidechains are subagent transcripts.
+     ((eq (alist-get 'isSidechain record) t) nil)
+     ((equal type "assistant")
+      (sprig-review--assistant-events
+       (alist-get 'content (alist-get 'message record))))
+     ((equal type "user")
+      (sprig-review--user-events
+       (alist-get 'content (alist-get 'message record)))))))
+
+(defun sprig-review-parse-session-line (line)
+  "Parse one JSONL session-log LINE into a list of events, or nil."
+  (let ((record (ignore-errors
+                  (json-parse-string line :object-type 'alist :array-type 'list
+                                     :null-object nil :false-object nil))))
+    (and (consp record) (sprig-review-session-record-events record))))
+
+(defun sprig-review-session-model (lines)
+  "Build a review model from LINES of the stored session log."
+  (sprig-review-build
+   (apply #'append (mapcar #'sprig-review-parse-session-line lines))))
 
 (provide 'sprig-review)
 ;;; sprig-review.el ends here

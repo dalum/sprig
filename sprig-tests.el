@@ -558,5 +558,100 @@ Point starts at `point-min'."
     (should (equal (plist-get (plist-get (car blocks) :result) :text) "boom"))
     (should (eq (plist-get (plist-get (car blocks) :result) :error) t))))
 
+;;;; Stored-session log parser (sprig-review.el)
+
+(ert-deftest sprig-review-test-session-path ()
+  (should (equal (sprig-review-session-file "/home/dalum/Projects/sprig" "abc")
+                 "~/.claude/projects/-home-dalum-Projects-sprig/abc.jsonl"))
+  ;; Dots become dashes too, matching the CLI's project-dir naming.
+  (should (equal (sprig-review-session-file "/home/x/.cache/p" "id")
+                 "~/.claude/projects/-home-x--cache-p/id.jsonl")))
+
+(ert-deftest sprig-review-test-session-parse-assistant ()
+  (let* ((line (json-serialize
+                (list :type "assistant"
+                      :message
+                      (list :role "assistant"
+                            :content
+                            (vector (list :type "thinking" :thinking "hmm")
+                                    (list :type "text" :text "hello")
+                                    (list :type "tool_use" :id "t1" :name "Bash"
+                                          :input (list :command "ls")))))))
+         (events (sprig-review-parse-session-line line)))
+    (should (equal (nth 0 events) '(thinking "hmm")))
+    (should (equal (nth 1 events) '(text "hello")))
+    (let ((tc (nth 2 events)))
+      (should (eq (car tc) 'tool-call))
+      (should (equal (nth 2 tc) "Bash"))
+      ;; The input passes through as the parsed object; the diff engine
+      ;; reads it the same as a wire-path JSON string.
+      (should (null (sprig-review-tool-changes "Bash" (nth 3 tc)))))))
+
+(ert-deftest sprig-review-test-session-edit-changes ()
+  (let* ((line (json-serialize
+                (list :type "assistant"
+                      :message
+                      (list :content
+                            (vector (list :type "tool_use" :id "t1" :name "Edit"
+                                          :input (list :file_path "a.el"
+                                                       :old_string "x"
+                                                       :new_string "y")))))))
+         (tc (car (sprig-review-parse-session-line line)))
+         (changes (sprig-review-tool-changes (nth 2 tc) (nth 3 tc))))
+    (should (equal (plist-get (car changes) :file) "a.el"))))
+
+(ert-deftest sprig-review-test-session-parse-user ()
+  (let ((prose (json-serialize
+                (list :type "user" :message (list :role "user" :content "do it"))))
+        (result (json-serialize
+                 (list :type "user"
+                       :message (list :content
+                                      (vector (list :type "tool_result"
+                                                    :tool_use_id "t1"
+                                                    :is_error :false
+                                                    :content "ok")))))))
+    (should (equal (sprig-review-parse-session-line prose) '((user "do it"))))
+    (should (equal (sprig-review-parse-session-line result)
+                   '((tool-result "t1" nil "ok"))))))
+
+(ert-deftest sprig-review-test-session-title-and-sidechain ()
+  (let ((title (json-serialize (list :type "ai-title" :aiTitle "My title")))
+        (side (json-serialize
+               (list :type "assistant" :isSidechain t
+                     :message (list :content
+                                    (vector (list :type "text" :text "sub")))))))
+    (should (equal (sprig-review-parse-session-line title) '((title "My title"))))
+    ;; Subagent (sidechain) records are skipped.
+    (should (null (sprig-review-parse-session-line side)))))
+
+(ert-deftest sprig-review-test-session-model ()
+  (let* ((lines (list
+                 (json-serialize (list :type "ai-title" :aiTitle "T"))
+                 (json-serialize (list :type "attachment" :foo 1)) ; bookkeeping, ignored
+                 (json-serialize (list :type "user" :message (list :content "hi")))
+                 (json-serialize
+                  (list :type "assistant"
+                        :message (list :content
+                                       (vector (list :type "text" :text "yo")))))))
+         (model (sprig-review-session-model lines))
+         (blocks (plist-get model :blocks)))
+    (should (equal (plist-get model :title) "T"))
+    (should (eq (plist-get (nth 0 blocks) :type) 'user))
+    (should (equal (plist-get (nth 0 blocks) :text) "hi"))
+    (should (eq (plist-get (nth 1 blocks) :type) 'text))
+    (should (equal (plist-get (nth 1 blocks) :text) "yo"))))
+
+(ert-deftest sprig-review-test-build-user-and-thinking ()
+  (let* ((model (sprig-review-build
+                 '((user "q") (thinking "t1") (thinking "t2")
+                   (text "a") (title "X"))))
+         (blocks (plist-get model :blocks)))
+    (should (equal (plist-get model :title) "X"))
+    (should (eq (plist-get (nth 0 blocks) :type) 'user))
+    ;; Consecutive thinking coalesces; the following text opens a new block.
+    (should (eq (plist-get (nth 1 blocks) :type) 'thinking))
+    (should (equal (plist-get (nth 1 blocks) :text) "t1t2"))
+    (should (eq (plist-get (nth 2 blocks) :type) 'text))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

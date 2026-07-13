@@ -181,5 +181,25 @@
     (should-not (string-match-p "gone" (buffer-string)))
     (should (string-match-p "Fresh" (buffer-string)))))
 
+(ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
+  (let ((model (sprig-review-build
+                '((user "the question") (thinking "pondering")
+                  (text "the answer") (title "T")))))
+    (sprig-review-tests--rendered model nil
+      (let ((s (buffer-string)))
+        (should (string-match-p "^user$" s))
+        (should (string-match-p "the question" s))
+        (should (string-match-p "^thinking$" s))
+        (should (string-match-p "pondering" s))
+        (should (string-match-p "^assistant$" s))
+        (should (string-match-p "the answer" s))
+        ;; The model-carried title shows in the header.
+        (should (string-match-p "T" s))))
+    ;; The thinking section folds by default.
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (should (re-search-forward "^thinking$" nil t))
+      (should (oref (magit-current-section) hidden)))))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here
