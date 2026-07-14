@@ -471,6 +471,24 @@ Return the log directory."
             (should (equal (plist-get row :title) "Refined \"quoted\" title"))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-session-log-files-remote-globs ()
+  ;; The remote listing must leave the `*.jsonl' glob unquoted so the remote
+  ;; shell expands it; quoting the `*' would list nothing.
+  (let ((sprig-remote "me@host")
+        (sprig-claude-projects-directory "~/.claude/projects")
+        (captured nil))
+    (cl-letf (((symbol-function 'sprig--remote-sh)
+               (lambda (cmd) (setq captured cmd) "a.jsonl\nb.jsonl\n")))
+      (let* ((logdir (sprig--project-log-dir "~/Projects/sprig"))
+             (files (sprig--session-log-files-remote logdir)))
+        ;; A live, unescaped glob reached the shell.
+        (should (string-match-p "\\*\\.jsonl" captured))
+        (should-not (string-match-p "\\\\\\*" captured))
+        ;; Bare names come back re-rooted under the log directory.
+        (should (equal files
+                       (list (concat (file-name-as-directory logdir) "a.jsonl")
+                             (concat (file-name-as-directory logdir) "b.jsonl"))))))))
+
 (ert-deftest sprig-test-status-collect-owning-buffer-wins ()
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect

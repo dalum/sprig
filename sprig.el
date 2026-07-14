@@ -754,11 +754,15 @@ Reads only the trailing bytes, where the latest title record sits."
   "Return the remote session-log paths under LOGDIR, newest first."
   (mapcar (lambda (f) (concat (file-name-as-directory logdir) f))
           (split-string
+           ;; `cd' into the log dir so the `*.jsonl' glob stays unquoted and the
+           ;; remote shell expands it; quoting the pattern (as for a plain dir)
+           ;; would escape the `*' and match nothing.  `ls' then prints bare
+           ;; names, which the mapcar re-roots under LOGDIR.
            (or (ignore-errors
                  (sprig--remote-sh
-                  (format "ls -1t %s 2>/dev/null"
+                  (format "cd %s 2>/dev/null && ls -1t *.jsonl 2>/dev/null"
                           (sprig--remote-dir-arg
-                           (concat (file-name-as-directory logdir) "*.jsonl")))))
+                           (directory-file-name logdir)))))
                "")
            "\n" t)))
 
