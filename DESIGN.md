@@ -113,9 +113,12 @@ In one sentence: type-specific set verbs act on the applicable subset, report an
   - Marks and verbs: marking (`SPC`/`m`) is the one selection primitive; a verb acts on the marked sections, or the section at point when none are marked, and marks survive a re-render (stored as idents). Every change-touching verb is a canned instruction routed through the conversation by `sprig--send-text`: `k` reject (undo hunks), `x` run (re-run a command), `C` commit, `a` accept (clear marks, no send). `c` is a transient: `c c` compose-and-send (a compose buffer that attaches marked context), `c r` resend, `c i` interrupt. Instruction builders are pure and tested; each verb's extract-build-send path is tested with the send stubbed and validated against a real session.
   - Visit and retitle: `RET` visits the file a hunk/change/file-tool section points to, over TRAMP when the session is remote (the destination is captured at attach), best-effort jumping to the first changed line. `t` retitles, updating the header and the conversation's `title:` frontmatter.
   - Plan mode: `c p` composes and sends a turn in plan mode. Investigation confirmed the CLI switches permission mode mid-session over the stream-json stdin via a `control_request` (`set_permission_mode`), acked with a `control_response` and a `system/status` echoing the mode (verified against 2.1.207, and a real session mixes auto/plan). `c p` sends that control request before the turn; a plain send returns to auto, so plan is one-shot-sticky. The transport surfaces `system/status` as a `mode` event, shown in the header when not auto, and replayed from the log's per-turn `permissionMode`.
-- **Next:** finer `x` granularity (a code block inside prose, not just a tool command), model/dir header actions (only meaningful across a reconnect), the richer markable plan-tree review from the design's plan-mode section. Optional: incremental section append for the large-history structural render; graceful interrupt over the same control channel (`interrupt_receipt_v1`).
+- **Done (2026-07-14):** the review buffer is now the *only* conversation surface (option A: CLI sessions are the branches). The transport became buffer-agnostic (a per-buffer `sprig--sink`, a shared `sprig--spawn`), so a review buffer owns its session outright: `sprig-review-session` opens one that starts or resumes a session with no Markdown behind it, and its verbs steer it directly. The navigator was repointed off `.md` files onto the CLI's stored session logs, listing them per project directory with titles from each log's `ai-title` record and the last-reply preview read from the log tail. `sprig-mode` and the whole editable-Markdown surface (chrome, folding, sentinels, the Markdown sink, the frontmatter store, auto-titling) were then deleted, along with the rename / prune navigator verbs (the CLI owns the log and its title, so steering them would break the "never touch what it doesn't own" invariant). `sprig.el` dropped ~1300 lines.
+- **Next:** finer `x` granularity (a code block inside prose, not just a tool command), the richer markable plan-tree review from the design's plan-mode section. Optional: incremental section append for the large-history structural render; graceful interrupt over the same control channel (`interrupt_receipt_v1`).
 
 ## Architecture
+
+> **Historical.** The subsections below describe the pre-pivot editable-Markdown model, which has been removed (see "Current direction: the review buffer" above, now fully shipped). They are kept for the rationale, not as a description of the current code.
 
 Two surfaces, cleanly separated.
 
@@ -249,8 +252,8 @@ Many branches can stream at once, each in its own file and buffer. Emacs Lisp is
 
 ## Modes
 
-- *Editing buffer*: `markdown-mode` plus a `sprig-mode` minor mode adding send / fork / interrupt and the editor chrome: sentinel hiding, tool/result headers, reply rules, the user-input face, tool-body folding, and the structural edit guard.
-- *Navigator*: `sprig-status-mode`, a major mode on `magit-section` + `transient`.
+- *Review buffer*: `sprig-review-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
+- *Navigator*: `sprig-status-mode`, a major mode on `tabulated-list`.
 
 ## Deferred
 
@@ -270,8 +273,8 @@ Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>`
 
 ## Build status
 
-- **Done:** the sentinel-based Markdown transcript and turn parser (`sprig--turns`), streaming replies plus inline tool calls and results, the editor chrome (hidden sentinels, tool/result headers, reply rules, user-input face), tool-body folding with the structural edit guard, a per-file tool-render level, session persistence in frontmatter, interrupt, automatic titling of a titleless branch, and the `sprig-status` navigator in a first flat-list form (open / connect / interrupt / disconnect / preview, plus scratch branches via `sprig-new` / `sprig-save` and a kill guard). Single file, one turn at a time, over the `claude` CLI (local or via SSH with `sprig-remote`); several buffers can stream at once.
-- **Next slice:** fork-by-copy (and the rename / prune verbs it unblocks, plus the `id:` / `parent:` / `forked_at:` fork links), then the stateless-backend replay path that makes "context is the whole file" literal.
+- **Done:** the read-only review buffer is the whole conversation surface (see "Current direction" above for the detailed progress log). The transport parses the `claude` stream-json into a neutral event vocabulary and routes it to a session-owning review buffer; history and the store are the CLI's own session logs; the `sprig-status` navigator lists those logs per project directory with live status, titles, and last-reply previews (open / connect / interrupt / disconnect). One turn at a time per session, over the CLI (local or via SSH with `sprig-remote`); several sessions can stream at once.
+- **Next slice:** the fork forest over sessions, richer plan-mode review, and finer run granularity.
 
 ## First build slice (as shipped)
 
