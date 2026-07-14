@@ -496,6 +496,25 @@ Return the log directory."
               (should (= 1 (length rows))))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-scan-session-logs-without-cwd ()
+  ;; A log whose scanned tail carries no cwd yields a nil :dir, never the
+  ;; encoded log-dir name: that name is not a real path, so it survives
+  ;; only as the display-only :project and is never handed to a `cd'.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/myproj")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-nocwd"
+           '(:type "ai-title" :aiTitle "No cwd here"))
+          (let ((row (car (sprig--scan-session-logs))))
+            (should (null (plist-get row :dir)))
+            (should (equal (plist-get row :project) "-tmp-whatever-myproj"))
+            (should (equal (plist-get row :title) "No cwd here"))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-scan-session-logs-remote ()
   ;; Two round trips: a mtime-sorted find, then one batched slurp of tails.
   ;; The find output pairs each mtime with a path; the tails come back
@@ -528,8 +547,8 @@ Return the log directory."
         (should (seq-find (lambda (c) (string-match-p "\\*\\.jsonl" c)) calls))))))
 
 (ert-deftest sprig-test-entry-matches-filter ()
-  (let ((e '(:dir "/home/me/Projects/sprig" :title "Fix the navigator")))
-    ;; Case-insensitive, matching either the project directory or the title.
+  (let ((e '(:project "/home/me/Projects/sprig" :title "Fix the navigator")))
+    ;; Case-insensitive, matching either the project label or the title.
     (should (sprig--entry-matches-filter e "sprig"))
     (should (sprig--entry-matches-filter e "NAVIGATOR"))
     (should-not (sprig--entry-matches-filter e "unrelated"))))

@@ -636,14 +636,18 @@ mode is returned to \"auto\"."
 ;;;###autoload
 (defun sprig-review-session (dir &optional session-id)
   "Open a review buffer that owns a session in working directory DIR.
-With SESSION-ID, replay that stored session's log and resume it on the
-next send; without, the buffer starts empty and a send opens a fresh
-session.  The review buffer is the only conversation surface."
+DIR may be nil when it is unknown (a stored session whose log carried no
+cwd), in which case the session runs in the host's login directory.  With
+SESSION-ID, replay that stored session's log and resume it on the next
+send; without, the buffer starts empty and a send opens a fresh session.
+The review buffer is the only conversation surface."
   (interactive (list (sprig--read-review-dir)))
   (require 'sprig-review-mode)
   (let* ((name (format "*sprig-review: %s*"
                        (or session-id
-                           (file-name-nondirectory (directory-file-name dir)))))
+                           (and dir (file-name-nondirectory
+                                     (directory-file-name dir)))
+                           "new")))
          (buffer (sprig-review-buffer name)))
     (with-current-buffer buffer
       (setq sprig--session-id session-id
@@ -757,20 +761,25 @@ The latest title record sits nearest the end, so the last match wins."
 
 (defun sprig--log-plist (file mtime tail)
   "Build a scan plist for log FILE with MTIME and its TAIL text.
-The project directory is the session's own recorded `cwd'; the encoded log
-directory name is a fallback when the tail carries none."
-  (list :session (file-name-base file)
-        :file file
-        :dir (or (and tail (sprig--tail-cwd tail))
-                 (file-name-nondirectory
-                  (directory-file-name (file-name-directory file))))
-        :mtime mtime
-        :title (or (and tail (sprig--tail-title tail)) "(untitled)")))
+`:dir' is the session's own recorded `cwd', or nil when the tail carries
+none: the encoded log-directory name is not a real path (its separators
+are lossily flattened to dashes), so it is kept only as the display-only
+`:project' and never handed to a `cd'."
+  (let ((cwd (and tail (sprig--tail-cwd tail))))
+    (list :session (file-name-base file)
+          :file file
+          :dir cwd
+          :project (or cwd
+                       (file-name-nondirectory
+                        (directory-file-name (file-name-directory file))))
+          :mtime mtime
+          :title (or (and tail (sprig--tail-title tail)) "(untitled)"))))
 
 (defun sprig--scan-session-logs ()
   "Return session plists for the newest stored logs on the session host.
-Each plist has :session, :file, :dir (the log's recorded cwd), :mtime,
-and :title.  Sourced host-wide from `sprig-claude-projects-directory',
+Each plist has :session, :file, :dir (the log's recorded cwd, or nil),
+:project (its display label), :mtime, and :title.  Sourced host-wide from
+`sprig-claude-projects-directory',
 newest first, capped to `sprig--status-limit' so a host with hundreds of
 sessions still paints fast."
   (if sprig-remote
@@ -882,8 +891,9 @@ session log's tail."
 
 (defun sprig--status-collect ()
   "Return status plists for all branches, deduped by session id.
-Each plist has :key, :buffer (or nil), :file (or nil), :dir, :title,
-:status, and :session.  An open session-owning review buffer wins over
+Each plist has :key, :buffer (or nil), :file (or nil), :dir (a real
+working directory or nil), :project (its display label), :title, :status,
+and :session.  An open session-owning review buffer wins over
 its stored log, carrying live status and a session with no log yet.  When
 `sprig--status-filter' is set, only rows matching it are returned."
   (let ((table (make-hash-table :test 'equal))
@@ -896,6 +906,7 @@ its stored log, carrying live status and a session with no log yet.  When
           (puthash key
                    (list :key key :buffer buf :file nil
                          :dir (buffer-local-value 'sprig--working-dir buf)
+                         :project (buffer-local-value 'sprig--working-dir buf)
                          :title (or (plist-get (buffer-local-value
                                                 'sprig-review--meta buf)
                                                :title)
@@ -910,6 +921,7 @@ its stored log, carrying live status and a session with no log yet.  When
           (puthash key
                    (list :key key :buffer nil :file (plist-get e :file)
                          :dir (plist-get e :dir)
+                         :project (plist-get e :project)
                          :title (plist-get e :title)
                          :status 'disconnected
                          :session (plist-get e :session))
@@ -921,11 +933,11 @@ its stored log, carrying live status and a session with no log yet.  When
         rows))))
 
 (defun sprig--entry-matches-filter (entry filter)
-  "Non-nil if ENTRY's project directory or title contains FILTER.
+  "Non-nil if ENTRY's project label or title contains FILTER.
 Matching is case-insensitive."
   (let ((case-fold-search t)
         (needle (regexp-quote filter)))
-    (or (string-match-p needle (or (plist-get entry :dir) ""))
+    (or (string-match-p needle (or (plist-get entry :project) ""))
         (string-match-p needle (or (plist-get entry :title) "")))))
 
 ;;; tabulated-list rendering
@@ -951,7 +963,7 @@ ids are pruned from `sprig--status-expanded' so it never outlives its row."
     (dolist (e (sprig--status-collect))
       (let* ((id (plist-get e :key))
              (status (plist-get e :status))
-             (dir (plist-get e :dir))
+             (dir (plist-get e :project))
              (session (plist-get e :session))
              (glyph (propertize (or (alist-get status sprig--status-glyphs) "?")
                                 'face (sprig--status-face status))))
