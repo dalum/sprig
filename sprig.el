@@ -168,11 +168,13 @@ spend on a Pro/Max subscription, so it is off by default."
   :type 'boolean)
 
 (defcustom sprig-status-directories nil
-  "Directories the `sprig-status' navigator scans for branch files.
-When nil, scan the directories of the open Sprig buffers plus
-`sprig-directory' (skipped for a remote session, whose files live on the
-SSH host).  Each entry may use a leading `~'."
-  :type '(choice (const :tag "Auto (open buffers + sprig-directory)" nil)
+  "Project working directories whose stored sessions the navigator lists.
+The `sprig-status' navigator maps each to the CLI's session-log directory
+under `sprig-claude-projects-directory' and lists the sessions there.
+When nil, use `sprig-directory' or the current `default-directory'.  Each
+entry may use a leading `~'; for a remote session they name paths on the
+SSH host."
+  :type '(choice (const :tag "Auto (sprig-directory or default-directory)" nil)
                  (repeat directory)))
 
 (defcustom sprig-status-preview-max-lines 3
@@ -1430,6 +1432,7 @@ omitted are not recovered."
 (declare-function sprig-review-consume "sprig-review-mode" (event))
 (declare-function sprig-review-attach "sprig-review-mode" (conversation &optional remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
+(declare-function sprig-review-interrupt "sprig-review-mode" ())
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1655,6 +1658,14 @@ reply longer than this simply shows no preview.")
     (disconnected . "○"))
   "Glyph shown in the status column for each session state.")
 
+(defvar sprig-claude-projects-directory "~/.claude/projects"
+  "Root under which the `claude' CLI stores per-project session logs.
+Local sessions read it here; remote sessions read the same path on the
+SSH host.  A variable, not a defcustom, so tests can redirect it.")
+
+(defvar sprig--remote-home nil
+  "Cached value of $HOME on the session host, for encoding remote paths.")
+
 ;;; Enumeration and per-buffer status
 
 (defun sprig--conversation-buffer-p (buf)
@@ -1698,6 +1709,119 @@ checks first; the interrupted scan is reached only when no process lives."
         (and buffer-file-name (file-name-base buffer-file-name))
         (buffer-name))))
 
+;;; Enumerating stored CLI sessions as branches (option A)
+;;
+;; A branch is a `claude' session; the CLI already stores each as a JSONL
+;; log under `sprig-claude-projects-directory'/<encoded-cwd>/.  The
+;; navigator lists those logs for the configured project directories, and
+;; folds in any open review buffer that owns its session (so a just-started
+;; session with no log yet, and live status, both show).
+
+(defvar sprig-review--events)           ; buffer-local in sprig-review-mode.el
+(defvar sprig-review--meta)             ; buffer-local in sprig-review-mode.el
+
+(defun sprig--owning-review-buffers ()
+  "Return the live review buffers that own their own session."
+  (seq-filter
+   (lambda (b)
+     (and (buffer-live-p b)
+          (eq (buffer-local-value 'sprig--sink b) #'sprig--review-sink)))
+   (buffer-list)))
+
+(defun sprig--session-status (buf)
+  "Return the session status for its owning review BUF (nil = not open).
+One of `streaming', `idle', or `disconnected'."
+  (cond
+   ((not (buffer-live-p buf)) 'disconnected)
+   ((buffer-local-value 'sprig--busy buf) 'streaming)
+   ((process-live-p (buffer-local-value 'sprig--process buf)) 'idle)
+   (t 'disconnected)))
+
+(defun sprig--remote-home ()
+  "Return $HOME on the session host, caching it in `sprig--remote-home'."
+  (or sprig--remote-home
+      (setq sprig--remote-home
+            (string-trim (sprig--remote-sh "printf %s \"$HOME\"")))))
+
+(defun sprig--project-directories ()
+  "Return the project working directories whose sessions the navigator lists.
+`sprig-status-directories' when set, else `sprig-directory' or the current
+`default-directory'."
+  (or sprig-status-directories
+      (list (or sprig-directory default-directory))))
+
+(defun sprig--encode-project (abs)
+  "Encode absolute path ABS the way the CLI names its project directory."
+  (replace-regexp-in-string "[/.]" "-" (directory-file-name abs)))
+
+(defun sprig--project-log-dir (dir)
+  "Return the session-log directory for project DIR.
+Local: an absolute path.  Remote: a path on the SSH host, `~' left live
+for the remote shell to expand."
+  (if sprig-remote
+      (let ((abs (cond ((string-prefix-p "/" dir) dir)
+                       ((string-prefix-p "~" dir)
+                        (concat (sprig--remote-home) (substring dir 1)))
+                       (t (concat (sprig--remote-home) "/" dir)))))
+        (concat (file-name-as-directory sprig-claude-projects-directory)
+                (sprig--encode-project abs)))
+    (expand-file-name (sprig--encode-project (expand-file-name dir))
+                      (expand-file-name sprig-claude-projects-directory))))
+
+(defun sprig--session-log-tail (file)
+  "Return the trailing bytes of session-log FILE, local or remote, or nil."
+  (ignore-errors
+    (if sprig-remote
+        (sprig--remote-sh (format "tail -c %d %s" sprig--status-preview-bytes
+                                  (sprig--remote-dir-arg file)))
+      (with-temp-buffer
+        (let* ((size (file-attribute-size (file-attributes file)))
+               (from (max 0 (- size sprig--status-preview-bytes))))
+          (insert-file-contents file nil from size))
+        (buffer-string)))))
+
+(defun sprig--session-log-title (file)
+  "Return the freshest ai-title stored in session-log FILE, or nil.
+Reads only the trailing bytes, where the latest title record sits."
+  (let ((text (sprig--session-log-tail file)) (title nil) (pos 0))
+    (while (and text
+                (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)"
+                              text pos))
+      (setq title (match-string 1 text) pos (match-end 0)))
+    (and title (ignore-errors (json-parse-string title)))))
+
+(defun sprig--session-log-files-remote (logdir)
+  "Return the remote session-log paths under LOGDIR, newest first."
+  (mapcar (lambda (f) (concat (file-name-as-directory logdir) f))
+          (split-string
+           (or (ignore-errors
+                 (sprig--remote-sh
+                  (format "ls -1t %s 2>/dev/null"
+                          (sprig--remote-dir-arg
+                           (concat (file-name-as-directory logdir) "*.jsonl")))))
+               "")
+           "\n" t)))
+
+(defun sprig--scan-session-logs ()
+  "Return session plists for every stored log under the project directories.
+Each plist has :session, :file, :dir, :mtime, and :title.  Sorted newest
+first.  Titles come from the log's ai-title record."
+  (let (rows)
+    (dolist (dir (sprig--project-directories))
+      (let ((logdir (sprig--project-log-dir dir)))
+        (dolist (file (if sprig-remote
+                          (sprig--session-log-files-remote logdir)
+                        (and (file-directory-p logdir)
+                             (directory-files logdir t "\\.jsonl\\'" t))))
+          (push (list :session (file-name-base file)
+                      :file file :dir dir
+                      :mtime (if sprig-remote 0.0
+                               (float-time (file-attribute-modification-time
+                                            (file-attributes file))))
+                      :title (or (sprig--session-log-title file) "(untitled)"))
+                rows))))
+    (sort rows (lambda (a b) (> (plist-get a :mtime) (plist-get b :mtime))))))
+
 ;;; Last-reply preview
 
 (defun sprig--last-paragraph (text)
@@ -1740,14 +1864,29 @@ its matching close, or to buffer end for a still-streaming reply."
         (insert-file-contents file nil from size))
       (sprig--reply-preview-here))))
 
+(defun sprig--events-last-text (events)
+  "Return the last assistant text block's last paragraph from EVENTS, or nil.
+EVENTS are in chronological order (the review model's input order)."
+  (let* ((model (ignore-errors (sprig-review-build events)))
+         (blocks (and model (plist-get model :blocks)))
+         (last (seq-find (lambda (b) (eq (plist-get b :type) 'text))
+                         (reverse blocks))))
+    (and last (sprig--last-paragraph (plist-get last :text)))))
+
 (defun sprig--entry-preview (entry)
   "Return the inline reply preview for status ENTRY, or nil.
-Reads the live buffer when ENTRY has one, else the on-disk file's tail."
+From the open review buffer's events when ENTRY has one, else the stored
+session log's tail."
   (let ((buf (plist-get entry :buffer))
         (file (plist-get entry :file)))
-    (cond ((buffer-live-p buf)
-           (with-current-buffer buf (sprig--reply-preview-here)))
-          (file (sprig--reply-preview-from-file file)))))
+    (cond
+     ((buffer-live-p buf)
+      (sprig--events-last-text
+       (reverse (buffer-local-value 'sprig-review--events buf))))
+     (file
+      (let ((tail (sprig--session-log-tail file)))
+        (and tail (sprig--events-last-text
+                   (sprig-review-session-events (split-string tail "\n" t)))))))))
 
 ;;; On-disk branch-file scan
 
@@ -1806,32 +1945,37 @@ Non-recursive; unreadable files are skipped."
 ;;; Merge open buffers and on-disk files into rows
 
 (defun sprig--status-collect ()
-  "Return status plists for all sessions, deduped by file truename.
-Each plist has :key, :buffer (or nil), :file (or nil), :title, :status,
-and :session.  An open buffer wins over its on-disk file."
+  "Return status plists for all branches, deduped by session id.
+Each plist has :key, :buffer (or nil), :file (or nil), :dir, :title,
+:status, and :session.  An open session-owning review buffer wins over
+its stored log, carrying live status and a session with no log yet."
   (let ((table (make-hash-table :test 'equal))
         (order '()))
-    (dolist (buf (sprig--conversation-buffers))
-      (let* ((file (buffer-local-value 'buffer-file-name buf))
-             (key (if file (file-truename file) buf)))
+    (dolist (buf (sprig--owning-review-buffers))
+      (let* ((id (buffer-local-value 'sprig--session-id buf))
+             (key (or id buf)))
         (unless (gethash key table)
           (push key order)
           (puthash key
-                   (list :key key :buffer buf :file file
-                         :title (sprig--buffer-title buf)
-                         :status (sprig--buffer-status buf)
-                         :session (buffer-local-value 'sprig--session-id buf))
+                   (list :key key :buffer buf :file nil
+                         :dir (buffer-local-value 'sprig--working-dir buf)
+                         :title (or (plist-get (buffer-local-value
+                                                'sprig-review--meta buf)
+                                               :title)
+                                    "(untitled)")
+                         :status (sprig--session-status buf)
+                         :session id)
                    table))))
-    (dolist (file (sprig--scan-branch-files))
-      (let ((key (file-truename file)))
+    (dolist (e (sprig--scan-session-logs))
+      (let ((key (plist-get e :session)))
         (unless (gethash key table)
           (push key order)
           (puthash key
-                   (list :key key :buffer nil :file file
-                         :title (or (sprig--file-frontmatter-get file "title")
-                                    (file-name-base file))
+                   (list :key key :buffer nil :file (plist-get e :file)
+                         :dir (plist-get e :dir)
+                         :title (plist-get e :title)
                          :status 'disconnected
-                         :session (sprig--file-frontmatter-get file "claude_session"))
+                         :session (plist-get e :session))
                    table))))
     (mapcar (lambda (k) (gethash k table)) (nreverse order))))
 
@@ -1859,7 +2003,7 @@ outlives the row it belongs to."
     (dolist (e (sprig--status-collect))
       (let* ((id (plist-get e :key))
              (status (plist-get e :status))
-             (file (plist-get e :file))
+             (dir (plist-get e :dir))
              (session (plist-get e :session))
              (glyph (propertize (or (alist-get status sprig--status-glyphs) "?")
                                 'face (sprig--status-face status))))
@@ -1867,8 +2011,10 @@ outlives the row it belongs to."
         (push (list id
                     (vector glyph
                             (or (plist-get e :title) "")
-                            (if file (file-name-nondirectory file) "(no file)")
-                            (if (and session (> (length session) 0))
+                            (if dir (file-name-nondirectory
+                                     (directory-file-name dir))
+                              "-")
+                            (if (and (stringp session) (> (length session) 0))
                                 (substring session 0 (min 8 (length session)))
                               "-")))
               rows)))
@@ -1967,10 +2113,6 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
-(define-key sprig-status-mode-map (kbd "w")   #'sprig-status-write)
-(define-key sprig-status-mode-map (kbd "f")   #'sprig-status-fork)
-(define-key sprig-status-mode-map (kbd "r")   #'sprig-status-rename)
-(define-key sprig-status-mode-map (kbd "x")   #'sprig-status-prune)
 (define-key sprig-status-mode-map (kbd "?")   #'describe-mode)
 
 (define-derived-mode sprig-status-mode tabulated-list-mode "Sprig-Status"
@@ -1980,11 +2122,11 @@ reprint; point is kept on its row by `tabulated-list-print'."
 disconnect with \\[sprig-status-disconnect], refresh with \\[revert-buffer]."
   (setq tabulated-list-format
         [("S" 2 t)
-         ("Title" 28 t)
-         ("File" 28 t)
+         ("Title" 32 t)
+         ("Project" 24 t)
          ("Session" 9 nil)]
         tabulated-list-padding 1
-        tabulated-list-sort-key '("Title" . nil)
+        tabulated-list-sort-key nil
         tabulated-list-entries #'sprig--status-entries)
   (setq-local revert-buffer-function #'sprig--status-revert)
   (tabulated-list-init-header))
@@ -2016,23 +2158,20 @@ live and listed; deferring lets it drop from the list first."
     (or (and id sprig--status-index (gethash id sprig--status-index))
         (user-error "No Sprig session on this line"))))
 
-(defun sprig--status-buffer-at-point (&optional create)
-  "Return the live conversation buffer for the row at point, or nil.
-With CREATE, open the row's on-disk file when it has no live buffer."
-  (let* ((e (sprig--status-entry-at-point))
-         (buf (plist-get e :buffer))
-         (file (plist-get e :file)))
-    (cond ((buffer-live-p buf) buf)
-          ((and create file) (find-file-noselect file))
-          (t nil))))
+(defun sprig--status-review-buffer (entry)
+  "Return the review buffer for ENTRY, opening it from the log if needed.
+An open owning buffer is reused; otherwise a review buffer is opened that
+owns the session, replaying its stored log."
+  (let ((buf (plist-get entry :buffer)))
+    (if (buffer-live-p buf)
+        buf
+      (sprig-review-session (plist-get entry :dir) (plist-get entry :session)))))
 
-(defun sprig--status-run (command not-connected)
-  "Run COMMAND in the conversation buffer for the row at point, then refresh.
-Signal NOT-CONNECTED as a `user-error' when the row has no live buffer."
-  (let ((buf (sprig--status-buffer-at-point)))
-    (unless buf (user-error "%s" not-connected))
-    (with-current-buffer buf (funcall command))
-    (sprig--status-refresh)))
+(defun sprig--status-owning-buffer (entry)
+  "Return ENTRY's open owning review buffer, or signal that it is not open."
+  (let ((buf (plist-get entry :buffer)))
+    (if (buffer-live-p buf) buf
+      (user-error "That session is not open (open it first)"))))
 
 (defun sprig--status-goto-row (dir)
   "Move point DIR (+1 or -1) session rows, skipping inline preview lines.
@@ -2062,29 +2201,33 @@ N defaults to 1; a negative N moves to previous rows."
   (sprig-status-next (- (or n 1))))
 
 (defun sprig-status-open ()
-  "Visit the conversation on the current line."
+  "Open the review buffer for the session on the current line.
+Reuses an open owning buffer, or replays the stored log into a new one."
   (interactive)
-  (let ((buf (sprig--status-buffer-at-point t)))
-    (if buf (pop-to-buffer buf) (user-error "Nothing to open here"))))
+  (pop-to-buffer (sprig--status-review-buffer (sprig--status-entry-at-point)))
+  (sprig--status-refresh))
 
 (defun sprig-status-connect ()
-  "Connect the session on the current line, opening its file if needed."
+  "Open the session on the current line and start or resume it."
   (interactive)
-  (with-current-buffer (or (sprig--status-buffer-at-point t)
-                           (user-error "No file to connect here"))
-    (unless (bound-and-true-p sprig-mode) (sprig-mode 1))
-    (sprig-connect))
-  (sprig--status-refresh))
+  (let ((buf (sprig--status-review-buffer (sprig--status-entry-at-point))))
+    (with-current-buffer buf
+      (unless (process-live-p sprig--process) (sprig-review-connect)))
+    (sprig--status-refresh)))
 
 (defun sprig-status-interrupt ()
   "Interrupt the streaming session on the current line."
   (interactive)
-  (sprig--status-run #'sprig-interrupt "That row is not a connected session"))
+  (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
+    (sprig-review-interrupt))
+  (sprig--status-refresh))
 
 (defun sprig-status-disconnect ()
-  "Disconnect the session on the current line."
+  "Disconnect the session on the current line (its log is kept)."
   (interactive)
-  (sprig--status-run #'sprig-disconnect "That row is not a connected session"))
+  (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
+    (when (process-live-p sprig--process) (sprig--teardown-process)))
+  (sprig--status-refresh))
 
 (defun sprig-status-toggle-preview ()
   "Toggle an inline preview of the last reply for the row at point.
@@ -2097,42 +2240,19 @@ Shows the tail of that session's last reply, filled to
     (sprig--status-render)))
 
 (defun sprig-status-new ()
-  "Start a fresh in-memory conversation and open its review buffer.
-The new branch visits no file until you save it; it appears in the
-navigator immediately and streams like any other.  You land in the
-read-only review buffer, not the Markdown transport."
+  "Start a fresh session, prompting for its working directory.
+Opens a review buffer that owns the new session; it appears in the
+navigator and streams like any other."
   (interactive)
-  (with-current-buffer (sprig-new nil t)
-    (sprig-review))
+  (sprig-review-session (sprig--read-review-dir))
   (sprig--status-refresh))
-
-(defun sprig-status-write ()
-  "Save the conversation on the current line to a file.
-An in-memory branch is prompted for a filename (defaulting to a title
-slug); a branch already backed by a file writes its pending edits."
-  (interactive)
-  (sprig--status-run #'sprig-save "That row is already an on-disk file"))
-
-(defun sprig-status-fork ()
-  "Fork the branch on the current line (not implemented yet)."
-  (interactive)
-  (user-error "sprig: fork is not implemented yet (planned; see DESIGN.md)"))
-
-(defun sprig-status-rename ()
-  "Rename the branch on the current line (not implemented yet)."
-  (interactive)
-  (user-error "sprig: rename is not implemented yet"))
-
-(defun sprig-status-prune ()
-  "Prune the branch on the current line (not implemented yet)."
-  (interactive)
-  (user-error "sprig: prune is not implemented yet"))
 
 ;;;###autoload
 (defun sprig-status ()
   "Open the `*sprig-status*' navigator listing Sprig sessions.
-Lists every open conversation buffer with its live status, plus unopened
-branch files found under `sprig-status-directories'."
+Lists the stored `claude' sessions for the project directories in
+`sprig-status-directories', plus any open review buffer that owns a live
+session."
   (interactive)
   (let ((buf (get-buffer-create sprig-status-buffer-name)))
     (with-current-buffer buf

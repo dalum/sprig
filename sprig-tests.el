@@ -692,5 +692,65 @@ Point starts at `point-min'."
         (should (equal (alist-get 'mode request) "plan")))
       (should (equal sprig--permission-mode "plan")))))
 
+;;;; Navigator: enumerating stored CLI sessions as branches (option A)
+
+(defun sprig-tests--make-session-log (root proj id &rest records)
+  "Write RECORDS (alists) as a session log ID.jsonl for project PROJ under ROOT.
+Return the log directory."
+  (let ((logdir (expand-file-name
+                 (replace-regexp-in-string "[/.]" "-" (directory-file-name proj))
+                 root)))
+    (make-directory logdir t)
+    (with-temp-file (expand-file-name (concat id ".jsonl") logdir)
+      (dolist (r records) (insert (json-serialize r) "\n")))
+    logdir))
+
+(ert-deftest sprig-test-encode-project ()
+  (should (equal (sprig--encode-project "/home/me/Projects/sprig")
+                 "-home-me-Projects-sprig"))
+  ;; A trailing slash and a dotted segment both fold to hyphens.
+  (should (equal (sprig--encode-project "/a/b.c/") "-a-b-c")))
+
+(ert-deftest sprig-test-scan-session-logs ()
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/myproj")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (sprig-status-directories (list proj)))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-1"
+           '(:type "user" :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "First title")
+           '(:type "ai-title" :aiTitle "Refined \"quoted\" title"))
+          (let* ((rows (sprig--scan-session-logs))
+                 (row (car rows)))
+            (should (= 1 (length rows)))
+            (should (equal (plist-get row :session) "sess-1"))
+            (should (equal (plist-get row :dir) proj))
+            ;; The freshest ai-title wins, and JSON escapes are decoded.
+            (should (equal (plist-get row :title) "Refined \"quoted\" title"))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-collect-owning-buffer-wins ()
+  (let ((root (make-temp-file "sprig-proj" t)))
+    (unwind-protect
+        (let ((sprig-remote nil)
+              (sprig-claude-projects-directory root)
+              (sprig-status-directories '("/tmp/no-such-project")))
+          (with-temp-buffer
+            (setq-local sprig--sink #'sprig--review-sink
+                        sprig--session-id "live-1"
+                        sprig--working-dir "/tmp/proj"
+                        sprig-review--meta '(:title "Live one"))
+            (let* ((rows (sprig--status-collect))
+                   (e (seq-find (lambda (r) (equal (plist-get r :session) "live-1"))
+                                rows)))
+              (should e)
+              (should (eq (plist-get e :buffer) (current-buffer)))
+              (should (equal (plist-get e :title) "Live one")))))
+      (delete-directory root t))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
