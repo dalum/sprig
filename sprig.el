@@ -603,18 +603,21 @@ TOOL-NAME is the tool the CLI wants to run and INPUT its arguments alist."
 
 (defun sprig--answer-control-request (request-id req)
   "Answer the CLI control_request REQUEST-ID described by REQ (an alist).
-AskUserQuestion is rendered for a choice; other permission requests
-consult `sprig-permission-function'; tool-driven dialogs and anything
-unrecognised are cancelled so the turn keeps moving rather than parking
-on a prompt sprig cannot yet render.  A quit (\\`C-g') at any prompt is
-caught and answered safely, so the session never hangs on an unanswered
-request."
+AskUserQuestion is rendered for a choice and ExitPlanMode for plan
+approval; other permission requests consult `sprig-permission-function';
+anything unrecognised is cancelled so the turn keeps moving rather than
+parking on a prompt sprig cannot render.  A quit (\\`C-g') at any prompt is
+caught and answered safely (see `sprig--safe-quit-response'), so the
+session never hangs on an unanswered request."
   (let-alist req
     (condition-case nil
         (cond
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "AskUserQuestion"))
           (sprig--answer-user-question request-id .input))
+         ((and (equal .subtype "can_use_tool")
+               (equal .tool_name "ExitPlanMode"))
+          (sprig--answer-plan request-id .input))
          ((equal .subtype "can_use_tool")
           (sprig--send-control-response
            request-id
@@ -623,16 +626,42 @@ request."
                ;; unchanged", avoiding a lossy JSON round-trip of the input.
                (list :behavior "allow")
              (list :behavior "deny" :message "Denied in sprig"))))
-         ;; Rendering other tool-driven dialogs (e.g. ExitPlanMode) in the
-         ;; review buffer is future work; cancel so the CLI applies each
-         ;; dialog's default behaviour.
          (t (sprig--send-control-response request-id (list :behavior "cancelled"))))
-      ;; Answer conservatively on quit: deny a permission, cancel a dialog.
       (quit (sprig--send-control-response
-             request-id
-             (if (equal .subtype "can_use_tool")
-                 (list :behavior "allow") ; AskUserQuestion skip / no answer
-               (list :behavior "cancelled")))))))
+             request-id (sprig--safe-quit-response req))))))
+
+(defun sprig--safe-quit-response (req)
+  "The conservative control response when the user quits a prompt for REQ.
+Never approves on a quit: a permission or plan approval denies, a question
+allows with no answer (the tool's own skip), a dialog cancels."
+  (let-alist req
+    (cond
+     ((equal .tool_name "AskUserQuestion") (list :behavior "allow"))
+     ((equal .subtype "can_use_tool")
+      (list :behavior "deny" :message "Cancelled in sprig"))
+     (t (list :behavior "cancelled")))))
+
+(defun sprig--answer-plan (request-id input)
+  "Approve or reject the ExitPlanMode plan in INPUT, replying to REQUEST-ID.
+Approval (\\`y') lets the CLI exit plan mode and the agent start work; a
+rejection reads feedback the agent revises against and re-presents.  The
+pending render is flushed first so the plan (the ExitPlanMode tool call)
+is on screen before the prompt blocks."
+  (sprig-review-flush)
+  (redisplay)
+  (let* ((plan (or (alist-get 'plan input) ""))
+         (title (car (split-string plan "\n" t))))
+    (if (y-or-n-p (format "Approve plan%s? "
+                          (if title
+                              (format " \"%s\""
+                                      (truncate-string-to-width title 50 nil nil "…"))
+                            "")))
+        (sprig--send-control-response request-id (list :behavior "allow"))
+      (let ((feedback (read-string "Reject plan; feedback for revision: ")))
+        (sprig--send-control-response
+         request-id
+         (list :behavior "deny"
+               :message (if (string-empty-p feedback) "Plan rejected." feedback)))))))
 
 (defun sprig--answer-user-question (request-id input)
   "Render the AskUserQuestion INPUT, collect answers, reply to REQUEST-ID.
@@ -687,6 +716,7 @@ is visible without opening the header."
 (declare-function sprig-review-buffer "sprig-review-mode" (name))
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
+(declare-function sprig-review-flush "sprig-review-mode" (&optional buffer))
 (declare-function sprig-review-set-remote "sprig-review-mode" (remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
 (declare-function sprig-review-interrupt "sprig-review-mode" ())

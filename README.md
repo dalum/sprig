@@ -128,9 +128,9 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `a` | Accept: clear the marks (sends nothing, commits nothing) |
 | `c` | Transient: `c c` compose & send, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt |
 
-`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent returns a plan rather than acting), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
+`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
-When the agent calls `AskUserQuestion` mid-turn, Sprig renders the question and its options and reads your pick in the minibuffer (multiple questions are asked in turn; blank skips one); the choice rides back to the agent and the exchange shows inline as tool activity. A tool that needs approval prompts the same way.
+When the agent calls `AskUserQuestion` mid-turn, Sprig renders the question and its options and reads your pick in the minibuffer (multiple questions are asked in turn; blank skips one); the choice rides back to the agent and the exchange shows inline as tool activity. A tool that needs approval prompts the same way. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
 
 ## Options
 

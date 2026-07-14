@@ -599,6 +599,65 @@
         (should (equal (alist-get 'behavior decision) "allow"))
         (should-not (alist-get 'updatedInput decision))))))
 
+(defun sprig-tests--answer-plan (yn feedback)
+  "Run the ExitPlanMode approval path; YN is the y-or-n-p answer, FEEDBACK
+the reject text.  Returns the reply string."
+  (let ((event (car (sprig--claude-parse-line
+                     (json-serialize
+                      (list :type "control_request" :request_id "req-p"
+                            :request (list :subtype "can_use_tool"
+                                           :tool_name "ExitPlanMode"
+                                           :input (list :plan "# Do the thing\n\nSteps"
+                                                        :planFilePath "/tmp/p.md")))))))
+        sent)
+    (cl-letf (((symbol-function 'process-send-string) (lambda (_proc s) (setq sent s)))
+              ((symbol-function 'sprig-review-flush) #'ignore)
+              ((symbol-function 'redisplay) #'ignore)
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) yn))
+              ((symbol-function 'read-string) (lambda (&rest _) feedback)))
+      (setq sprig--process 'dummy)
+      (pcase event
+        (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+    sent))
+
+(defun sprig-tests--decision (sent)
+  "Extract the decision payload from a control_response SENT string."
+  (alist-get 'response (alist-get 'response
+                                  (json-parse-string (string-trim sent)
+                                                     :object-type 'alist))))
+
+(ert-deftest sprig-test-answer-plan-approve ()
+  ;; Approving replies with a bare allow; the CLI itself exits plan mode.
+  (with-temp-buffer
+    (let ((decision (sprig-tests--decision (sprig-tests--answer-plan t ""))))
+      (should (equal (alist-get 'behavior decision) "allow"))
+      (should-not (alist-get 'message decision)))))
+
+(ert-deftest sprig-test-answer-plan-reject ()
+  ;; Rejecting replies deny with the typed feedback, which the agent
+  ;; revises against and re-presents.
+  (with-temp-buffer
+    (let ((decision (sprig-tests--decision (sprig-tests--answer-plan nil "add French"))))
+      (should (equal (alist-get 'behavior decision) "deny"))
+      (should (equal (alist-get 'message decision) "add French")))))
+
+(ert-deftest sprig-test-safe-quit-response ()
+  ;; A quit never approves: a plan or permission denies, a question skips.
+  (should (equal (plist-get (sprig--safe-quit-response
+                             '((tool_name . "AskUserQuestion")
+                               (subtype . "can_use_tool")))
+                            :behavior)
+                 "allow"))
+  (should (equal (plist-get (sprig--safe-quit-response
+                             '((tool_name . "ExitPlanMode")
+                               (subtype . "can_use_tool")))
+                            :behavior)
+                 "deny"))
+  (should (equal (plist-get (sprig--safe-quit-response
+                             '((subtype . "request_user_dialog")))
+                            :behavior)
+                 "cancelled")))
+
 (ert-deftest sprig-test-mode-line-permission ()
   (with-temp-buffer
     (let ((sprig--permission-mode nil))
