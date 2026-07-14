@@ -658,5 +658,60 @@ Return the log directory."
               (should (equal (plist-get e :title) "From log")))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-log-ignored-p ()
+  ;; The ignore list matches a log's encoded project directory name, read
+  ;; from the path (no content), and is precise about boundaries.
+  (let ((sprig-status-ignore-directories '("\\`-tmp\\(-\\|\\'\\)" "sdk-probe")))
+    (should (sprig--log-ignored-p "/x/.claude/projects/-tmp/a.jsonl"))
+    (should (sprig--log-ignored-p "/x/.claude/projects/-tmp-sdk-probe/a.jsonl"))
+    (should (sprig--log-ignored-p "/x/.claude/projects/-home-me-sdk-probe/a.jsonl"))
+    (should-not (sprig--log-ignored-p "/x/.claude/projects/-home-me-real/a.jsonl"))
+    ;; `-tmpfoo' is not `/tmp': the boundary guard keeps it.
+    (should-not (sprig--log-ignored-p "/x/.claude/projects/-tmpfoo/a.jsonl")))
+  (let ((sprig-status-ignore-directories nil))
+    (should-not (sprig--log-ignored-p "/x/.claude/projects/-tmp/a.jsonl"))))
+
+(ert-deftest sprig-test-scan-ignores-directories ()
+  ;; A session under an ignored directory is dropped from the scan.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (sprig-status-ignore-directories '("\\`-tmp\\(-\\|\\'\\)")))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root "/tmp/sdk-probe" "probe-1"
+           `(:type "user" :cwd "/tmp/sdk-probe" :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Probe"))
+          (sprig-tests--make-session-log
+           root "/home/me/real" "real-1"
+           `(:type "user" :cwd "/home/me/real" :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Real work"))
+          (let ((rows (sprig--scan-session-logs)))
+            (should (= 1 (length rows)))
+            (should (equal (plist-get (car rows) :session) "real-1"))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-scan-ignore-before-cap ()
+  ;; The drop happens before the newest-N cap, so a throwaway session
+  ;; written last does not crowd out the kept one under a cap of 1.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (sprig-status-max-sessions 1)
+         (sprig-status-ignore-directories '("\\`-tmp\\'")))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root "/home/me/keep" "keep-1"
+           `(:type "user" :cwd "/home/me/keep" :message (:role "user" :content "hi")))
+          (sprig-tests--make-session-log
+           root "/tmp" "junk-1"
+           `(:type "user" :cwd "/tmp" :message (:role "user" :content "hi")))
+          (let ((rows (sprig--scan-session-logs)))
+            (should (= 1 (length rows)))
+            (should (equal (plist-get (car rows) :session) "keep-1"))))
+      (delete-directory root t))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

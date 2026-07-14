@@ -121,6 +121,19 @@ feel.  Prefer leaving it nil and using `/'."
 show the tail of that session's last reply, filled to this many lines."
   :type 'integer)
 
+(defcustom sprig-status-ignore-directories nil
+  "Regexps for stored sessions the navigator should hide.
+Each is matched against a session's project directory name: the CLI's
+encoded working directory, which is the `cwd' with every `/' and `.'
+flattened to `-' (e.g. `/tmp/sdk-probe' is `-tmp-sdk-probe').  A session
+whose directory matches any regexp is dropped before the newest-N cap, so
+throwaway sessions (SDK probes, scratch runs under /tmp) neither clutter
+the list nor use up a slot.  An explicitly opened session still shows.
+Example, hiding /tmp and everything under it:
+
+  (setq sprig-status-ignore-directories \\='(\"\\\\`-tmp\\\\(-\\\\|\\\\'\\\\)\"))"
+  :type '(repeat regexp))
+
 (defface sprig-status-preview '((t :inherit shadow :slant italic))
   "Face for the inline reply preview shown under an expanded navigator row.")
 
@@ -730,6 +743,18 @@ One of `streaming', `idle', or `disconnected'."
 otherwise `sprig-status-max-sessions' bounds the newest-first scan."
   (and (not sprig--status-show-all) sprig-status-max-sessions))
 
+(defun sprig--log-ignored-p (file)
+  "Non-nil when log FILE's session is hidden per the ignore list.
+Matches `sprig-status-ignore-directories' against the log's project
+directory name (the CLI's encoded cwd), read straight from the path so no
+log content is fetched: an ignored session costs nothing and is dropped
+before the newest-N cap."
+  (and sprig-status-ignore-directories
+       (let ((proj (file-name-nondirectory
+                    (directory-file-name (file-name-directory file)))))
+         (seq-some (lambda (re) (string-match-p re proj))
+                   sprig-status-ignore-directories))))
+
 (defun sprig--log-cwd (text)
   "Return the working directory recorded in session-log TEXT, or nil.
 Every CLI record carries the session's `cwd', so any slice of the log
@@ -823,8 +848,10 @@ sessions still paints fast."
 (defun sprig--scan-session-logs-local (limit)
   "Scan the LIMIT newest local logs under `sprig-claude-projects-directory'."
   (let* ((root (expand-file-name sprig-claude-projects-directory))
-         (files (and (file-directory-p root)
-                     (directory-files-recursively root "\\.jsonl\\'")))
+         (files (seq-remove
+                 #'sprig--log-ignored-p
+                 (and (file-directory-p root)
+                      (directory-files-recursively root "\\.jsonl\\'"))))
          (dated (sort (mapcar (lambda (f)
                                 (cons (float-time
                                        (file-attribute-modification-time
@@ -843,21 +870,28 @@ sessions still paints fast."
   "Scan the LIMIT newest remote logs under `sprig-claude-projects-directory'.
 Two SSH round trips whatever LIMIT is: one lists the newest logs by mtime,
 one slurps each log's head (for the cwd) and its last `ai-title' line (for
-the title, grepped whole-file since it can sit anywhere)."
+the title, grepped whole-file since it can sit anywhere).  With an ignore
+list the listing is uncapped so the drop happens before the cap; otherwise
+the cap is applied server-side to keep the listing small."
   (let* ((root (sprig--remote-dir-arg
                 (directory-file-name sprig-claude-projects-directory)))
+         (server-cap (and limit (not sprig-status-ignore-directories) limit))
          (listing (ignore-errors
                     (sprig--remote-sh
                      (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' \
 2>/dev/null | sort -rn | head -n %d"
-                             root (or limit 1000000)))))
-         (dated (delq nil
-                      (mapcar (lambda (line)
-                                (when (string-match "\\`\\([0-9.]+\\)\t\\(.+\\)\\'"
-                                                    line)
-                                  (cons (string-to-number (match-string 1 line))
-                                        (match-string 2 line))))
-                              (split-string (or listing "") "\n" t)))))
+                             root (or server-cap 1000000)))))
+         (dated (seq-remove
+                 (lambda (cell) (sprig--log-ignored-p (cdr cell)))
+                 (delq nil
+                       (mapcar (lambda (line)
+                                 (when (string-match "\\`\\([0-9.]+\\)\t\\(.+\\)\\'"
+                                                     line)
+                                   (cons (string-to-number (match-string 1 line))
+                                         (match-string 2 line))))
+                               (split-string (or listing "") "\n" t))))))
+    (when (and limit sprig-status-ignore-directories)
+      (setq dated (seq-take dated limit)))
     (when dated
       (let* ((paths (mapcar #'cdr dated))
              (blob (ignore-errors

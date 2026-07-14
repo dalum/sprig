@@ -145,6 +145,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 | `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `L` lifts it live) |
 | `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
+| `sprig-status-ignore-directories` | `nil` | Regexps matched against a session's encoded project directory; matches are hidden from the navigator (e.g. throwaway `/tmp` / SDK-probe runs) |
 | `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
 | `sprig-review-refresh-delay` | `0.1` | Seconds to coalesce structural events before re-rendering a review buffer |
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |
