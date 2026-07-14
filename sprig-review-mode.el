@@ -37,6 +37,13 @@
 (declare-function sprig--send-text "sprig" (text &optional mode))
 (declare-function sprig-interrupt "sprig" ())
 (declare-function sprig--frontmatter-set "sprig" (key value))
+(declare-function sprig--review-owns-session-p "sprig" ())
+(declare-function sprig--review-deliver "sprig" (text &optional mode))
+(declare-function sprig--review-interrupt-owned "sprig" ())
+;; Transport state, defined in sprig.el; a session-owning review buffer
+;; carries these buffer-locally, so silence the byte-compiler here.
+(defvar sprig--process)
+(defvar sprig--sink)
 
 ;;;; Faces
 
@@ -596,12 +603,17 @@ reach files over TRAMP when visiting."
         sprig-review--remote remote))
 
 (defun sprig-review--send (text &optional mode)
-  "Send TEXT as a user instruction through the attached conversation.
-MODE, when given (e.g. \"plan\"), sets the permission mode for the turn."
-  (unless (buffer-live-p sprig-review--conversation)
-    (user-error "This review is not attached to a live conversation"))
-  (with-current-buffer sprig-review--conversation
-    (sprig--send-text text mode))
+  "Send TEXT as a user instruction steering this review's session.
+MODE, when given (e.g. \"plan\"), sets the permission mode for the turn.
+Sends directly when the buffer owns its session, else through the
+attached Markdown conversation."
+  (cond
+   ((sprig--review-owns-session-p)
+    (sprig--review-deliver text mode))
+   ((buffer-live-p sprig-review--conversation)
+    (with-current-buffer sprig-review--conversation
+      (sprig--send-text text mode)))
+   (t (user-error "This review is not attached to a live conversation")))
   (message "sprig: sent%s" (if mode (format " (%s mode)" mode) "")))
 
 ;;;; Verbs
@@ -674,11 +686,14 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
     (sprig-review--send (plist-get last-user :text))))
 
 (defun sprig-review-interrupt ()
-  "Interrupt the in-flight turn in the attached conversation."
+  "Interrupt the in-flight turn steering this review's session."
   (interactive)
-  (unless (buffer-live-p sprig-review--conversation)
-    (user-error "This review is not attached to a live conversation"))
-  (with-current-buffer sprig-review--conversation (sprig-interrupt)))
+  (cond
+   ((sprig--review-owns-session-p)
+    (sprig--review-interrupt-owned))
+   ((buffer-live-p sprig-review--conversation)
+    (with-current-buffer sprig-review--conversation (sprig-interrupt)))
+   (t (user-error "This review is not attached to a live conversation"))))
 
 (defun sprig-review--section-file (section)
   "Return the file path SECTION refers to, or nil."

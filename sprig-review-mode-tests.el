@@ -437,5 +437,68 @@
           (should (equal sent-text "make a plan"))
           (should (equal sent-mode "plan")))))))
 
+;;;; A review buffer that owns its session (sprig-mode-free path)
+
+(ert-deftest sprig-review-mode-test-owned-sink-tracks-and-consumes ()
+  "The owner sink books transport state and folds events into the model."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--sink #'sprig--review-sink)
+    (should (sprig--review-owns-session-p))
+    (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
+      (sprig--review-sink '(session "abc"))
+      (should (equal sprig--session-id "abc"))
+      (sprig--review-sink '(mode "plan"))
+      (should (equal sprig--permission-mode "plan"))
+      (setq sprig--busy t)
+      (sprig--review-sink '(done nil nil))
+      (should-not sprig--busy))
+    (should (member '(session "abc") sprig-review--events))))
+
+(ert-deftest sprig-review-mode-test-transport-routes-to-owned-sink ()
+  "`sprig--handle' funcalls the buffer-local sink, so a self-owned review
+buffer receives streamed transport events without a Markdown transcript."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--sink #'sprig--review-sink)
+    (let ((buf (current-buffer)))
+      (cl-letf (((symbol-function 'process-get)
+                 (lambda (_proc key) (when (eq key :conv-buffer) buf)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--handle
+         'fake-proc
+         (json-serialize
+          '(:type "stream_event"
+            :event (:type "content_block_delta" :index 0
+                    :delta (:type "text_delta" :text "hello")))))))
+    (should (member '(text "hello") sprig-review--events))))
+
+(ert-deftest sprig-review-mode-test-owned-send-echoes-user ()
+  "An owned send transmits the turn and echoes the user block locally."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--sink #'sprig--review-sink)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (setq sent text)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig-review--send "do it"))
+      (should (equal sent "do it"))
+      (should sprig--busy)
+      (should (member '(user "do it") sprig-review--events)))))
+
+(ert-deftest sprig-review-mode-test-owned-interrupt ()
+  "An owned interrupt tears the session down when a turn is in flight."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--sink #'sprig--review-sink
+          sprig--busy t)
+    (cl-letf (((symbol-function 'sprig--teardown-process)
+               (lambda () (setq sprig--busy nil)))
+              ((symbol-function 'sprig--status-refresh) #'ignore))
+      (sprig-review-interrupt))
+    (should-not sprig--busy)))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here

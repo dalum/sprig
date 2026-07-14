@@ -229,6 +229,19 @@ streams into the review buffer as well as the Markdown transcript.")
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
+(defvar-local sprig--sink #'sprig--markdown-sink
+  "Function applied to each transport event in this session-owning buffer.
+The Markdown surface renders events into the transcript and tees them to
+any attached review buffer; a review buffer that owns its own session
+sets this to fold the events straight into its model instead.")
+(defvar-local sprig--connect-fn #'sprig-connect
+  "Command that (re)starts this buffer's session, called with a NO-PROMPT arg.
+Lets the transport reconnect a stale session without caring whether the
+owning buffer is a Markdown transcript or a review buffer.")
+(defvar-local sprig--working-dir nil
+  "Working directory for a session not backed by a Markdown file.
+A review buffer owns its session directly and has no frontmatter, so it
+records the session's directory here for `sprig--directory'.")
 
 ;;;; Sentinel grammar
 
@@ -386,8 +399,12 @@ state (`sprig--blocks') stays local to it."
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (dolist (event (sprig--claude-parse-line line))
-          (sprig--dispatch event)
-          (sprig--tee-review event))))))
+          (funcall sprig--sink event))))))
+
+(defun sprig--markdown-sink (event)
+  "Default sink: render EVENT into the Markdown transcript, tee to review."
+  (sprig--dispatch event)
+  (sprig--tee-review event))
 
 (defun sprig--tee-review (event)
   "Forward EVENT to this buffer's attached review buffer, if any."
@@ -794,7 +811,7 @@ fresh session rather than fail.")
                 (sprig--clear-session-id)
                 (message "sprig: session %s not found here; starting fresh (prior turns are not replayed)"
                          stale)
-                (sprig-connect t)))
+                (funcall sprig--connect-fn t)))
              ;; An unexpected exit: surface why in the error buffer.
              (t
               (sprig--log-error
@@ -1143,7 +1160,9 @@ A `sprig_tools:' frontmatter line (none, calls, or full) overrides the
 A `working_dir:' frontmatter line overrides the `sprig-directory' default.
 The raw string is returned unexpanded, so a leading `~' or an
 environment variable is resolved wherever the session runs."
-  (let ((v (or (sprig--frontmatter-get "working_dir") sprig-directory)))
+  (let ((v (or sprig--working-dir
+               (sprig--frontmatter-get "working_dir")
+               sprig-directory)))
     (unless (or (null v) (string-empty-p (string-trim v)))
       (string-trim v))))
 
@@ -1184,6 +1203,20 @@ reconnect after a stale resume id)."
   (setq sprig--session-id (sprig--buffer-session-id))
   (unless (or no-prompt sprig--session-id)
     (sprig--read-working-directory))
+  (sprig--spawn)
+  (let ((dir (sprig--directory)))
+    (message "sprig: %s (%s%s)"
+             (if sprig--session-id "resuming session" "new session")
+             (if sprig-remote (concat "ssh " sprig-remote) "local")
+             (if dir (concat " in " dir) "")))
+  (sprig--status-refresh))
+
+(defun sprig--spawn ()
+  "Start the CLI session process for the current buffer and bind it.
+Reads the resume id from `sprig--session-id' (nil for a fresh session)
+and the working directory from `sprig--directory', both already resolved
+by the caller.  Sets and returns `sprig--process'.  Buffer-agnostic: the
+Markdown transcript and a session-owning review buffer share it."
   (let* ((dir (sprig--directory))
          ;; Local sessions inherit `default-directory'; a configured dir
          ;; overrides it.  Remote sessions get their `cd' in `sprig--command'.
@@ -1207,12 +1240,7 @@ reconnect after a stale resume id)."
                 :sentinel #'sprig--sentinel)))
     (process-put proc :conv-buffer (current-buffer))
     (process-put proc :stderr-proc stderr)
-    (setq sprig--process proc)
-    (message "sprig: %s (%s%s)"
-             (if sprig--session-id "resuming session" "new session")
-             (if sprig-remote (concat "ssh " sprig-remote) "local")
-             (if dir (concat " in " dir) ""))
-    (sprig--status-refresh)))
+    (setq sprig--process proc)))
 
 ;;;###autoload
 (defun sprig-new (&optional dont-connect no-pop)
@@ -1273,7 +1301,7 @@ pending edits."
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
   (unless (process-live-p sprig--process)
-    (sprig-connect)))
+    (funcall sprig--connect-fn)))
 
 (defun sprig--teardown-process ()
   "Stop this buffer's session process deliberately and clear its state.
@@ -1401,6 +1429,7 @@ omitted are not recovered."
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
 (declare-function sprig-review-attach "sprig-review-mode" (conversation &optional remote))
+(declare-function sprig-review-session-events "sprig-review" (lines))
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1418,7 +1447,7 @@ Signals if SSH exits non-zero."
 Locates the log by session id under ~/.claude/projects on the session
 host (local or over SSH), so the working-directory encoding never has to
 be reproduced.  Signals a `user-error' when there is no id or no log."
-  (let ((id (or (sprig--buffer-session-id)
+  (let ((id (or sprig--session-id (sprig--buffer-session-id)
                 (user-error "sprig: no session id yet; connect first"))))
     (if sprig-remote
         (let* ((name (shell-quote-argument (concat id ".jsonl")))
@@ -1460,6 +1489,104 @@ attaches so the in-flight turn streams in live."
       (sprig-review-seed events meta)
       (sprig-review-attach conversation sprig-remote))
     (setq sprig--review-buffer buffer)
+    (pop-to-buffer buffer)))
+
+;; A review buffer can also own its session outright, with no Markdown
+;; transcript behind it: the transport routes events to `sprig--review-sink'
+;; and its verbs steer the session directly.  This is the sprig-mode-free
+;; path (see DESIGN.md, option A: CLI sessions are the branches).
+
+(defun sprig--review-sink (event)
+  "Sink for a review buffer that owns its session: track state, then consume.
+Keeps the transport bookkeeping (session id, permission mode, busy flag)
+in step without a Markdown transcript, then folds EVENT into the review
+model via `sprig-review-consume'."
+  (pcase event
+    (`(session ,id) (when (and id (not sprig--session-id))
+                      (setq sprig--session-id id)))
+    (`(mode ,m) (setq sprig--permission-mode m))
+    (`(done ,_ ,_) (setq sprig--busy nil) (sprig--status-refresh)))
+  (sprig-review-consume event))
+
+(defun sprig--review-owns-session-p ()
+  "Non-nil when the current review buffer owns its session (vs attached)."
+  (eq sprig--sink #'sprig--review-sink))
+
+(defun sprig--read-review-dir ()
+  "Prompt for a session working directory, returning the string.
+Unlike `sprig--read-working-directory' this records nothing in
+frontmatter; a session-owning review buffer keeps its directory in the
+buffer-local `sprig--working-dir' instead."
+  (if sprig-remote
+      (read-string "Working directory (remote, blank = login dir): ")
+    (read-directory-name "Working directory: ")))
+
+;;;###autoload
+(defun sprig-review-connect (&optional no-prompt)
+  "Start or resume the session owned by this review buffer.
+Resumes `sprig--session-id' when set (replayed history already showing),
+otherwise starts a fresh session, prompting for its working directory
+unless NO-PROMPT."
+  (interactive)
+  (when (process-live-p sprig--process)
+    (user-error "This review already has a live session"))
+  (setq sprig--sink #'sprig--review-sink
+        sprig--connect-fn #'sprig-review-connect)
+  (unless (or no-prompt sprig--session-id sprig--working-dir)
+    (setq sprig--working-dir (sprig--read-review-dir)))
+  (sprig--spawn)
+  (message "sprig: %s (%s%s)"
+           (if sprig--session-id "resuming session" "new session")
+           (if sprig-remote (concat "ssh " sprig-remote) "local")
+           (if sprig--working-dir (concat " in " sprig--working-dir) ""))
+  (sprig--status-refresh))
+
+(defun sprig--review-deliver (text &optional mode)
+  "Send TEXT as this review buffer's own next user turn, echoing it locally.
+Used when the review buffer owns the session.  MODE, when given, sets the
+permission mode first (e.g. \"plan\"); with none, a session left in plan
+mode is returned to \"auto\"."
+  (sprig--ensure)
+  (when sprig--busy
+    (user-error "A turn is already in flight"))
+  (cond ((and mode (not (equal mode sprig--permission-mode)))
+         (sprig--set-permission-mode mode))
+        ((and (null mode) (equal sprig--permission-mode "plan"))
+         (sprig--set-permission-mode "auto")))
+  (setq sprig--busy t)
+  (sprig--send-user text)
+  (sprig-review-consume (list 'user text))
+  (sprig--status-refresh))
+
+(defun sprig--review-interrupt-owned ()
+  "Interrupt the in-flight turn on a review buffer that owns its session."
+  (if sprig--busy
+      (progn (sprig--teardown-process)
+             (sprig--status-refresh)
+             (message "sprig: interrupted (session resumes on next send)"))
+    (message "sprig: nothing to interrupt")))
+
+;;;###autoload
+(defun sprig-review-session (dir &optional session-id)
+  "Open a review buffer that owns a session in working directory DIR.
+With SESSION-ID, replay that stored session's log and resume it on the
+next send; without, the buffer starts empty and a send opens a fresh
+session.  This is the sprig-mode-free way to start or continue a branch."
+  (interactive (list (sprig--read-review-dir)))
+  (require 'sprig-review-mode)
+  (let* ((name (format "*sprig-review: %s*"
+                       (or session-id
+                           (file-name-nondirectory (directory-file-name dir)))))
+         (buffer (sprig-review-buffer name)))
+    (with-current-buffer buffer
+      (setq sprig--session-id session-id
+            sprig--working-dir dir
+            sprig--sink #'sprig--review-sink
+            sprig--connect-fn #'sprig-review-connect)
+      (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
+             (events (and lines (sprig-review-session-events lines))))
+        (sprig-review-seed events (list :project dir)))
+      (sprig-review-attach nil sprig-remote))
     (pop-to-buffer buffer)))
 
 ;;;; Folding commands
