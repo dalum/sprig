@@ -181,6 +181,25 @@
   ;; A non-tilde path is shell-quoted whole.
   (should (equal (sprig--remote-dir-arg "/a b") (shell-quote-argument "/a b"))))
 
+(ert-deftest sprig-test-remote-sh-wraps-in-posix-sh ()
+  ;; The scan ships POSIX-sh snippets (a `for'-loop, `find', `tail'); a
+  ;; non-POSIX login shell such as fish rejects the loop and would strip
+  ;; every session of its cwd, so the command is wrapped in `sh -c' and
+  ;; never left to the host's login shell.
+  (let ((sprig-remote "me@host")
+        (sprig-ssh-program "ssh")
+        (sprig-ssh-args '("-T" "-A"))
+        (command "for f in a b; do echo $f; done")
+        captured)
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (_program _infile _buffer _display &rest args)
+                 (setq captured args)
+                 0)))
+      (sprig--remote-sh command))
+    (should (equal captured
+                   (list "-T" "-A" "me@host"
+                         (concat "sh -c " (shell-quote-argument command)))))))
+
 ;;;; Review model and diff engine (sprig-review.el)
 
 (ert-deftest sprig-review-test-lines ()

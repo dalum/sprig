@@ -521,10 +521,16 @@ The stream-json input channel accepts these beside user messages; a
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
-Signals if SSH exits non-zero."
+COMMAND is POSIX-sh syntax, so it is wrapped in `sh -c' rather than left
+to the host's login shell: a non-POSIX login shell such as fish rejects
+the scan's `for'-loop outright, which would silently strip every session
+of its recorded cwd.  Signals if SSH exits non-zero."
   (with-temp-buffer
     (let ((status (apply #'call-process sprig-ssh-program nil t nil
-                         (append sprig-ssh-args (list sprig-remote command)))))
+                         (append sprig-ssh-args
+                                 (list sprig-remote
+                                       (concat "sh -c "
+                                               (shell-quote-argument command)))))))
       (unless (eq status 0)
         (error "sprig: remote command failed (%s): %s"
                status (string-trim (buffer-string))))
