@@ -183,9 +183,12 @@ header instead pass their changes in, so this is only reached without one."
   (magit-insert-section (sprig-result result t)
     (magit-insert-heading
       (format "↳ result%s" (if (plist-get result :error) " (error)" "")))
-    (let ((text (string-trim-right (or (plist-get result :text) ""))))
-      (unless (string-empty-p text)
-        (insert text "\n")))))
+    ;; Deferred so a folded result keeps its body out of the buffer; magit
+    ;; only draws the fold when the body goes through `magit-insert-section-body'.
+    (magit-insert-section-body
+      (let ((text (string-trim-right (or (plist-get result :text) ""))))
+        (unless (string-empty-p text)
+          (insert text "\n"))))))
 
 (defun sprig-review--insert-tool (block)
   "Insert tool BLOCK: heading, its file-change diffs, then its result.
@@ -194,10 +197,13 @@ heading, since its body is context, not a change to review; a diff-
 bearing tool stays open so the change is visible at a glance."
   (magit-insert-section (sprig-tool block (not (plist-get block :changes)))
     (magit-insert-heading (sprig-review--tool-heading block))
-    (dolist (change (plist-get block :changes))
-      (sprig-review--insert-change change))
-    (when-let ((result (plist-get block :result)))
-      (sprig-review--insert-result result))))
+    ;; Deferred so a folded no-diff tool (Bash, Read, ...) keeps its body
+    ;; folded; for a diff-bearing tool the section is open, so this runs now.
+    (magit-insert-section-body
+      (dolist (change (plist-get block :changes))
+        (sprig-review--insert-change change))
+      (when-let ((result (plist-get block :result)))
+        (sprig-review--insert-result result)))))
 
 (defvar markdown-hide-markup)
 (declare-function markdown-mode "markdown-mode" ())
@@ -261,7 +267,8 @@ produce identical text.  A settled block is normalised for tidy display."
   "Insert a thinking BLOCK, folded by default since it is verbose."
   (magit-insert-section (sprig-thinking block t)
     (magit-insert-heading (propertize "thinking" 'face 'sprig-review-thinking))
-    (insert (string-trim-right (plist-get block :text)) "\n")))
+    (magit-insert-section-body
+      (insert (string-trim-right (plist-get block :text)) "\n"))))
 
 (defun sprig-review--insert-error (block)
   "Insert an error BLOCK."

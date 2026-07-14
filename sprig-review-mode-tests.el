@@ -52,9 +52,14 @@
       (should (string-match-p "^-old$" s))
       (should (string-match-p "^-gone$" s))
       (should (string-match-p "^\\+new$" s))
-      ;; The result is present.
+      ;; The result heading is present; its body folds away by default.
       (should (string-match-p "↳ result" s))
-      (should (string-match-p "applied" s)))))
+      (should-not (string-match-p "applied" s)))
+    ;; Expanding the result draws its deferred body into the buffer.
+    (goto-char (point-min))
+    (should (re-search-forward "↳ result" nil t))
+    (magit-section-show (magit-current-section))
+    (should (string-match-p "applied" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)
@@ -133,7 +138,9 @@
     (let ((s (buffer-string)))
       (should (string-match-p "Hello" s))
       (should (string-match-p "🔧 Edit" s))
-      (should (string-match-p "ok" s))
+      ;; The result folds by default, so its heading shows but its body does not.
+      (should (string-match-p "↳ result" s))
+      (should-not (string-match-p "ok" s))
       (should (string-match-p "\\$0\\.02" s)))))
 
 (ert-deftest sprig-review-mode-test-consume-preserves-point ()
@@ -239,16 +246,19 @@
         (should (string-match-p "^user$" s))
         (should (string-match-p "the question" s))
         (should (string-match-p "^thinking$" s))
-        (should (string-match-p "pondering" s))
+        ;; The thinking body folds away, so its text is not in the buffer.
+        (should-not (string-match-p "pondering" s))
         (should (string-match-p "^assistant$" s))
         (should (string-match-p "the answer" s))
         ;; The model-carried title shows in the header.
         (should (string-match-p "T" s))))
-    ;; The thinking section folds by default.
+    ;; The thinking section folds by default; expanding draws in its body.
     (sprig-review-tests--rendered model nil
       (goto-char (point-min))
       (should (re-search-forward "^thinking$" nil t))
-      (should (oref (magit-current-section) hidden)))))
+      (should (oref (magit-current-section) hidden))
+      (magit-section-show (magit-current-section))
+      (should (string-match-p "pondering" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-open-file ()
   (let ((file (make-temp-file "sprig-session" nil ".jsonl")))
