@@ -162,6 +162,8 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Development
 
+After editing any of the three source files, `M-x sprig-reload` re-loads all of them from disk in dependency order, so a change takes effect without restarting Emacs. Open buffers keep their state and pick up the new definitions.
+
 `sprig-tests.el` is an ERT suite covering the process-free layers (the stream-json transport and its event vocabulary, command construction, the review model and tool-payload diff engine, the stored-session log parser, and the navigator's session enumeration). It needs no extra dependencies and runs offline, starting no session:
 
 ```

@@ -1284,5 +1284,29 @@ live session.  Narrow with `/', lift the cap with `L'."
       (sprig--status-render))
     (pop-to-buffer buf)))
 
+;;;; Development
+
+(defconst sprig--source-directory
+  (file-name-directory (or load-file-name buffer-file-name
+                           (locate-library "sprig")))
+  "Directory sprig's own source files were loaded from, for `sprig-reload'.")
+
+(defvar sprig--source-files '("sprig-review" "sprig" "sprig-review-mode")
+  "Sprig's own source files, in dependency load order, for `sprig-reload'.")
+
+;;;###autoload
+(defun sprig-reload ()
+  "Reload sprig's source files from disk, in dependency order.
+A development convenience: after editing any of `sprig-review', `sprig',
+or `sprig-review-mode', re-load all three from `sprig--source-directory'
+so the change takes effect without restarting Emacs.  The `.el' source is
+loaded, not any stale byte code beside it.  Open buffers keep their state;
+only their behaviour picks up the new definitions."
+  (interactive)
+  (dolist (file sprig--source-files)
+    (load (expand-file-name (concat file ".el") sprig--source-directory) nil t))
+  (message "sprig: reloaded %d files from %s"
+           (length sprig--source-files) sprig--source-directory))
+
 (provide 'sprig)
 ;;; sprig.el ends here
