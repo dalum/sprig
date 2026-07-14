@@ -668,15 +668,13 @@ The review buffer is the only conversation surface."
   "Name of the buffer showing the `sprig-status' navigator.")
 
 (defconst sprig--status-preview-bytes 65536
-  "Trailing bytes of a branch file read to preview its last reply.
-Large enough to hold the last reply-open sentinel for a typical turn; a
-reply longer than this simply shows no preview.")
-
-(defconst sprig--status-scan-bytes 16384
-  "Trailing bytes of a log read to recover its title and cwd for a row.
-Smaller than `sprig--status-preview-bytes': the freshest `aiTitle' and a
-`cwd'-bearing record both sit near the end, and the scan slurps one such
-tail per listed session, so keeping it small keeps the SSH transfer down.")
+  "Trailing bytes of a session log read from its tail, for two callers.
+A row's scan reads this much to recover its `cwd' and freshest `aiTitle';
+a `TAB' preview reads the same tail for the last reply.  The `cwd' sits at
+the very end, but the CLI rewrites `aiTitle' only every turn or so, so the
+freshest one can be tens of kilobytes back: a smaller window would drop it
+and leave the row untitled.  Local and remote scans use the one window, so
+a row reads the same whichever host it lives on.")
 
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
@@ -838,7 +836,7 @@ Each file is emitted as RS, its path, US, then its trailing bytes, so the
 whole set returns in one SSH round trip for `sprig--parse-tails-blob'."
   (concat "for f in " (mapconcat #'shell-quote-argument paths " ")
           (format "; do printf '\\036%%s\\037' \"$f\"; tail -c %d \"$f\"; done"
-                  sprig--status-scan-bytes)))
+                  sprig--status-preview-bytes)))
 
 (defun sprig--parse-tails-blob (blob)
   "Parse BLOB from `sprig--remote-tails-command' into a path->tail hash table."
