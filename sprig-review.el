@@ -197,6 +197,15 @@ See the section commentary for the event vocabulary and block shapes."
           :cost cost :error error :done done
           :blocks (nreverse blocks))))
 
+(defun sprig-review-events-title (events)
+  "Return the freshest title carried by EVENTS, or nil.
+EVENTS is a buffer's stored event list, newest first (as pushed by
+`sprig-review-consume'), so the first `title' event is the freshest.  The
+navigator titles a live session's row with this, recovering the replayed
+`ai-title' that the live stream itself never carries."
+  (let ((hit (seq-find (lambda (ev) (eq (car-safe ev) 'title)) events)))
+    (and hit (cadr hit))))
+
 ;;;; Reading the CLI's stored session log
 ;;
 ;; The `claude' CLI persists each session as JSONL under

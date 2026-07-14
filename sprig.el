@@ -669,11 +669,11 @@ The review buffer is the only conversation surface."
 
 (defconst sprig--status-preview-bytes 65536
   "Bytes of a session log read from one end, for two callers.
-A row's scan reads this much from the head to recover its `cwd' and title,
-which both sit near the top; a `TAB' preview reads this much from the tail
-for the last reply, which lives at the end.  Local and remote read the
-same amount, so a row behaves the same whichever host it lives on, and
-either read is bounded however large the session grows.")
+A row's scan reads this much from the head to recover its `cwd', which is
+in the first record; a `TAB' preview reads this much from the tail for the
+last reply, which lives at the end.  (The title is not in either window in
+general, so it is grepped whole-file.)  Local and remote read the same
+amount, and either read is bounded however large the session grows.")
 
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
@@ -738,10 +738,9 @@ holds it; the scan reads the head, where the first record already has it."
        (ignore-errors (json-parse-string (match-string 1 text)))))
 
 (defun sprig--log-title (text)
-  "Return the `aiTitle' recorded in session-log TEXT, or nil.
-The CLI emits an `ai-title' record once, just after the opening turn, and
-re-emits the same string each turn thereafter, so the title sits near the
-head and the last match within TEXT wins whichever slice TEXT is."
+  "Return the last `aiTitle' recorded in session-log TEXT, or nil.
+TEXT is either a log's head or its grepped `ai-title' lines; the CLI
+re-emits the same title each turn, so the last match wins in either."
   (let ((title nil) (pos 0))
     (while (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text pos)
       (setq title (match-string 1 text) pos (match-end 0)))
@@ -749,11 +748,9 @@ head and the last match within TEXT wins whichever slice TEXT is."
 
 (defun sprig--session-log-head (file)
   "Return the leading bytes of session-log FILE, local or remote, or nil.
-The scan reads the head, not the tail: a session's `cwd' is in its first
-record and the CLI writes its `ai-title' just after the opening turn, so
-both sit near the top however long the session later grows.  A tail would
-have to gamble on the title being re-emitted within the window near the
-end, which a large final record can push out."
+The scan reads the head for the `cwd', which is in the first record.  The
+title is not read from here (a large opening turn can push the first
+`ai-title' record past the window); it is grepped whole-file instead."
   (ignore-errors
     (if sprig-remote
         (sprig--remote-sh (format "head -c %d %s" sprig--status-preview-bytes
@@ -763,6 +760,18 @@ end, which a large final record can push out."
           (insert-file-contents file nil 0 (min sprig--status-preview-bytes
                                                  size)))
         (buffer-string)))))
+
+(defun sprig--local-title-line (file)
+  "Return session-log FILE's `aiTitle' lines, grepped from the whole file.
+The title can sit anywhere (a large opening turn pushes the first one well
+past any head window), so it is grepped rather than read from a slice.
+Consulted only when the head carries no title, so the whole-file read is
+paid only for the rare session that needs it."
+  (ignore-errors
+    (with-temp-buffer
+      (and (eq 0 (call-process "grep" nil t nil "-a" "aiTitle"
+                               (expand-file-name file)))
+           (buffer-string)))))
 
 (defun sprig--session-log-tail (file)
   "Return the trailing bytes of session-log FILE, local or remote, or nil.
@@ -778,13 +787,19 @@ row scan reads the head instead (see `sprig--session-log-head')."
           (insert-file-contents file nil from size))
         (buffer-string)))))
 
-(defun sprig--log-plist (file mtime head)
+(defun sprig--log-plist (file mtime head &optional title-fallback)
   "Build a scan plist for log FILE with MTIME and its HEAD text.
 `:dir' is the session's own recorded `cwd', or nil when HEAD carries none:
 the encoded log-directory name is not a real path (its separators are
 lossily flattened to dashes), so it is kept only as the display-only
-`:project' and never handed to a `cd'."
-  (let ((cwd (and head (sprig--log-cwd head))))
+`:project' and never handed to a `cd'.  The title is read from HEAD when it
+is there; otherwise TITLE-FALLBACK, a function returning grepped `ai-title'
+lines, is consulted, so a title pushed past the head window is still found."
+  (let ((cwd (and head (sprig--log-cwd head)))
+        (title (or (and head (sprig--log-title head))
+                   (and title-fallback
+                        (let ((lines (funcall title-fallback)))
+                          (and lines (sprig--log-title lines)))))))
     (list :session (file-name-base file)
           :file file
           :dir cwd
@@ -792,7 +807,7 @@ lossily flattened to dashes), so it is kept only as the display-only
                        (file-name-nondirectory
                         (directory-file-name (file-name-directory file))))
           :mtime mtime
-          :title (or (and head (sprig--log-title head)) "(untitled)"))))
+          :title (or title "(untitled)"))))
 
 (defun sprig--scan-session-logs ()
   "Return session plists for the newest stored logs on the session host.
@@ -820,13 +835,15 @@ sessions still paints fast."
     (when limit (setq dated (seq-take dated limit)))
     (mapcar (lambda (cell)
               (sprig--log-plist (cdr cell) (car cell)
-                                (sprig--session-log-head (cdr cell))))
+                                (sprig--session-log-head (cdr cell))
+                                (lambda () (sprig--local-title-line (cdr cell)))))
             dated)))
 
 (defun sprig--scan-session-logs-remote (limit)
   "Scan the LIMIT newest remote logs under `sprig-claude-projects-directory'.
 Two SSH round trips whatever LIMIT is: one lists the newest logs by mtime,
-one slurps their heads; the cwds and titles are parsed here."
+one slurps each log's head (for the cwd) and its last `ai-title' line (for
+the title, grepped whole-file since it can sit anywhere)."
   (let* ((root (sprig--remote-dir-arg
                 (directory-file-name sprig-claude-projects-directory)))
          (listing (ignore-errors
@@ -844,28 +861,43 @@ one slurps their heads; the cwds and titles are parsed here."
     (when dated
       (let* ((paths (mapcar #'cdr dated))
              (blob (ignore-errors
-                     (sprig--remote-sh (sprig--remote-heads-command paths))))
-             (heads (sprig--parse-scan-blob blob)))
+                     (sprig--remote-sh (sprig--remote-scan-command paths))))
+             (scan (sprig--parse-scan-blob blob)))
         (mapcar (lambda (cell)
-                  (sprig--log-plist (cdr cell) (car cell)
-                                    (gethash (cdr cell) heads)))
+                  (let ((fields (gethash (cdr cell) scan)))
+                    (sprig--log-plist (cdr cell) (car cell)
+                                      (car fields)
+                                      (lambda () (cdr fields)))))
                 dated)))))
 
-(defun sprig--remote-heads-command (paths)
-  "Shell command printing the log head of each of PATHS, record-separated.
-Each file is emitted as RS, its path, US, then its leading bytes, so the
-whole set returns in one SSH round trip for `sprig--parse-scan-blob'."
+(defun sprig--remote-scan-command (paths)
+  "Shell command printing each of PATHS' scan fields, record-separated.
+Per file: RS, path, US, its head bytes (for the `cwd'), US, then its last
+`ai-title' line grepped from the whole file (for the title, wherever it
+sits).  The set returns in one SSH round trip for `sprig--parse-scan-blob'."
   (concat "for f in " (mapconcat #'shell-quote-argument paths " ")
-          (format "; do printf '\\036%%s\\037' \"$f\"; head -c %d \"$f\"; done"
+          (format "; do printf '\\036%%s\\037' \"$f\"; head -c %d \"$f\"; \
+printf '\\037'; grep -a aiTitle \"$f\" | tail -1; done"
                   sprig--status-preview-bytes)))
 
 (defun sprig--parse-scan-blob (blob)
-  "Parse BLOB from `sprig--remote-heads-command' into a path->head hash table."
+  "Parse BLOB from `sprig--remote-scan-command' into path -> (head . title).
+Each record is path, then its head bytes, then its `ai-title' line, split
+on the US byte; the title is nil when the file had none."
   (let ((map (make-hash-table :test 'equal)))
     (dolist (chunk (and blob (split-string blob "\036" t)))
       (let ((us (string-search "\037" chunk)))
         (when us
-          (puthash (substring chunk 0 us) (substring chunk (1+ us)) map))))
+          (let* ((path (substring chunk 0 us))
+                 (rest (substring chunk (1+ us)))
+                 (us2 (string-search "\037" rest)))
+            (puthash path
+                     (if us2
+                         (let ((title (substring rest (1+ us2))))
+                           (cons (substring rest 0 us2)
+                                 (unless (string-empty-p title) title)))
+                       (cons rest nil))
+                     map)))))
     map))
 
 ;;; Last-reply preview
@@ -926,16 +958,23 @@ its stored log, carrying live status and a session with no log yet.  When
                    (list :key key :buffer buf :file nil
                          :dir (buffer-local-value 'sprig--working-dir buf)
                          :project (buffer-local-value 'sprig--working-dir buf)
+                         ;; A manual retitle wins; else the replayed
+                         ;; `ai-title' from the buffer's events.  Still nil
+                         ;; for a fresh live session, whose stream carries no
+                         ;; title: the scan below borrows it from the log.
                          :title (or (plist-get (buffer-local-value
                                                 'sprig-review--meta buf)
                                                :title)
-                                    "(untitled)")
+                                    (sprig-review-events-title
+                                     (buffer-local-value 'sprig-review--events buf)))
                          :status (sprig--session-status buf)
                          :session id)
                    table))))
     (dolist (e (sprig--scan-session-logs))
-      (let ((key (plist-get e :session)))
-        (unless (gethash key table)
+      (let* ((key (plist-get e :session))
+             (existing (gethash key table)))
+        (cond
+         ((null existing)
           (push key order)
           (puthash key
                    (list :key key :buffer nil :file (plist-get e :file)
@@ -944,8 +983,17 @@ its stored log, carrying live status and a session with no log yet.  When
                          :title (plist-get e :title)
                          :status 'disconnected
                          :session (plist-get e :session))
-                   table))))
-    (let ((rows (mapcar (lambda (k) (gethash k table)) (nreverse order))))
+                   table))
+         ;; An owning buffer that could not title itself borrows the log's.
+         ((null (plist-get existing :title))
+          (puthash key (plist-put existing :title (plist-get e :title))
+                   table)))))
+    (let ((rows (mapcar (lambda (k)
+                          (let ((e (gethash k table)))
+                            (if (plist-get e :title)
+                                e
+                              (plist-put e :title "(untitled)"))))
+                        (nreverse order))))
       (if (and sprig--status-filter (not (string-empty-p sprig--status-filter)))
           (seq-filter (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
                       rows)

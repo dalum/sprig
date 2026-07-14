@@ -595,5 +595,68 @@ Return the log directory."
               (should (equal (plist-get e :title) "Live one")))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-scan-title-grepped-past-head ()
+  ;; A large opening turn pushes the first `ai-title' past the head window;
+  ;; the title is grepped whole-file, so the scan still recovers it (while
+  ;; the `cwd', in the first record, still comes from the head).
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/deep")
+         (filler (make-string (* 128 1024) ?x))
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-deep"
+           `(:type "user" :cwd ,proj :message (:role "user" :content ,filler))
+           '(:type "ai-title" :aiTitle "Deep title"))
+          (let ((row (car (sprig--scan-session-logs))))
+            (should (equal (plist-get row :dir) proj))
+            (should (equal (plist-get row :title) "Deep title"))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-collect-title-from-events ()
+  ;; A live owning buffer with no manual title takes it from its events'
+  ;; replayed `ai-title', which the live stream itself never carries.
+  (let ((root (make-temp-file "sprig-proj" t)))
+    (unwind-protect
+        (let ((sprig-remote nil)
+              (sprig-claude-projects-directory root))
+          (with-temp-buffer
+            (setq-local sprig--sink #'sprig--review-sink
+                        sprig--session-id "live-2"
+                        sprig--working-dir "/tmp/proj"
+                        sprig-review--meta nil
+                        sprig-review--events '((title "From events")))
+            (let* ((rows (sprig--status-collect))
+                   (e (seq-find (lambda (r) (equal (plist-get r :session) "live-2"))
+                                rows)))
+              (should (equal (plist-get e :title) "From events")))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-collect-title-from-log ()
+  ;; A live owning buffer whose events carry no title (a fresh session)
+  ;; borrows the title from the session's own stored log.
+  (let ((root (make-temp-file "sprig-proj" t)))
+    (unwind-protect
+        (let ((sprig-remote nil)
+              (sprig-claude-projects-directory root))
+          (sprig-tests--make-session-log
+           root "/tmp/proj" "live-3"
+           `(:type "user" :cwd "/tmp/proj" :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "From log"))
+          (with-temp-buffer
+            (setq-local sprig--sink #'sprig--review-sink
+                        sprig--session-id "live-3"
+                        sprig--working-dir "/tmp/proj"
+                        sprig-review--meta nil
+                        sprig-review--events nil)
+            (let* ((rows (sprig--status-collect))
+                   (e (seq-find (lambda (r) (equal (plist-get r :session) "live-3"))
+                                rows)))
+              (should (eq (plist-get e :buffer) (current-buffer)))
+              (should (equal (plist-get e :title) "From log")))))
+      (delete-directory root t))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
