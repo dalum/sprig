@@ -1,60 +1,40 @@
-;;; sprig.el --- Non-linear agent conversations in Markdown -*- lexical-binding: t; -*-
+;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.4.1
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
 ;;; Commentary:
 
-;; Sprig is an Emacs interface for conversing with an LLM agent.  A
-;; conversation branch is a plain Markdown file you edit directly: you
-;; type your turns as prose and the agent's replies stream in below them.
+;; Sprig is an Emacs interface for reviewing and steering an LLM agent's
+;; work.  You never edit a transcript: a conversation is a read-only,
+;; Magit-like review buffer (see sprig-review-mode.el and DESIGN.md), and
+;; the whole forest of them is driven from the `sprig-status' navigator.
 ;;
-;; Structure lives in invisible HTML-comment sentinels, never in the
-;; prose, so tool output can't be mistaken for markup:
+;; This file is the transport and the navigator; it owns no rendering.
 ;;
-;;   <!-- sprig:reply id=r1 -->      ... <!-- sprig:end id=r1 -->
-;;   <!-- sprig:tool id=t1 name=Bash --> ... <!-- sprig:tool-end id=t1 -->
-;;   <!-- sprig:result id=t1 -->     ... <!-- sprig:result-end id=t1 -->
+;; Transport: the `claude' CLI's stream-json protocol over stdio, local or
+;; via `ssh HOST claude ...' (set `sprig-remote').  `sprig--claude-parse-line'
+;; turns raw wire lines into a small backend-neutral event vocabulary
+;; (see "Transport and sink"), and each session-owning buffer folds those
+;; events with its `sprig--sink'.  The CLI uses whatever it is logged in as
+;; (e.g. a Pro/Max subscription), so no API key is required, and the agent
+;; runs with its normal tools, so a reply may run commands and edit files.
 ;;
-;; A reply is the prose (plus tool blocks) between a `reply' and its
-;; `end'; your turns are the gaps.  Tool input and output sit in fenced
-;; code blocks between the tool/result sentinels.  `sprig-mode' hides the
-;; sentinels behind overlay "chrome" -- a `\U0001F527' header per tool
-;; call, a `↳ result' header per result, a faint rule between turns --
-;; and folds each tool body to its header (C-c C-f toggles).  The files
-;; are meant for Emacs, not GitHub.
+;; A branch is a `claude' session.  The CLI already persists each session
+;; as a JSONL log under ~/.claude/projects/<cwd>/<id>.jsonl on the host
+;; where it runs, so sprig keeps no store of its own: history is replayed
+;; from that log, and it survives an Emacs restart because the id names the
+;; file.  A review buffer owns its session outright (`sprig-review-session',
+;; `sprig-review-connect'); the transport routes its events to the review
+;; model and its verbs steer the session directly.
 ;;
-;; Tool activity can be verbose, so `sprig-render-tools' (default
-;; `none': omit tool calls and results) controls how much lands in the
-;; transcript.  A file overrides it with a `sprig_tools:'
-;; frontmatter line (none / calls / full), or `M-x sprig-set-tool-display'
-;; sets it.  The setting affects only turns rendered afterwards.
-;;
-;; Today the transport is the `claude' CLI's stream-json protocol over
-;; stdio, local or via `ssh HOST claude ...' (set `sprig-remote').  The
-;; CLI uses whatever it is logged in as (e.g. a Pro/Max subscription), so
-;; no API key is required.  The agent runs with its normal tools, so a
-;; reply may run commands and edit files.  It works in the conversation
-;; file's directory unless a `working_dir:' frontmatter line (or the
-;; `sprig-directory' default) points it elsewhere.  Starting a new
-;; session prompts for that directory and records the answer in the
-;; frontmatter.
-;;
-;; One buffer is one branch.  Connect with `sprig-connect', type a
-;; message below the last reply, and send it with `sprig-send' (C-c C-c).
-;; The CLI session id is stored in the file's YAML frontmatter
-;; (`claude_session') so the conversation survives an Emacs restart and
-;; reconnects with --resume.
-;;
-;; Design note: the CLI keeps conversation memory server-side and resumes
-;; by session id, so `sprig-send' transmits only the new user turn.  The
-;; intended "context is the whole file" model from DESIGN.md (needed for
-;; fork-by-copy) wants a full-transcript replay, which suits a stateless
-;; messages backend.  `sprig--turns' assembles that role-tagged message
-;; list already; wiring it to a stateless backend, plus the fork-by-copy
-;; navigator, is the next slice.
+;; Navigator: `sprig-status' lists the stored sessions for the project
+;; directories in `sprig-status-directories', plus any open review buffer
+;; that owns a live session, with per-session status and an inline preview
+;; of the last reply.  Open / connect / interrupt / disconnect act on a
+;; session-owning review buffer; `s' starts a fresh session.
 
 ;;; Code:
 
@@ -111,61 +91,11 @@ for a remote session, is interpreted on the SSH host."
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
-(defcustom sprig-auto-title t
-  "When non-nil, name a titleless buffer after its first reply.
-A short side query (a throwaway `claude' run using `sprig-model') turns
-the first exchange into a label, stored as a `title:' frontmatter line
-and shown in the `sprig-status' navigator.  A `title:' you set by hand
-is always left untouched."
-  :type 'boolean)
-
-(defcustom sprig-fold-tool-calls t
-  "When non-nil, fold tool-call and result blocks to their header.
-Folding hides the body in this buffer only; the full content stays in
-the file.  Toggle the block at point with `sprig-toggle-fold', or use
-`sprig-fold-all' / `sprig-unfold-all'."
-  :type 'boolean)
-
-(defcustom sprig-render-tools 'none
-  "How much tool activity to render into the transcript.
-`none'   -- omit tool calls and results entirely.
-`calls'  -- show each tool call, omit its (often large) result.
-`full'   -- show tool calls and their results.
-
-A file overrides this in its YAML frontmatter with a `sprig_tools:' line
-whose value is none, calls, or full.  Because results are omitted rather
-than hidden, the setting affects only turns rendered after it is set."
-  :type '(choice (const :tag "None" none)
-                 (const :tag "Calls only" calls)
-                 (const :tag "Calls and results" full)))
-
-(defcustom sprig-hide-sentinels t
-  "When non-nil, hide the `sprig:' comment sentinels behind overlay chrome.
-Each tool/result sentinel is replaced by a header line and the reply
-sentinel by a rule.  Set nil to see the raw sentinels (e.g. debugging)."
-  :type 'boolean)
-
-(defcustom sprig-reply-divider t
-  "When non-nil, draw a faint rule where each reply begins and ends."
-  :type 'boolean)
-
-(defcustom sprig-highlight-user-input t
-  "When non-nil, give your typed turns the `sprig-user-input' face.
-This sets them off from the agent's replies (the gaps between an `end'
-sentinel and the next `reply')."
-  :type 'boolean)
-
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
 When a session exits abnormally, its command, exit status, and captured
 stderr are appended here and the buffer is displayed."
   :type 'string)
-
-(defcustom sprig-show-cost nil
-  "When non-nil, append each turn's reported cost to the done message.
-The CLI's `total_cost_usd' is a notional API-equivalent figure, not real
-spend on a Pro/Max subscription, so it is off by default."
-  :type 'boolean)
 
 (defcustom sprig-status-directories nil
   "Project working directories whose stored sessions the navigator lists.
@@ -183,19 +113,8 @@ SSH host."
 show the tail of that session's last reply, filled to this many lines."
   :type 'integer)
 
-(defface sprig-tool '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for tool-call and result header labels.")
-
 (defface sprig-status-preview '((t :inherit shadow :slant italic))
   "Face for the inline reply preview shown under an expanded navigator row.")
-
-(defface sprig-divider '((t :inherit shadow))
-  "Face for the rule drawn at the start of a reply.")
-
-(defface sprig-user-input '((t :slant italic))
-  "Face for your typed turns, distinguishing them from agent replies.
-The default sets only the slant so Markdown's own colouring shows through;
-customise it (e.g. add a background) to taste.")
 
 ;;;; Buffer-local state
 
@@ -203,65 +122,30 @@ customise it (e.g. add a background) to taste.")
   "The stream-json `claude' process bound to this conversation buffer.")
 (defvar-local sprig--session-id nil
   "Session id captured from the CLI, used for --resume.")
-(defvar-local sprig--marker nil
-  "Marker where streamed reply text is inserted.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
-(defvar-local sprig--reply-id nil
-  "Id of the reply currently streaming, e.g. \"r3\".")
-(defvar-local sprig--emitted nil
-  "Non-nil once the current reply has had text inserted.
-Used to separate consecutive content blocks with a paragraph break.")
 (defvar-local sprig--blocks nil
   "Alist of in-flight streaming tool-use blocks, keyed by block index.
 Each entry is (INDEX :id ID :name NAME :json ACC), where ACC accumulates
 the streamed `input_json_delta' fragments until the block closes.")
-(defvar-local sprig--undo-handle nil
-  "Change-group handle bracketing the in-flight turn's edits.
-Opened in `sprig--start-reply' and amalgamated in `sprig--close-reply' so
-a whole streamed reply collapses to a single undo step.")
-(defvar-local sprig--title-process nil
-  "In-flight side process generating this buffer's `title:', or nil.")
-(defvar-local sprig--review-buffer nil
-  "Attached read-only review buffer mirroring this conversation, or nil.
-When set, `sprig--handle' tees each transport event to it, so a live turn
-streams into the review buffer as well as the Markdown transcript.")
 (defvar-local sprig--permission-mode nil
   "The session's current permission mode, tracked from `status' events.
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
-(defvar-local sprig--sink #'sprig--markdown-sink
+(defvar-local sprig--sink #'ignore
   "Function applied to each transport event in this session-owning buffer.
-The Markdown surface renders events into the transcript and tees them to
-any attached review buffer; a review buffer that owns its own session
-sets this to fold the events straight into its model instead.")
-(defvar-local sprig--connect-fn #'sprig-connect
+A review buffer that owns its session sets this to `sprig--review-sink' to
+fold the events into its model.  The default is a no-op, and its identity
+also marks a buffer as a session owner (see `sprig--owning-review-buffers'),
+so it must stay non-`sprig--review-sink' for a buffer that owns nothing.")
+(defvar-local sprig--connect-fn #'sprig-review-connect
   "Command that (re)starts this buffer's session, called with a NO-PROMPT arg.
-Lets the transport reconnect a stale session without caring whether the
-owning buffer is a Markdown transcript or a review buffer.")
+Lets the transport reconnect a stale session without knowing the owner.")
 (defvar-local sprig--working-dir nil
   "Working directory for a session not backed by a Markdown file.
 A review buffer owns its session directly and has no frontmatter, so it
 records the session's directory here for `sprig--directory'.")
-
-;;;; Sentinel grammar
-
-;; Structural markers.  Always an HTML comment, alone on its line, at
-;; column 0.  The KIND alternation lists the `-end' variants first so a
-;; `tool-end' line is never misread as `tool'.
-(defconst sprig--sentinel-re
-  "^<!-- sprig:\\(reply\\|end\\|tool-end\\|tool\\|result-end\\|result\\)\\([^\n]*?\\) *-->[ \t]*$"
-  "Regexp matching any `sprig:' sentinel line.
-Group 1 is the kind, group 2 the attribute text (id, name, flags).")
-(defconst sprig--reply-open-re "^<!-- sprig:reply\\b\\([^\n]*?\\) *-->[ \t]*$"
-  "Regexp matching a reply-open sentinel line.  Group 1 is its attribute text.")
-(defconst sprig--reply-end-re "^<!-- sprig:end\\b[^\n]*-->[ \t]*$"
-  "Regexp matching a reply-close sentinel line.")
-(defconst sprig--tool-open-re "^<!-- sprig:\\(?:tool\\|result\\) "
-  "Regexp matching a tool-call or result open sentinel line.")
-(defconst sprig--tool-close-re "^<!-- sprig:\\(?:tool\\|result\\)-end\\b"
-  "Regexp matching a tool-call or result close sentinel line.")
 
 ;;;; Command construction
 
@@ -292,7 +176,7 @@ shell's home expansion, so quote only the part after any `~' prefix."
 
 (defun sprig--command ()
   "Full command vector for `make-process', local or via SSH.
-A local session's working directory is set by `sprig-connect' binding
+A local session's working directory is set by `sprig--spawn' binding
 `default-directory'; a remote session's is set here by prefixing a `cd'."
   (let ((args (cons sprig-program (sprig--base-args)))
         (dir (sprig--directory)))
@@ -306,70 +190,14 @@ A local session's working directory is set by `sprig-connect' binding
                   (list sprig-remote remote)))
       args)))
 
-;;;; Buffer parsing: frontmatter, turns
-
-(defun sprig--body-start ()
-  "Return the position where the body begins, after any YAML frontmatter.
-This is the line after the closing `---', or `point-min' when there is
-no frontmatter."
-  (let ((end (sprig--frontmatter-end)))
-    (if end
-        (save-excursion (goto-char end) (forward-line 1) (point))
-      (point-min))))
-
-(defun sprig--clean-reply (text)
-  "Strip tool and result blocks from reply TEXT, leaving prose."
-  (string-trim
-   (replace-regexp-in-string
-    "\n\\{3,\\}" "\n\n"
-    (replace-regexp-in-string
-     "<!-- sprig:\\(?:tool\\|result\\)\\b\\(?:.\\|\n\\)*?<!-- sprig:\\(?:tool\\|result\\)-end[^\n]*-->[ \t]*\n?"
-     "" text))))
-
-(defun sprig--turns ()
-  "Parse the buffer body into an ordered list of (ROLE . TEXT) turns.
-ROLE is `user' or `assistant'.  Blank user turns are skipped.  Assistant
-text has its tool/result blocks stripped.  This is the role-tagged
-message list a stateless backend would send verbatim."
-  (let ((turns '()))
-    (save-excursion
-      (goto-char (sprig--body-start))
-      (let ((pos (point)))
-        (while (re-search-forward sprig--reply-open-re nil t)
-          (let ((user-text (buffer-substring-no-properties pos (match-beginning 0)))
-                (reply-beg (progn (forward-line 1) (point))))
-            (when (string-match-p "[^ \t\n]" user-text)
-              (push (cons 'user (string-trim user-text)) turns))
-            (if (re-search-forward sprig--reply-end-re nil t)
-                (let ((atext (buffer-substring-no-properties
-                              reply-beg (match-beginning 0))))
-                  (push (cons 'assistant (sprig--clean-reply atext)) turns)
-                  (forward-line 1)
-                  (setq pos (point)))
-              ;; Unterminated reply (still streaming): take the rest.
-              (let ((atext (buffer-substring-no-properties reply-beg (point-max))))
-                (push (cons 'assistant (sprig--clean-reply atext)) turns)
-                (goto-char (point-max))
-                (setq pos (point))))))
-        (let ((tail (buffer-substring-no-properties pos (point-max))))
-          (when (string-match-p "[^ \t\n]" tail)
-            (push (cons 'user (string-trim tail)) turns)))))
-    (nreverse turns)))
-
-(defun sprig--pending-user-text ()
-  "Return the trailing user turn (text typed after the last reply), or nil."
-  (let ((last (car (last (sprig--turns)))))
-    (when (eq (car last) 'user) (cdr last))))
-
 ;;;; Transport and sink
 ;;
 ;; The transport turns the backend's raw output lines into a small,
-;; backend-neutral event vocabulary; the sink applies those events to the
-;; conversation buffer.  `sprig--handle' is the seam.  Only the
-;; `sprig--claude-*' functions know the `claude' CLI's stream-json wire
-;; format, so another backend means another parser emitting the same
-;; events, with the sink (`sprig--dispatch' and the emit functions)
-;; untouched.
+;; backend-neutral event vocabulary; a per-buffer `sprig--sink' applies
+;; those events (a review buffer folds them into its model).  `sprig--handle'
+;; is the seam.  Only the `sprig--claude-*' functions know the `claude' CLI's
+;; stream-json wire format, so another backend means another parser emitting
+;; the same events, with the sink untouched.
 ;;
 ;; An event is a list whose car is the tag:
 ;;   (session ID)              session id captured from the backend
@@ -402,18 +230,6 @@ state (`sprig--blocks') stays local to it."
       (with-current-buffer buf
         (dolist (event (sprig--claude-parse-line line))
           (funcall sprig--sink event))))))
-
-(defun sprig--markdown-sink (event)
-  "Default sink: render EVENT into the Markdown transcript, tee to review."
-  (sprig--dispatch event)
-  (sprig--tee-review event))
-
-(defun sprig--tee-review (event)
-  "Forward EVENT to this buffer's attached review buffer, if any."
-  (when (and sprig--review-buffer (buffer-live-p sprig--review-buffer)
-             (fboundp 'sprig-review-consume))
-    (with-current-buffer sprig--review-buffer
-      (sprig-review-consume event))))
 
 ;;; claude CLI transport: raw stream-json lines -> events
 
@@ -508,65 +324,6 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ((and (equal .type "system") (equal .subtype "error"))
           (list (list 'error (or .message line)))))))))
 
-;;; Sink: apply a normalised event to the conversation buffer
-
-(defun sprig--dispatch (event)
-  "Apply one normalised transport EVENT to the current conversation buffer."
-  (pcase event
-    (`(session ,id)
-     (when (and id (not sprig--session-id))
-       (setq sprig--session-id id)
-       (sprig--save-session-id id)))
-    (`(text-block) (sprig--block-separator))
-    (`(text ,text) (sprig--emit text))
-    (`(tool-call ,id ,name ,input) (sprig--emit-tool-call id name input))
-    (`(tool-result ,id ,is-error ,text)
-     (sprig--emit-tool-result id is-error text))
-    (`(done ,cost ,is-error) (sprig--finish-turn cost is-error))
-    (`(mode ,mode) (setq sprig--permission-mode mode))
-    (`(error ,message) (sprig--emit (format "\n[error] %s\n" message)))))
-
-(defun sprig--emit (text)
-  "Insert streamed TEXT at the reply marker in the current buffer."
-  (when (and sprig--marker (marker-buffer sprig--marker))
-    (save-excursion
-      (goto-char sprig--marker)
-      (let ((inhibit-read-only t))
-        (insert text))
-      (set-marker sprig--marker (point)))
-    (setq sprig--emitted t)))
-
-(defun sprig--block-separator ()
-  "Put exactly one blank line before a new block.
-No-op until the reply has already emitted content, so it never disturbs
-the scaffold that precedes the first block."
-  (when (and sprig--emitted sprig--marker (marker-buffer sprig--marker))
-    (let (line-beg)
-      (save-excursion
-        (goto-char sprig--marker)
-        (let ((inhibit-read-only t))
-          (skip-chars-backward " \t\n")
-          (setq line-beg (line-beginning-position))
-          (delete-region (point) (marker-position sprig--marker))
-          (insert "\n\n"))
-        (set-marker sprig--marker (point)))
-      ;; The line we backed onto may be a hidden `-end' sentinel whose
-      ;; trailing newline this rewrite just displaced; re-chrome it so the
-      ;; sentinel stays swallowed rather than surfacing as a blank line.
-      (sprig--decorate-region line-beg (marker-position sprig--marker)))))
-
-(defun sprig--pretty-json (raw)
-  "Pretty-print RAW JSON text; return it trimmed if it will not parse."
-  (let ((s (string-trim (or raw ""))))
-    (if (string-empty-p s)
-        "{}"
-      (condition-case nil
-          (with-temp-buffer
-            (insert s)
-            (json-pretty-print-buffer)
-            (string-trim (buffer-string)))
-        (error s)))))
-
 (defun sprig--tool-result-text (content)
   "Flatten a tool_result CONTENT field (string or block list) to text."
   (cond
@@ -577,173 +334,7 @@ the scaffold that precedes the first block."
                content ""))
    (t (format "%S" content))))
 
-(defun sprig--tool-input (name json)
-  "Return (LANG . BODY) for how to render tool NAME's input JSON.
-Shows the command for Bash, the path for file tools, else pretty JSON."
-  (let ((obj (ignore-errors
-               (json-parse-string
-                (if (string-empty-p (string-trim (or json ""))) "{}" json)
-                :object-type 'alist :null-object nil :false-object nil))))
-    (cond
-     ((and (equal name "Bash") (alist-get 'command obj))
-      (cons "bash" (alist-get 'command obj)))
-     ((and (member name '("Read" "Edit" "Write" "NotebookEdit"))
-           (alist-get 'file_path obj))
-      (cons "" (alist-get 'file_path obj)))
-     (t (cons "json" (sprig--pretty-json json))))))
-
-;;;; Rendering: sentinel-delimited fenced blocks
-
-(defun sprig--emit-block (open lang body end)
-  "Insert an OPEN..END sentinel pair wrapping a fenced BODY, then decorate.
-LANG is the fence info string.  When folding is on, the body is folded."
-  (when (and sprig--marker (marker-buffer sprig--marker))
-    (sprig--block-separator)
-    (let (open-bol)
-      (save-excursion
-        (goto-char sprig--marker)
-        (setq open-bol (point))
-        (let ((inhibit-read-only t))
-          ;; The trailing newline completes the hidden END sentinel's line
-          ;; now, so `sprig--decorate-region' can swallow it; the separator
-          ;; before the next block normalises the whitespace away again.
-          (insert open "\n"
-                  "```" (or lang "") "\n" body "\n```\n"
-                  end "\n")
-          (set-marker sprig--marker (point))
-          (setq sprig--emitted t)
-          (when sprig-fold-tool-calls
-            (sprig--fold-block-at open-bol))))
-      (sprig--decorate-region open-bol (marker-position sprig--marker)))))
-
-(defun sprig--emit-tool-call (id name json)
-  "Render a tool-call block for tool NAME (id ID) with input JSON.
-Skipped when `sprig--tool-display' is `none'."
-  (unless (eq (sprig--tool-display) 'none)
-    (let ((in (sprig--tool-input name json)))
-      (sprig--emit-block
-       (format "<!-- sprig:tool id=%s name=%s -->" (or id "t") (or name "tool"))
-       (car in) (cdr in)
-       (format "<!-- sprig:tool-end id=%s -->" (or id "t"))))))
-
-(defun sprig--emit-tool-result (id is-error text)
-  "Render a tool result block (ID, IS-ERROR flag, TEXT body).
-Rendered only when `sprig--tool-display' is `full'."
-  (when (eq (sprig--tool-display) 'full)
-    (sprig--emit-block
-     (format "<!-- sprig:result id=%s%s -->" (or id "t") (if is-error " error" ""))
-     "" text
-     (format "<!-- sprig:result-end id=%s -->" (or id "t")))))
-
-(defun sprig--finish-turn (cost is-error)
-  "Close out the current turn.  COST and IS-ERROR come from the result event."
-  (setq sprig--busy nil)
-  (sprig--close-reply)
-  (when (and sprig--marker (marker-buffer sprig--marker))
-    (goto-char sprig--marker))
-  (message "sprig: turn done%s%s"
-           (if (and sprig-show-cost cost) (format " ($%.4f)" cost) "")
-           (if is-error " [error]" ""))
-  (unless is-error (sprig--maybe-generate-title))
-  (sprig--status-refresh))
-
-;;;; Auto title
-
-(defun sprig--truncate (s n)
-  "Return the first N characters of S."
-  (if (> (length s) n) (substring s 0 n) s))
-
-(defun sprig--truncate-words (s n)
-  "Truncate S to at most N characters, backing off to a word boundary.
-A back-off happens only when the cut falls inside a word, so a label that
-ends cleanly at the limit is kept whole."
-  (if (<= (length s) n) s
-    (let ((cut (substring s 0 n)))
-      (if (and (not (string-match-p "\\s-" (substring s n (1+ n))))
-               (string-match-p "\\s-" cut))
-          (replace-regexp-in-string "\\s-+\\S-*\\'" "" cut)
-        cut))))
-
-(defun sprig--title-prompt (user reply)
-  "Build the naming prompt from the first USER turn and first REPLY.
-Mirrors the CLI's own session-naming recipe: the opening exchange plus an
-instruction to answer with only a short, specific label."
-  (concat "User: \"" (sprig--truncate (string-trim user) 300) "\""
-          (if (and reply (not (string-empty-p (string-trim reply))))
-              (concat "\nAgent: \"" (sprig--truncate (string-trim reply) 300) "\"")
-            "")
-          "\n\nGenerate a short label (2-5 words) naming this conversation. "
-          "Include the MOST SPECIFIC identifier (component/file/feature). "
-          "Skip generic verbs like fix/add/update. Respond with ONLY the label."))
-
-(defun sprig--title-command (prompt)
-  "Command vector for a throwaway `claude' run that answers PROMPT.
-No session resume, no tools, plain-text output; SSH-wrapped like a session
-when `sprig-remote' is set."
-  (let ((args (append (list sprig-program "-p" prompt "--allowedTools" "")
-                      (when sprig-model (list "--model" sprig-model)))))
-    (if sprig-remote
-        (append (list sprig-ssh-program) sprig-ssh-args
-                (list sprig-remote (mapconcat #'shell-quote-argument args " ")))
-      args)))
-
-(defun sprig--clean-title (raw)
-  "Normalise RAW model output into a session label, or nil if degenerate.
-Takes the first non-empty line, strips surrounding quotes, lower-cases it,
-and caps it at 40 characters, matching the CLI's post-processing."
-  (let ((line (seq-find (lambda (l) (not (string-empty-p l)))
-                        (mapcar #'string-trim (split-string (or raw "") "\n")))))
-    (when line
-      (let ((s (string-trim
-                (replace-regexp-in-string "\\`[\"'`]+\\|[\"'`.]+\\'" ""
-                                          (downcase line)))))
-        (when (string-match-p "[a-z0-9]" s)
-          (sprig--truncate-words s 40))))))
-
-(defun sprig--maybe-generate-title ()
-  "Start async title generation for a titleless buffer, if warranted.
-No-op when `sprig-auto-title' is off, a `title:' already exists, a
-generation is already in flight, or there is no user turn to summarise."
-  (when (and sprig-auto-title
-             (not (sprig--frontmatter-get "title"))
-             (not (process-live-p sprig--title-process)))
-    (let ((turns (sprig--turns)))
-      (let ((user (cdr (assq 'user turns)))
-            (reply (cdr (assq 'assistant turns))))
-        (when (and user (not (string-empty-p (string-trim user))))
-          (sprig--start-title-generation user reply))))))
-
-(defun sprig--start-title-generation (user reply)
-  "Spawn the side query that names this buffer from USER and REPLY."
-  (let ((conv (current-buffer))
-        (out (generate-new-buffer " *sprig-title*")))
-    (setq sprig--title-process
-          (make-process
-           :name "sprig-title"
-           :buffer out
-           :command (sprig--title-command (sprig--title-prompt user reply))
-           :connection-type 'pipe
-           :coding 'utf-8-unix
-           :noquery t
-           :stderr (make-pipe-process :name "sprig-title-stderr" :buffer nil
-                                      :noquery t :filter #'ignore :sentinel #'ignore)
-           :sentinel (lambda (proc _event)
-                       (unless (process-live-p proc)
-                         (sprig--title-finish conv proc)))))))
-
-(defun sprig--title-finish (conv proc)
-  "Apply PROC's output as CONV's `title:', unless one appeared meanwhile."
-  (let ((raw (and (buffer-live-p (process-buffer proc))
-                  (with-current-buffer (process-buffer proc) (buffer-string)))))
-    (when (buffer-live-p (process-buffer proc))
-      (kill-buffer (process-buffer proc)))
-    (when (buffer-live-p conv)
-      (with-current-buffer conv
-        (setq sprig--title-process nil)
-        (let ((label (sprig--clean-title raw)))
-          (when (and label (not (sprig--frontmatter-get "title")))
-            (sprig--frontmatter-set "title" label)
-            (sprig--status-refresh)))))))
+;;;; Process lifecycle: stderr, errors, sentinel
 
 (defun sprig--make-stderr ()
   "Return a pipe process that accumulates the session's stderr.
@@ -804,13 +395,13 @@ fresh session rather than fail.")
               (message "sprig: session ended (%s)" (string-trim event)))
              ;; Stale/foreign resume id: the session does not exist on this
              ;; host.  Drop it and reconnect fresh so the user is not stuck;
-             ;; the transcript in the file is kept, and the new session's id
-             ;; overwrites the stale one on init.  Only server-side memory of
-             ;; the prior turns is lost, and that was already gone.
+             ;; the new session's id replaces the stale one on init.  Only
+             ;; server-side memory of the prior turns is lost, and the review
+             ;; buffer already shows the replayed history regardless.
              ((and err sprig--session-id
                    (string-match-p sprig--session-not-found-re err))
               (let ((stale sprig--session-id))
-                (sprig--clear-session-id)
+                (setq sprig--session-id nil)
                 (message "sprig: session %s not found here; starting fresh (prior turns are not replayed)"
                          stale)
                 (funcall sprig--connect-fn t)))
@@ -821,397 +412,18 @@ fresh session rather than fail.")
               (message "sprig: session failed (%s); see %s"
                        (string-trim event) sprig-error-buffer)))))))))
 
-;;;; Overlay chrome: hide sentinels, show headers and rules
-
-(defun sprig--ensure-invisibility ()
-  "Make sure this buffer honours the `sprig-fold' and `sprig-chrome' specs.
-Registers them if missing, so display works even when the code is
-reloaded while `sprig-mode' is already on."
-  (unless (and (listp buffer-invisibility-spec)
-               (assq 'sprig-fold buffer-invisibility-spec))
-    (add-to-invisibility-spec '(sprig-fold . t)))     ; folds show an ellipsis
-  (unless (and (listp buffer-invisibility-spec)
-               (memq 'sprig-chrome buffer-invisibility-spec))
-    (add-to-invisibility-spec 'sprig-chrome)))         ; sentinels just vanish
-
-(defun sprig--divider (&optional suffix)
-  "Return a faint horizontal rule, with optional trailing SUFFIX text."
-  (propertize (concat (make-string 48 ?─) (or suffix ""))
-              'face 'sprig-divider))
-
-(defun sprig--sentinel-label (kind attrs)
-  "Return the display string for a sentinel of KIND with ATTRS, or nil.
-The reply-open and reply-end sentinels become a rule, tool/result opens a
-header line; the remaining close sentinels return nil (hidden)."
-  ;; Labels carry no trailing newline: the sentinel line's own newline is
-  ;; kept visible (see `sprig--decorate') so point can land after the header.
-  (cond
-   ((equal kind "reply")
-    (when sprig-reply-divider
-      (sprig--divider (if (string-match-p "interrupted" attrs)
-                          "  (interrupted)" ""))))
-   ((equal kind "end")
-    (when sprig-reply-divider (sprig--divider)))
-   ((equal kind "tool")
-    (let ((name (and (string-match "name=\\(\\S-+\\)" attrs)
-                     (match-string 1 attrs))))
-      (propertize (concat "\U0001F527 " (or name "tool"))
-                  'face 'sprig-tool)))
-   ((equal kind "result")
-    (propertize (concat "↳ result"
-                        (if (string-match-p "error" attrs) " [error]" ""))
-                'face 'sprig-tool))
-   (t nil)))
-
-(defun sprig--face-user (beg end)
-  "Overlay the user-turn text in BEG..END with `sprig-user-input'.
-Leading and trailing blank lines are trimmed so only real text is faced."
-  (save-excursion
-    (goto-char beg) (skip-chars-forward " \t\n") (setq beg (point))
-    (goto-char end) (skip-chars-backward " \t\n" beg) (setq end (point))
-    (when (< beg end)
-      ;; Rear-advance so appending to a turn keeps the face.
-      (let ((ov (make-overlay beg end nil nil t)))
-        (overlay-put ov 'sprig-user t)
-        (overlay-put ov 'face 'sprig-user-input)
-        (overlay-put ov 'evaporate t)))))
-
-(defun sprig--refresh-pending-face (&rest _)
-  "Re-face the trailing user turn as it is typed.
-Runs from `after-change-functions', so the text you type below the last
-reply is faced live.  Only the pending region (after the last `end'
-sentinel) is rescanned; settled turns are handled by `sprig--decorate'."
-  (when (and sprig-highlight-user-input (not sprig--busy))
-    (save-excursion
-      (goto-char (point-max))
-      (let ((beg (if (re-search-backward sprig--reply-end-re nil t)
-                     (min (point-max) (1+ (line-end-position)))
-                   (sprig--body-start))))
-        (remove-overlays beg (point-max) 'sprig-user t)
-        (sprig--face-user beg (point-max))))))
-
-(defun sprig--decorate-user-turns ()
-  "Face every user turn -- the gaps outside each reply..end span."
-  (remove-overlays (point-min) (point-max) 'sprig-user t)
-  (when sprig-highlight-user-input
-    (save-excursion
-      (goto-char (sprig--body-start))
-      (let ((gap-beg (point)))
-        (while (re-search-forward sprig--reply-open-re nil t)
-          (sprig--face-user gap-beg (match-beginning 0))
-          (if (re-search-forward sprig--reply-end-re nil t)
-              (setq gap-beg (min (point-max) (1+ (point))))
-            (setq gap-beg (point-max))
-            (goto-char (point-max))))
-        (sprig--face-user gap-beg (point-max))))))
-
-(defun sprig--decorate-sentinels (beg end)
-  "Give every `sprig:' sentinel line within BEG..END its chrome overlay.
-The caller clears any existing chrome in the region first; BEG and END
-should already bound whole lines.  Fold overlays are left untouched."
-  (save-excursion
-    (goto-char beg)
-    (while (re-search-forward sprig--sentinel-re end t)
-      ;; Capture the match bounds first: `sprig--sentinel-label' runs
-      ;; `string-match' internally, which would clobber the match data.
-      (let* ((mb (match-beginning 0))
-             (me (match-end 0))
-             (label (sprig--sentinel-label (match-string 1) (match-string 2)))
-             ;; A labeled sentinel leaves its terminating newline visible so
-             ;; point has somewhere to rest and vertical motion can cross the
-             ;; header; an unlabeled (hidden) one swallows the newline so the
-             ;; whole line disappears.
-             (ov-end (if label me (min (point-max) (1+ me))))
-             (ov (make-overlay mb ov-end)))
-        (overlay-put ov 'sprig-chrome t)
-        (overlay-put ov 'invisible 'sprig-chrome)
-        (overlay-put ov 'evaporate t)
-        (overlay-put ov 'modification-hooks '(sprig--edit-guard))
-        (when label
-          (overlay-put ov 'before-string label)
-          ;; The sentinel's terminating newline is left visible (so point
-          ;; can cross the header); guard just that char so it can't be
-          ;; deleted, which would merge the next line into the hidden line.
-          (when (< me (point-max))
-            (let ((g (make-overlay me (1+ me))))
-              (overlay-put g 'sprig-chrome t)
-              (overlay-put g 'evaporate t)
-              (overlay-put g 'modification-hooks '(sprig--edit-guard)))))))))
-
-(defun sprig--decorate ()
-  "Rebuild the chrome and user-turn overlays across the whole buffer.
-Hides each sentinel line and, for open sentinels, shows a header or rule
-in its place; faces the user turns between replies.  Leaves the fold
-overlays untouched.  Used on mode enable and when reopening a file; the
-streaming paths use `sprig--decorate-region' to stay bounded."
-  (sprig--decorate-user-turns)
-  (when sprig-hide-sentinels
-    (sprig--ensure-invisibility)
-    (remove-overlays (point-min) (point-max) 'sprig-chrome t)
-    (sprig--decorate-sentinels (point-min) (point-max))))
-
-(defun sprig--decorate-region (beg end)
-  "Re-apply sentinel chrome to the whole lines spanned by BEG..END.
-Bounded counterpart to `sprig--decorate' for a streamed insertion: a
-reply that emits many tool blocks re-chromes each block's own lines
-instead of rescanning the buffer, so decoration cost stays proportional
-to the insertion, not the transcript.  User-turn faces are left alone,
-since streamed content lands inside a reply span, never in a user gap."
-  (when sprig-hide-sentinels
-    (sprig--ensure-invisibility)
-    (save-excursion
-      (goto-char beg) (setq beg (line-beginning-position))
-      ;; Extend END past the final line's newline so the removal sweeps up
-      ;; any newline-guard overlay a labeled sentinel left there; otherwise
-      ;; re-chroming the line would duplicate the guard.
-      (goto-char end) (setq end (min (point-max) (1+ (line-end-position))))
-      (remove-overlays beg end 'sprig-chrome t)
-      (sprig--decorate-sentinels beg end))))
-
-;;;; Folding
-
-(defun sprig--edit-guard (_ov after _beg _end &optional _len)
-  "Refuse interactive edits that would corrupt sprig's hidden structure.
-A modification-hook shared by the fold overlays and the chrome sentinel
-overlays: it fires before the change (AFTER nil) and aborts it, so a
-stray DEL or backspace at a boundary cannot silently delete a folded
-body or a hidden sentinel and break parsing.  Sprig's own writes bind
-`inhibit-read-only', which opts out."
-  (unless (or after inhibit-read-only)
-    (user-error "Protected sprig structure here (unfold the block first if folded)")))
-
-(defun sprig--fold-region (beg end)
-  "Create (or refresh) a fold overlay hiding BEG..END."
-  (sprig--ensure-invisibility)
-  (when (< beg end)
-    (remove-overlays beg end 'sprig-fold t)
-    (let ((ov (make-overlay beg end)))
-      (overlay-put ov 'invisible 'sprig-fold)
-      (overlay-put ov 'sprig-fold t)
-      (overlay-put ov 'evaporate t)
-      (overlay-put ov 'modification-hooks '(sprig--edit-guard)))))
-
-(defun sprig--fold-block-at (open-bol)
-  "Fold the tool/result block whose open sentinel starts at OPEN-BOL.
-The body runs from the end of the open line to the matching close
-sentinel, so it is delimited by sentinels -- fences or `</details>' in
-the tool output cannot move the boundary."
-  (save-excursion
-    (goto-char open-bol)
-    (let ((fold-beg (line-end-position)))
-      (forward-line 1)
-      (when (re-search-forward sprig--tool-close-re nil t)
-        (sprig--fold-region fold-beg (line-beginning-position))))))
-
-(defun sprig--tool-block-at-point ()
-  "Return the open-sentinel start of the tool block containing point, or nil.
-Works from the header line or anywhere in the body."
-  (let ((orig (point)))
-    (save-excursion
-      (end-of-line)
-      (when (re-search-backward sprig--tool-open-re nil t)
-        (let ((beg (line-beginning-position)))
-          (forward-line 1)
-          (when (re-search-forward sprig--tool-close-re nil t)
-            (when (<= orig (line-end-position))
-              beg)))))))
-
-;;;; Reply scaffolding
-
-(defun sprig--next-reply-id ()
-  "Return a fresh reply id like \"r3\", one past the highest in the buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((n 0))
-      (while (re-search-forward sprig--reply-open-re nil t)
-        (setq n (1+ n)))
-      (format "r%d" (1+ n)))))
-
-(defun sprig--start-reply ()
-  "Open a reply sentinel at end of buffer and arm the marker."
-  (setq sprig--reply-id (sprig--next-reply-id))
-  ;; Bracket every edit this turn makes (scaffold, streamed tokens, close
-  ;; sentinel) so the whole reply collapses to one undo step, instead of
-  ;; leaving hundreds of per-token entries in the undo history.
-  (setq sprig--undo-handle (prepare-change-group))
-  (goto-char (point-max))
-  (skip-chars-backward " \t\n")
-  (delete-region (point) (point-max))
-  (let ((beg (point))
-        (inhibit-read-only t))
-    (insert "\n\n<!-- sprig:reply id=" sprig--reply-id " -->\n\n")
-    (setq sprig--marker (copy-marker (point) t))
-    (setq sprig--emitted nil)
-    (setq sprig--blocks nil)
-    ;; The user turn just above keeps its live-typed face; only the new
-    ;; reply-open line needs chrome, so a bounded decorate suffices.
-    (sprig--decorate-region beg (point))))
-
-(defun sprig--close-reply (&optional interrupted)
-  "Close the current reply.  With INTERRUPTED, flag the reply sentinel."
-  (when (and sprig--marker (marker-buffer sprig--marker))
-    (goto-char sprig--marker)
-    (let ((inhibit-read-only t)
-          beg)
-      (skip-chars-backward " \t\n")
-      (setq beg (point))
-      (delete-region (point) (marker-position sprig--marker))
-      (insert "\n<!-- sprig:end id=" (or sprig--reply-id "r") " -->\n")
-      (set-marker sprig--marker (point))
-      ;; `sprig--flag-interrupted' re-chromes the reply-open line it edits,
-      ;; so here we only need to chrome the freshly inserted end sentinel.
-      (when interrupted (sprig--flag-interrupted))
-      (sprig--decorate-region beg (point))))
-  ;; Fold the turn's edits into a single undo boundary.  Both the normal
-  ;; finish and the interrupt path reach here; an unexpected process death
-  ;; skips it, leaving ordinary per-edit undo for that partial reply.
-  (when sprig--undo-handle
-    (undo-amalgamate-change-group sprig--undo-handle)
-    (setq sprig--undo-handle nil)))
-
-(defun sprig--flag-interrupted ()
-  "Add an `interrupted' flag to the current reply's open sentinel."
-  (save-excursion
-    (goto-char (if (and sprig--marker (marker-buffer sprig--marker))
-                   (marker-position sprig--marker)
-                 (point-max)))
-    (when (re-search-backward sprig--reply-open-re nil t)
-      (unless (string-match-p "interrupted" (match-string 1))
-        (let ((inhibit-read-only t))
-          (replace-match "<!-- sprig:reply\\1 interrupted -->"))
-        ;; The edit evaporated this line's old chrome; re-chrome it so the
-        ;; divider picks up the "(interrupted)" suffix.
-        (sprig--decorate-region (line-beginning-position)
-                                (line-end-position))))))
-
-;;;; Session-id persistence via YAML frontmatter
-
-(defun sprig--frontmatter-end ()
-  "Return the position of the closing `---' line, or nil if no frontmatter."
-  (save-excursion
-    (goto-char (point-min))
-    (when (looking-at-p "^---[ \t]*$")
-      (forward-line 1)
-      (when (re-search-forward "^---[ \t]*$" nil t)
-        (line-beginning-position)))))
-
-(defun sprig--frontmatter-get (key)
-  "Return the value of KEY in the YAML frontmatter, or nil."
-  (let ((end (sprig--frontmatter-end)))
-    (when end
-      (save-excursion
-        (goto-char (point-min))
-        (when (re-search-forward
-               (concat "^" (regexp-quote key) ":[ \t]*\\(.+\\)$") end t)
-          (string-trim (match-string-no-properties 1)))))))
-
-(defun sprig--frontmatter-set (key value)
-  "Set KEY to VALUE in the YAML frontmatter, creating frontmatter if absent."
-  (save-excursion
-    (let ((inhibit-read-only t)
-          (end (sprig--frontmatter-end))
-          (line (concat key ": " value)))
-      (if end
-          (if (progn (goto-char (point-min))
-                     (re-search-forward
-                      (concat "^" (regexp-quote key) ":.*$") end t))
-              (replace-match line t t)
-            (goto-char (point-min))
-            (forward-line 1)
-            (insert line "\n"))
-        (goto-char (point-min))
-        (insert "---\n" line "\n---\n\n")))))
-
-(defun sprig--frontmatter-remove (key)
-  "Delete KEY's line from the YAML frontmatter, if present."
-  (save-excursion
-    (let ((inhibit-read-only t)
-          (end (sprig--frontmatter-end)))
-      (when end
-        (goto-char (point-min))
-        (when (re-search-forward
-               (concat "^" (regexp-quote key) ":.*\n?") end t)
-          (replace-match ""))))))
-
-(defun sprig--buffer-session-id ()
-  "Return the `claude_session' id from the YAML frontmatter, or nil."
-  (sprig--frontmatter-get "claude_session"))
-
-(defun sprig--save-session-id (id)
-  "Store ID as `claude_session' in the buffer's YAML frontmatter."
-  (sprig--frontmatter-set "claude_session" id))
-
-(defun sprig--clear-session-id ()
-  "Forget this buffer's session id, in memory and in the frontmatter.
-Used when a stored id no longer resolves on the session host, so the next
-connect starts a fresh session instead of resuming a dead one."
-  (setq sprig--session-id nil)
-  (sprig--frontmatter-remove "claude_session"))
-
-(defun sprig--tool-display ()
-  "Return the effective tool-render level for this buffer.
-A `sprig_tools:' frontmatter line (none, calls, or full) overrides the
-`sprig-render-tools' default."
-  (let ((v (sprig--frontmatter-get "sprig_tools")))
-    (if (member v '("none" "calls" "full"))
-        (intern v)
-      sprig-render-tools)))
+;;;; Session configuration
 
 (defun sprig--directory ()
-  "Return the working directory configured for this buffer, or nil.
-A `working_dir:' frontmatter line overrides the `sprig-directory' default.
-The raw string is returned unexpanded, so a leading `~' or an
+  "Return the working directory for this buffer's session, or nil.
+The buffer-local `sprig--working-dir' overrides the `sprig-directory'
+default.  The raw string is returned unexpanded, so a leading `~' or an
 environment variable is resolved wherever the session runs."
-  (let ((v (or sprig--working-dir
-               (sprig--frontmatter-get "working_dir")
-               sprig-directory)))
+  (let ((v (or sprig--working-dir sprig-directory)))
     (unless (or (null v) (string-empty-p (string-trim v)))
       (string-trim v))))
 
-(defun sprig--save-working-directory (dir)
-  "Record DIR as this buffer's `working_dir:' frontmatter.
-A blank DIR removes the line so the session host's default is used."
-  (if (and dir (not (string-empty-p (string-trim dir))))
-      (sprig--frontmatter-set "working_dir" (string-trim dir))
-    (sprig--frontmatter-remove "working_dir")))
-
-(defun sprig--read-working-directory ()
-  "Prompt for and record this buffer's working directory for a new session.
-The minibuffer is seeded with the directory `sprig--directory' would use.
-A remote directory is read as plain text since it lives on the SSH host;
-a local one is completed against the filesystem."
-  (let* ((current (sprig--directory))
-         (input (if sprig-remote
-                    (read-string
-                     "Working directory (remote, blank = login dir): "
-                     current)
-                  (read-directory-name
-                   "Working directory: "
-                   (and current (file-name-as-directory
-                                 (expand-file-name current)))))))
-    (sprig--save-working-directory input)))
-
-;;;; Public commands
-
-;;;###autoload
-(defun sprig-connect (&optional no-prompt)
-  "Start (or resume) an agent session bound to the current buffer.
-Starting a new session prompts for the working directory and records it
-in the buffer's frontmatter; NO-PROMPT skips that (used by the automatic
-reconnect after a stale resume id)."
-  (interactive)
-  (when (process-live-p sprig--process)
-    (user-error "This buffer already has a live session"))
-  (setq sprig--session-id (sprig--buffer-session-id))
-  (unless (or no-prompt sprig--session-id)
-    (sprig--read-working-directory))
-  (sprig--spawn)
-  (let ((dir (sprig--directory)))
-    (message "sprig: %s (%s%s)"
-             (if sprig--session-id "resuming session" "new session")
-             (if sprig-remote (concat "ssh " sprig-remote) "local")
-             (if dir (concat " in " dir) "")))
-  (sprig--status-refresh))
+;;;; Session lifecycle
 
 (defun sprig--spawn ()
   "Start the CLI session process for the current buffer and bind it.
@@ -1243,62 +455,6 @@ Markdown transcript and a session-owning review buffer share it."
     (process-put proc :conv-buffer (current-buffer))
     (process-put proc :stderr-proc stderr)
     (setq sprig--process proc)))
-
-;;;###autoload
-(defun sprig-new (&optional dont-connect no-pop)
-  "Create a fresh in-memory Sprig conversation and switch to it.
-The buffer visits no file: converse now and, if you want to keep it,
-save it later with \\[write-file] (its frontmatter and transcript ride
-along).  Unless DONT-CONNECT, start the session at once, prompting for
-its working directory, the same as `sprig-connect'.  Unless NO-POP,
-select the new conversation buffer; either way return it."
-  (interactive)
-  (let ((buf (generate-new-buffer "*sprig: untitled*"))
-        (dir (or (and sprig-directory (not sprig-remote)
-                      (expand-file-name sprig-directory))
-                 default-directory)))
-    (with-current-buffer buf
-      (when (fboundp 'markdown-mode) (markdown-mode))
-      (setq default-directory (file-name-as-directory dir))
-      (unless (bound-and-true-p sprig-mode) (sprig-mode 1))
-      (unless dont-connect (sprig-connect)))
-    (unless no-pop (pop-to-buffer buf))
-    buf))
-
-(defun sprig--title-slug (title)
-  "Return a filesystem-friendly slug for TITLE, or nil when it is empty.
-Lower-cases, collapses non-alphanumerics to single hyphens, and trims
-leading and trailing hyphens."
-  (when title
-    (let ((s (string-trim
-              (replace-regexp-in-string "[^a-z0-9]+" "-" (downcase title))
-              "-+" "-+")))
-      (unless (string-empty-p s) s))))
-
-;;;###autoload
-(defun sprig-save ()
-  "Save this conversation to a file, defaulting the name to a title slug.
-For an in-memory branch this prompts for a filename, seeded from the
-branch `title:' under the first navigator scan directory (or a local
-`sprig-directory'); for a branch already backed by a file it just writes
-pending edits."
-  (interactive)
-  (if buffer-file-name
-      (save-buffer)
-    (let* ((dir (file-name-as-directory
-                 (or (car sprig-status-directories)
-                     (and sprig-directory (not sprig-remote)
-                          (expand-file-name sprig-directory))
-                     default-directory)))
-           (name (concat (or (sprig--title-slug (sprig--frontmatter-get "title"))
-                             "conversation")
-                         ".md"))
-           (file (read-file-name "Save conversation to: " dir name nil name)))
-      (when (file-directory-p file)
-        (user-error "sprig: %s is a directory" file))
-      (write-file file t)
-      (sprig--status-refresh)
-      (message "sprig: saved to %s" (abbreviate-file-name file)))))
 
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
@@ -1339,85 +495,6 @@ The stream-json input channel accepts these beside user messages; a
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
 
-(defun sprig--send-text (text &optional mode)
-  "Send TEXT as this buffer's next user turn programmatically.
-Unlike `sprig-send', which sends prose already typed in the buffer, this
-appends TEXT as a user turn first, then streams the reply.  It is how the
-review buffer's verbs steer the conversation (see `sprig-review').
-
-MODE, when given, sets the permission mode first (e.g. \"plan\").  With no
-MODE, a session left in plan mode is returned to \"auto\", so a plain send
-after a plan turn resumes normal execution."
-  (sprig--ensure)
-  (when sprig--busy
-    (user-error "A turn is already in flight"))
-  (cond ((and mode (not (equal mode sprig--permission-mode)))
-         (sprig--set-permission-mode mode))
-        ((and (null mode) (equal sprig--permission-mode "plan"))
-         (sprig--set-permission-mode "auto")))
-  (save-excursion
-    (goto-char (point-max))
-    (unless (bolp) (insert "\n"))
-    (insert text "\n"))
-  (setq sprig--busy t)
-  (sprig--start-reply)
-  (sprig--send-user text)
-  (sprig--tee-review (list 'user text))
-  (sprig--status-refresh))
-
-;;;###autoload
-(defun sprig-send ()
-  "Send the pending user turn and stream the reply into a new block.
-The pending turn is the prose typed after the last reply."
-  (interactive)
-  (sprig--ensure)
-  (when sprig--busy
-    (user-error "A turn is already in flight"))
-  (let ((text (sprig--pending-user-text)))
-    (when (or (null text) (string-empty-p text))
-      (user-error "No pending message: type below the last reply first"))
-    (setq sprig--busy t)
-    (sprig--start-reply)
-    (sprig--send-user text)
-    (sprig--tee-review (list 'user text))
-    (sprig--status-refresh)))
-
-;;;###autoload
-(defun sprig-interrupt ()
-  "Abort the in-flight turn, keeping and marking the partial reply."
-  (interactive)
-  (if (not sprig--busy)
-      (message "sprig: nothing to interrupt")
-    (sprig--teardown-process)
-    (sprig--close-reply t)
-    (when (and sprig--marker (marker-buffer sprig--marker))
-      (goto-char sprig--marker))
-    (message "sprig: interrupted (session resumes on next send)")
-    (sprig--status-refresh)))
-
-;;;###autoload
-(defun sprig-disconnect ()
-  "Stop the session for this buffer (the conversation is kept)."
-  (interactive)
-  (if (process-live-p sprig--process)
-      (progn (sprig--teardown-process)
-             (message "sprig: disconnected")
-             (sprig--status-refresh))
-    (message "sprig: no live session")))
-
-;;;###autoload
-(defun sprig-set-tool-display (level)
-  "Set this file's tool-render LEVEL and record it in the frontmatter.
-LEVEL is `none' (no tool blocks), `calls' (calls only), or `full' (calls
-and results).  It applies to turns rendered from now on; blocks already
-omitted are not recovered."
-  (interactive
-   (list (intern (completing-read
-                  "Tool display: " '("none" "calls" "full") nil t nil nil
-                  (symbol-name (sprig--tool-display))))))
-  (sprig--frontmatter-set "sprig_tools" (symbol-name level))
-  (message "sprig: tool display -> %s (applies to new turns)" level))
-
 ;;;; Review buffer
 ;;
 ;; A read-only, Magit-like view of the conversation (see DESIGN.md).  The
@@ -1430,7 +507,7 @@ omitted are not recovered."
 (declare-function sprig-review-buffer "sprig-review-mode" (name))
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
-(declare-function sprig-review-attach "sprig-review-mode" (conversation &optional remote))
+(declare-function sprig-review-set-remote "sprig-review-mode" (remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
 (declare-function sprig-review-interrupt "sprig-review-mode" ())
 
@@ -1450,7 +527,7 @@ Signals if SSH exits non-zero."
 Locates the log by session id under ~/.claude/projects on the session
 host (local or over SSH), so the working-directory encoding never has to
 be reproduced.  Signals a `user-error' when there is no id or no log."
-  (let ((id (or sprig--session-id (sprig--buffer-session-id)
+  (let ((id (or sprig--session-id
                 (user-error "sprig: no session id yet; connect first"))))
     (if sprig-remote
         (let* ((name (shell-quote-argument (concat id ".jsonl")))
@@ -1472,32 +549,9 @@ be reproduced.  Signals a `user-error' when there is no id or no log."
           (insert-file-contents file)
           (split-string (buffer-string) "\n" t))))))
 
-;;;###autoload
-(defun sprig-review ()
-  "Open a read-only review buffer for this conversation.
-Replays the whole transcript from the CLI's stored session log, then
-attaches so the in-flight turn streams in live."
-  (interactive)
-  (require 'sprig-review-mode)
-  (let* ((conversation (current-buffer))
-         ;; A just-created scratch branch has no session id or stored log
-         ;; yet; open an empty review that the live turn streams into.
-         (lines (ignore-errors (sprig--session-log-lines)))
-         (events (and lines (sprig-review-session-events lines)))
-         (meta (list :title (sprig--buffer-title)
-                     :project (sprig--directory)))
-         (name (format "*sprig-review: %s*" (sprig--buffer-title)))
-         (buffer (sprig-review-buffer name)))
-    (with-current-buffer buffer
-      (sprig-review-seed events meta)
-      (sprig-review-attach conversation sprig-remote))
-    (setq sprig--review-buffer buffer)
-    (pop-to-buffer buffer)))
-
-;; A review buffer can also own its session outright, with no Markdown
-;; transcript behind it: the transport routes events to `sprig--review-sink'
-;; and its verbs steer the session directly.  This is the sprig-mode-free
-;; path (see DESIGN.md, option A: CLI sessions are the branches).
+;; A review buffer owns its session outright: the transport routes events
+;; to `sprig--review-sink' and its verbs steer the session directly (see
+;; DESIGN.md, option A: CLI sessions are the branches).
 
 (defun sprig--review-sink (event)
   "Sink for a review buffer that owns its session: track state, then consume.
@@ -1510,10 +564,6 @@ model via `sprig-review-consume'."
     (`(mode ,m) (setq sprig--permission-mode m))
     (`(done ,_ ,_) (setq sprig--busy nil) (sprig--status-refresh)))
   (sprig-review-consume event))
-
-(defun sprig--review-owns-session-p ()
-  "Non-nil when the current review buffer owns its session (vs attached)."
-  (eq sprig--sink #'sprig--review-sink))
 
 (defun sprig--read-review-dir ()
   "Prompt for a session working directory, returning the string.
@@ -1574,7 +624,7 @@ mode is returned to \"auto\"."
   "Open a review buffer that owns a session in working directory DIR.
 With SESSION-ID, replay that stored session's log and resume it on the
 next send; without, the buffer starts empty and a send opens a fresh
-session.  This is the sprig-mode-free way to start or continue a branch."
+session.  The review buffer is the only conversation surface."
   (interactive (list (sprig--read-review-dir)))
   (require 'sprig-review-mode)
   (let* ((name (format "*sprig-review: %s*"
@@ -1589,62 +639,15 @@ session.  This is the sprig-mode-free way to start or continue a branch."
       (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
              (events (and lines (sprig-review-session-events lines))))
         (sprig-review-seed events (list :project dir)))
-      (sprig-review-attach nil sprig-remote))
+      (sprig-review-set-remote sprig-remote))
     (pop-to-buffer buffer)))
 
 ;;;; Folding commands
-
-;;;###autoload
-(defun sprig-fold-all ()
-  "Fold every tool-call and result block in the buffer to its header.
-Re-hides blocks that already have an overlay and scans to create
-overlays for any that lack one, e.g. in a reopened file."
-  (interactive)
-  (save-excursion
-    (goto-char (point-min))
-    (while (re-search-forward sprig--tool-open-re nil t)
-      (let* ((beg (line-beginning-position))
-             (ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
-                           (overlays-in beg (1+ (line-end-position))))))
-        (if ov
-            (overlay-put ov 'invisible 'sprig-fold)
-          (sprig--fold-block-at beg))))))
-
-;;;###autoload
-(defun sprig-unfold-all ()
-  "Expand every folded tool block in the buffer, keeping the overlays."
-  (interactive)
-  (dolist (o (overlays-in (point-min) (point-max)))
-    (when (overlay-get o 'sprig-fold)
-      (overlay-put o 'invisible nil))))
-
-;;;###autoload
-(defun sprig-toggle-fold ()
-  "Toggle folding of the tool block at point.
-Works from the header line or anywhere in the body."
-  (interactive)
-  (let ((ov (seq-find (lambda (o) (overlay-get o 'sprig-fold))
-                      (overlays-in (line-beginning-position)
-                                   (1+ (line-end-position))))))
-    (cond
-     ;; A fold overlay covers this line: flip its visibility.  The overlay
-     ;; spans the body whether shown or hidden, so no boundary re-search is
-     ;; needed and tool output cannot fake a delimiter.
-     (ov (overlay-put ov 'invisible
-                      (and (not (overlay-get ov 'invisible)) 'sprig-fold)))
-     ;; No overlay yet (e.g. a reopened buffer): create one by scanning.
-     (t (let ((beg (sprig--tool-block-at-point)))
-          (if beg
-              (sprig--fold-block-at beg)
-            (user-error "Not on a tool-call block")))))))
 
 ;;;; Status navigator
 
 (defconst sprig-status-buffer-name "*sprig-status*"
   "Name of the buffer showing the `sprig-status' navigator.")
-
-(defconst sprig--status-scan-bytes 8192
-  "Leading bytes of a candidate .md file read when scanning for branches.")
 
 (defconst sprig--status-preview-bytes 65536
   "Trailing bytes of a branch file read to preview its last reply.
@@ -1665,49 +668,6 @@ SSH host.  A variable, not a defcustom, so tests can redirect it.")
 
 (defvar sprig--remote-home nil
   "Cached value of $HOME on the session host, for encoding remote paths.")
-
-;;; Enumeration and per-buffer status
-
-(defun sprig--conversation-buffer-p (buf)
-  "Non-nil if BUF is a live Sprig conversation buffer.
-Keys on `sprig-mode' or lingering session state, so the `*sprig-status*'
-buffer (a major-mode buffer with no sprig state) never qualifies."
-  (and (buffer-live-p buf)
-       (or (buffer-local-value 'sprig-mode buf)
-           (buffer-local-value 'sprig--process buf)
-           (buffer-local-value 'sprig--session-id buf))))
-
-(defun sprig--conversation-buffers ()
-  "Return the list of live Sprig conversation buffers."
-  (seq-filter #'sprig--conversation-buffer-p (buffer-list)))
-
-(defun sprig--last-reply-interrupted-p ()
-  "Non-nil if the buffer's last reply-open sentinel carries `interrupted'.
-Cheap: `re-search-backward' from `point-max' stops at the last reply."
-  (save-excursion
-    (goto-char (point-max))
-    (and (re-search-backward sprig--reply-open-re nil t)
-         (string-match-p "\\binterrupted\\b"
-                         (buffer-substring-no-properties
-                          (line-beginning-position) (line-end-position))))))
-
-(defun sprig--buffer-status (&optional buf)
-  "Return the status of conversation BUF.
-One of `streaming', `idle', `interrupted', or `disconnected'.  Cheapest
-checks first; the interrupted scan is reached only when no process lives."
-  (with-current-buffer (or buf (current-buffer))
-    (cond
-     (sprig--busy 'streaming)
-     ((process-live-p sprig--process) 'idle)
-     ((sprig--last-reply-interrupted-p) 'interrupted)
-     (t 'disconnected))))
-
-(defun sprig--buffer-title (&optional buf)
-  "Return BUF's display title: `title' frontmatter, else a name fallback."
-  (with-current-buffer (or buf (current-buffer))
-    (or (sprig--frontmatter-get "title")
-        (and buffer-file-name (file-name-base buffer-file-name))
-        (buffer-name))))
 
 ;;; Enumerating stored CLI sessions as branches (option A)
 ;;
@@ -1826,43 +786,15 @@ first.  Titles come from the log's ai-title record."
 
 (defun sprig--last-paragraph (text)
   "Return the last non-empty paragraph of TEXT, or nil.
-Sentinel lines are dropped and the surviving line breaks collapsed to
-single spaces, so the paragraph can be re-wrapped for display."
+Line breaks within the paragraph are collapsed to single spaces, so it can
+be re-wrapped for display."
   (let (result)
     (dolist (para (split-string text "\n[ \t]*\n" t))
-      (let* ((lines (seq-remove (lambda (l) (string-match-p sprig--sentinel-re l))
-                                (split-string para "\n")))
-             (collapsed (string-trim
-                         (replace-regexp-in-string
-                          "[ \t]+" " " (mapconcat #'identity lines " ")))))
+      (let ((collapsed (string-trim
+                        (replace-regexp-in-string "[ \t\n]+" " " para))))
         (unless (string-empty-p collapsed)
           (setq result collapsed))))
     result))
-
-(defun sprig--reply-preview-here ()
-  "Return the last paragraph of the last reply in the current buffer, or nil.
-Scans back from `point-max' to the last reply-open sentinel and reads to
-its matching close, or to buffer end for a still-streaming reply."
-  (save-excursion
-    (goto-char (point-max))
-    (when (re-search-backward sprig--reply-open-re nil t)
-      (let ((start (line-beginning-position 2))
-            (end (save-excursion
-                   (if (re-search-forward sprig--reply-end-re nil t)
-                       (line-beginning-position)
-                     (point-max)))))
-        (and (< start end)
-             (sprig--last-paragraph
-              (buffer-substring-no-properties start end)))))))
-
-(defun sprig--reply-preview-from-file (file)
-  "Return the last-reply preview read from FILE's trailing bytes, or nil."
-  (ignore-errors
-    (with-temp-buffer
-      (let* ((size (file-attribute-size (file-attributes file)))
-             (from (max 0 (- size sprig--status-preview-bytes))))
-        (insert-file-contents file nil from size))
-      (sprig--reply-preview-here))))
 
 (defun sprig--events-last-text (events)
   "Return the last assistant text block's last paragraph from EVENTS, or nil.
@@ -1888,61 +820,7 @@ session log's tail."
         (and tail (sprig--events-last-text
                    (sprig-review-session-events (split-string tail "\n" t)))))))))
 
-;;; On-disk branch-file scan
-
-(defmacro sprig--with-file-head (file &rest body)
-  "Run BODY in a temp buffer holding the leading bytes of FILE."
-  (declare (indent 1) (debug (form body)))
-  `(with-temp-buffer
-     (insert-file-contents ,file nil 0 sprig--status-scan-bytes)
-     ,@body))
-
-(defun sprig--branch-file-p (file)
-  "Non-nil if FILE looks like a Sprig branch file.
-True when its head carries a `claude_session:' frontmatter key or a
-`sprig:reply' sentinel.  Reads only the leading bytes; a plain Markdown
-file (even one with a `title:') is skipped."
-  (ignore-errors
-    (sprig--with-file-head file
-      (goto-char (point-min))
-      (or (re-search-forward "^claude_session:[ \t]*\\S-" nil t)
-          (re-search-forward "^<!-- sprig:reply\\b" nil t)))))
-
-(defun sprig--file-frontmatter-get (file key)
-  "Read KEY from FILE's YAML frontmatter without visiting it."
-  (ignore-errors
-    (sprig--with-file-head file (sprig--frontmatter-get key))))
-
-(defun sprig--status-scan-directories ()
-  "Resolve the directories to scan for branch files, deduped by truename.
-When `sprig-status-directories' is nil, use the directories of the open
-Sprig buffers plus `sprig-directory' (skipped for a remote session)."
-  (let ((dirs (if sprig-status-directories
-                  (mapcar #'expand-file-name sprig-status-directories)
-                (append
-                 (and sprig-directory (not sprig-remote)
-                      (list (expand-file-name sprig-directory)))
-                 (delq nil
-                       (mapcar (lambda (b)
-                                 (let ((f (buffer-local-value 'buffer-file-name b)))
-                                   (and f (file-name-directory f))))
-                               (sprig--conversation-buffers)))))))
-    (seq-uniq (delq nil (mapcar (lambda (d)
-                                  (and (file-directory-p d) (file-truename d)))
-                                dirs))
-              #'string=)))
-
-(defun sprig--scan-branch-files ()
-  "Return the Sprig branch files under `sprig--status-scan-directories'.
-Non-recursive; unreadable files are skipped."
-  (let (files)
-    (dolist (dir (sprig--status-scan-directories))
-      (dolist (f (ignore-errors (directory-files dir t "\\.md\\'" t)))
-        (when (and (file-regular-p f) (sprig--branch-file-p f))
-          (push f files))))
-    files))
-
-;;; Merge open buffers and on-disk files into rows
+;;; Collect open buffers and stored sessions into rows
 
 (defun sprig--status-collect ()
   "Return status plists for all branches, deduped by session id.
@@ -1994,10 +872,9 @@ its stored log, carrying live status and a session with no log yet."
 
 (defun sprig--status-entries ()
   "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
-The entry id is the entry's `:key' (a file's truename, else its buffer):
-canonical and stable across refreshes, so point and inline-preview state
-survive.  Stale ids are pruned from `sprig--status-expanded' so it never
-outlives the row it belongs to."
+The entry id is the entry's `:key' (its session id, else its buffer):
+stable across refreshes, so point and inline-preview state survive.  Stale
+ids are pruned from `sprig--status-expanded' so it never outlives its row."
   (let ((index (make-hash-table :test 'equal))
         rows)
     (dolist (e (sprig--status-collect))
@@ -2029,9 +906,10 @@ outlives the row it belongs to."
 
 (defun sprig--status-prune-expanded (index)
   "Drop ids from `sprig--status-expanded' absent from INDEX.
-An entry's id changes when it flips identity (a scratch buffer saved to a
-file), which would otherwise strand its expanded flag and desync the hash
-from the screen, so a later TAB toggles the phantom instead of the row."
+An entry's id changes when it flips identity (an owning buffer gains a
+session id once its log exists), which would otherwise strand its expanded
+flag and desync the hash from the screen, so a later TAB toggles the
+phantom instead of the row."
   (when sprig--status-expanded
     (let (stale)
       (maphash (lambda (id _)
@@ -2259,64 +1137,6 @@ session."
       (unless (derived-mode-p 'sprig-status-mode) (sprig-status-mode))
       (sprig--status-render))
     (pop-to-buffer buf)))
-
-;;;; Minor mode / keymap
-
-(defvar sprig-mode-map (make-sparse-keymap)
-  "Keymap for `sprig-mode'.")
-
-;; Bind at top level (not inside the `defvar') so reloading the file
-;; refreshes the bindings; `defvar' would not reassign the live keymap.
-(define-key sprig-mode-map (kbd "C-c C-c")     #'sprig-send)
-(define-key sprig-mode-map (kbd "C-c C-a C-o") #'sprig-connect)
-(define-key sprig-mode-map (kbd "C-c C-k")     #'sprig-interrupt)
-(define-key sprig-mode-map (kbd "C-c C-a C-k") #'sprig-disconnect)
-(define-key sprig-mode-map (kbd "C-c C-a C-r") #'sprig-review)
-(define-key sprig-mode-map (kbd "C-c C-f")     #'sprig-toggle-fold)
-
-(defun sprig--mode-line ()
-  "Return the `sprig-mode' lighter reflecting this buffer's live status.
-Kept cheap: reads only `sprig--busy' and the process handle (it runs on
-every redisplay), never the interrupted scan."
-  (concat " Sprig"
-          (cond (sprig--busy ":▶")
-                ((process-live-p sprig--process) ":●")
-                (t ""))))
-
-(defun sprig--kill-buffer-query ()
-  "Guard against silently losing an unsaved in-memory conversation.
-Returns t (allow the kill) unless this is a file-less conversation
-buffer holding a transcript or a live session id, in which case it asks
-to confirm.  A saved branch, or an empty scratch buffer with nothing to
-lose, is killed without a prompt."
-  (or buffer-file-name
-      (not (sprig--conversation-buffer-p (current-buffer)))
-      (and (not sprig--session-id)
-           (string-empty-p (string-trim (buffer-string))))
-      (yes-or-no-p "This conversation is not saved to a file; kill and lose it? ")))
-
-;;;###autoload
-(define-minor-mode sprig-mode
-  "Minor mode for conversing with an agent in a Markdown buffer."
-  :lighter (:eval (sprig--mode-line))
-  :keymap sprig-mode-map
-  (if sprig-mode
-      (progn
-        (add-to-invisibility-spec 'sprig-chrome)
-        (add-to-invisibility-spec '(sprig-fold . t))
-        (add-hook 'after-change-functions #'sprig--refresh-pending-face nil t)
-        (add-hook 'kill-buffer-hook #'sprig--status-refresh-deferred nil t)
-        (add-hook 'kill-buffer-query-functions #'sprig--kill-buffer-query nil t)
-        (sprig--decorate)
-        (when sprig-fold-tool-calls (sprig-fold-all)))
-    (remove-hook 'after-change-functions #'sprig--refresh-pending-face t)
-    (remove-hook 'kill-buffer-hook #'sprig--status-refresh-deferred t)
-    (remove-hook 'kill-buffer-query-functions #'sprig--kill-buffer-query t)
-    (remove-from-invisibility-spec 'sprig-chrome)
-    (remove-from-invisibility-spec '(sprig-fold . t))
-    (remove-overlays (point-min) (point-max) 'sprig-chrome t)
-    (remove-overlays (point-min) (point-max) 'sprig-fold t)
-    (remove-overlays (point-min) (point-max) 'sprig-user t)))
 
 (provide 'sprig)
 ;;; sprig.el ends here

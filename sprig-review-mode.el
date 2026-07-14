@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.4.1
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -34,10 +34,6 @@
 (require 'transient)
 (require 'seq)
 
-(declare-function sprig--send-text "sprig" (text &optional mode))
-(declare-function sprig-interrupt "sprig" ())
-(declare-function sprig--frontmatter-set "sprig" (key value))
-(declare-function sprig--review-owns-session-p "sprig" ())
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
@@ -101,12 +97,9 @@ that section without a full re-render.  Any structural event clears it.")
 (defvar-local sprig-review--marks nil
   "Idents (per `magit-section-ident') of the marked sections.
 Idents rather than section objects, so marks survive a re-render.")
-(defvar-local sprig-review--conversation nil
-  "The sprig conversation buffer this review steers, or nil.
-Set by `sprig-review-attach'; the verbs send instructions through it.")
 (defvar-local sprig-review--remote nil
   "SSH destination of the session host, or nil for local.
-Set by `sprig-review-attach' so visiting a file reaches it over TRAMP.")
+Set by `sprig-review-set-remote' so visiting a file reaches it over TRAMP.")
 
 ;;;; Options
 
@@ -328,10 +321,11 @@ META is an optional plist of display metadata (see
 
 ;;;; Live sink: accumulate events, refresh the buffer
 ;;
-;; The transport (sprig.el) emits the same backend-neutral events the
-;; Markdown sink consumes; a review buffer folds them into its model and
-;; re-renders.  `sprig-review-consume' is the counterpart of the Markdown
-;; sink's `sprig--dispatch': the transport calls it once per event.
+;; The transport (sprig.el) emits a backend-neutral event vocabulary; a
+;; review buffer folds those events into its model and re-renders.
+;; `sprig-review-consume' is the buffer's sink: the transport calls it once
+;; per event (see `sprig--review-sink', which wraps it with the owning
+;; buffer's transport bookkeeping).
 ;;
 ;; Refresh rebuilds from the whole event list rather than mutating the
 ;; buffer in place.  That reuses the tested renderer verbatim and keeps
@@ -593,27 +587,18 @@ CHANGES is a list of (FILE . HUNK-PLIST)."
   "Return an instruction asking the agent to run COMMAND."
   (format "Please run:\n```\n%s\n```" command))
 
-;;;; Steering: send through the attached conversation
+;;;; Steering: send through the owned session
 
-(defun sprig-review-attach (conversation &optional remote)
-  "Attach this review buffer to its CONVERSATION buffer, so verbs can steer it.
-REMOTE is the session host's SSH destination (nil when local), used to
-reach files over TRAMP when visiting."
-  (setq sprig-review--conversation conversation
-        sprig-review--remote remote))
+(defun sprig-review-set-remote (remote)
+  "Record REMOTE, the session host's SSH destination (nil when local).
+Used to reach a changed file over TRAMP when visiting it."
+  (setq sprig-review--remote remote))
 
 (defun sprig-review--send (text &optional mode)
   "Send TEXT as a user instruction steering this review's session.
 MODE, when given (e.g. \"plan\"), sets the permission mode for the turn.
-Sends directly when the buffer owns its session, else through the
-attached Markdown conversation."
-  (cond
-   ((sprig--review-owns-session-p)
-    (sprig--review-deliver text mode))
-   ((buffer-live-p sprig-review--conversation)
-    (with-current-buffer sprig-review--conversation
-      (sprig--send-text text mode)))
-   (t (user-error "This review is not attached to a live conversation")))
+Starts or resumes the session if it is not already live."
+  (sprig--review-deliver text mode)
   (message "sprig: sent%s" (if mode (format " (%s mode)" mode) "")))
 
 ;;;; Verbs
@@ -667,13 +652,12 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
   (message "sprig: accepted (marks cleared; commit is a separate verb)"))
 
 (defun sprig-review-set-title (title)
-  "Set this review's TITLE in the header and the conversation's frontmatter."
+  "Set this review's display TITLE in the header.
+The stored session's own ai-title (owned by the CLI) is left untouched, so
+this affects only what the navigator and header show for the open buffer."
   (interactive
    (list (read-string "Title: " (plist-get sprig-review--meta :title))))
   (setq sprig-review--meta (plist-put sprig-review--meta :title title))
-  (when (buffer-live-p sprig-review--conversation)
-    (with-current-buffer sprig-review--conversation
-      (sprig--frontmatter-set "title" title)))
   (sprig-review--refresh))
 
 (defun sprig-review-retry ()
@@ -686,14 +670,9 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
     (sprig-review--send (plist-get last-user :text))))
 
 (defun sprig-review-interrupt ()
-  "Interrupt the in-flight turn steering this review's session."
+  "Interrupt the in-flight turn on this review's session."
   (interactive)
-  (cond
-   ((sprig--review-owns-session-p)
-    (sprig--review-interrupt-owned))
-   ((buffer-live-p sprig-review--conversation)
-    (with-current-buffer sprig-review--conversation (sprig-interrupt)))
-   (t (user-error "This review is not attached to a live conversation"))))
+  (sprig--review-interrupt-owned))
 
 (defun sprig-review--section-file (section)
   "Return the file path SECTION refers to, or nil."
@@ -758,12 +737,10 @@ Uses only real marks, not the section-at-point fallback."
                  secs "\n\n"))))
 
 (defun sprig-review-message (&optional plan)
-  "Compose a message and send it to the attached conversation.
+  "Compose a message and send it to this review's session.
 Any marked sections are attached as context (see DESIGN.md's `c c').
 With PLAN non-nil, send the turn in plan mode (`c p')."
   (interactive)
-  (unless (buffer-live-p sprig-review--conversation)
-    (user-error "This review is not attached to a live conversation"))
   (let ((review (current-buffer))
         (context (sprig-review--marked-context))
         (buf (get-buffer-create "*sprig-message*")))

@@ -437,14 +437,14 @@
           (should (equal sent-text "make a plan"))
           (should (equal sent-mode "plan")))))))
 
-;;;; A review buffer that owns its session (sprig-mode-free path)
+;;;; A review buffer that owns its session
 
 (ert-deftest sprig-review-mode-test-owned-sink-tracks-and-consumes ()
   "The owner sink books transport state and folds events into the model."
   (with-temp-buffer
     (sprig-review-mode)
     (setq sprig--sink #'sprig--review-sink)
-    (should (sprig--review-owns-session-p))
+    (should (eq sprig--sink #'sprig--review-sink))
     (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
       (sprig--review-sink '(session "abc"))
       (should (equal sprig--session-id "abc"))
