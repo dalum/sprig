@@ -443,51 +443,77 @@ Return the log directory."
       (dolist (r records) (insert (json-serialize r) "\n")))
     logdir))
 
-(ert-deftest sprig-test-encode-project ()
-  (should (equal (sprig--encode-project "/home/me/Projects/sprig")
-                 "-home-me-Projects-sprig"))
-  ;; A trailing slash and a dotted segment both fold to hyphens.
-  (should (equal (sprig--encode-project "/a/b.c/") "-a-b-c")))
-
 (ert-deftest sprig-test-scan-session-logs ()
+  ;; The scan is host-wide: every log under the projects root, newest first,
+  ;; with each row's project taken from the log's own `cwd' record.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (proj "/tmp/whatever/myproj")
+         (proj-a "/tmp/whatever/myproj")
+         (proj-b "/tmp/other/second")
          (sprig-remote nil)
-         (sprig-claude-projects-directory root)
-         (sprig-status-directories (list proj)))
+         (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
           (sprig-tests--make-session-log
-           root proj "sess-1"
-           '(:type "user" :message (:role "user" :content "hi"))
+           root proj-a "sess-old"
+           `(:type "user" :cwd ,proj-a :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "First title")
            '(:type "ai-title" :aiTitle "Refined \"quoted\" title"))
+          ;; A second project, written later, so it sorts newest first.
+          (sprig-tests--make-session-log
+           root proj-b "sess-new"
+           `(:type "user" :cwd ,proj-b :message (:role "user" :content "yo"))
+           '(:type "ai-title" :aiTitle "Second"))
           (let* ((rows (sprig--scan-session-logs))
-                 (row (car rows)))
-            (should (= 1 (length rows)))
-            (should (equal (plist-get row :session) "sess-1"))
-            (should (equal (plist-get row :dir) proj))
+                 (a (seq-find (lambda (r) (equal (plist-get r :session) "sess-old"))
+                              rows)))
+            ;; Both projects show, regardless of any configured directory.
+            (should (= 2 (length rows)))
+            (should (equal (plist-get a :dir) proj-a))
             ;; The freshest ai-title wins, and JSON escapes are decoded.
-            (should (equal (plist-get row :title) "Refined \"quoted\" title"))))
+            (should (equal (plist-get a :title) "Refined \"quoted\" title")))
+          ;; The cap keeps only the newest.
+          (let ((sprig-status-max-sessions 1))
+            (let ((rows (sprig--scan-session-logs)))
+              (should (= 1 (length rows))))))
       (delete-directory root t))))
 
-(ert-deftest sprig-test-session-log-files-remote-globs ()
-  ;; The remote listing must leave the `*.jsonl' glob unquoted so the remote
-  ;; shell expands it; quoting the `*' would list nothing.
+(ert-deftest sprig-test-scan-session-logs-remote ()
+  ;; Two round trips: a mtime-sorted find, then one batched slurp of tails.
+  ;; The find output pairs each mtime with a path; the tails come back
+  ;; record-separated so cwd and title are parsed per session.
   (let ((sprig-remote "me@host")
         (sprig-claude-projects-directory "~/.claude/projects")
-        (captured nil))
+        (root "~/.claude/projects")
+        (calls nil))
     (cl-letf (((symbol-function 'sprig--remote-sh)
-               (lambda (cmd) (setq captured cmd) "a.jsonl\nb.jsonl\n")))
-      (let* ((logdir (sprig--project-log-dir "~/Projects/sprig"))
-             (files (sprig--session-log-files-remote logdir)))
-        ;; A live, unescaped glob reached the shell.
-        (should (string-match-p "\\*\\.jsonl" captured))
-        (should-not (string-match-p "\\\\\\*" captured))
-        ;; Bare names come back re-rooted under the log directory.
-        (should (equal files
-                       (list (concat (file-name-as-directory logdir) "a.jsonl")
-                             (concat (file-name-as-directory logdir) "b.jsonl"))))))))
+               (lambda (cmd)
+                 (push cmd calls)
+                 (cond
+                  ((string-match-p "find" cmd)
+                   (format "20.0\t%s/-p/new.jsonl\n10.0\t%s/-p/old.jsonl\n"
+                           root root))
+                  ((string-match-p "^for f in" cmd)
+                   (concat "\036" root "/-p/new.jsonl\037"
+                           "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Newer\"}\n"
+                           "\036" root "/-p/old.jsonl\037"
+                           "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Older\"}\n"))
+                  (t "")))))
+      (let* ((rows (sprig--scan-session-logs))
+             (newer (car rows)))
+        ;; Newest first, from the find's descending sort.
+        (should (equal (plist-get newer :session) "new"))
+        (should (equal (plist-get newer :title) "Newer"))
+        (should (equal (plist-get newer :dir) "/home/me/p"))
+        (should (= 2 (length rows)))
+        ;; The find left `*.jsonl' unquoted so the remote shell expands it.
+        (should (seq-find (lambda (c) (string-match-p "\\*\\.jsonl" c)) calls))))))
+
+(ert-deftest sprig-test-entry-matches-filter ()
+  (let ((e '(:dir "/home/me/Projects/sprig" :title "Fix the navigator")))
+    ;; Case-insensitive, matching either the project directory or the title.
+    (should (sprig--entry-matches-filter e "sprig"))
+    (should (sprig--entry-matches-filter e "NAVIGATOR"))
+    (should-not (sprig--entry-matches-filter e "unrelated"))))
 
 (ert-deftest sprig-test-status-collect-owning-buffer-wins ()
   (let ((root (make-temp-file "sprig-proj" t)))

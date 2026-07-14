@@ -39,8 +39,8 @@ Put the three `.el` files on your `load-path`, then:
 (setq sprig-remote "you@your-server")   ;; nil = run locally
 (setq sprig-model  "claude-opus-4-8")   ;; or nil for the CLI default
 
-;; Project directories whose sessions the navigator lists:
-(setq sprig-status-directories '("~/Projects/sprig"))
+;; The navigator lists every session on the host; cap the first paint:
+(setq sprig-status-max-sessions 30)
 ```
 
 With `use-package` and a local checkout:
@@ -51,7 +51,7 @@ With `use-package` and a local checkout:
   :custom
   (sprig-remote "you@your-server")
   (sprig-model "claude-opus-4-8")
-  (sprig-status-directories '("~/Projects/sprig")))
+  (sprig-status-max-sessions 30))
 ```
 
 ## SSH tips
@@ -75,7 +75,7 @@ With `use-package` and a local checkout:
 
 ## Usage
 
-1. `M-x sprig-status` opens the navigator, listing the stored sessions for your `sprig-status-directories`.
+1. `M-x sprig-status` opens the navigator, listing every stored session on the host, newest first; `/` narrows it to a project or title.
 2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history. `s` starts a fresh session, prompting for its working directory. `M-x sprig-review-session` does the same directly.
 3. In the review buffer, review the agent's work: its file edits show as a foldable diff, prose and tool activity as folded sections. Move with `n` / `p`, fold with `TAB`.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
@@ -94,7 +94,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 ### Navigator
 
-`M-x sprig-status` opens a `*sprig-status*` buffer listing the stored `claude` sessions for the project directories in `sprig-status-directories`, newest first, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project, and a short session id. It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply.
+`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session on the host, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), and a short session id. It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply. `/` narrows the list to sessions whose project or title match a substring, and `L` lifts the cap to show every session.
 
 | Key | Does |
 |---|---|
@@ -105,6 +105,8 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `c` | Open the session and start or resume it |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session (its log is kept) |
+| `/` | Filter the list by project or title (empty clears) |
+| `L` | Toggle the `sprig-status-max-sessions` cap (show all / newest) |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
 
@@ -141,12 +143,13 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
-| `sprig-status-directories` | `nil` | Project directories whose stored sessions the navigator lists (nil = `sprig-directory` or the current directory) |
+| `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `L` lifts it live) |
+| `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
 | `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
 | `sprig-review-refresh-delay` | `0.1` | Seconds to coalesce structural events before re-rendering a review buffer |
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |
 
-The navigator lists sessions by mapping each project directory to the CLI's log directory under `~/.claude/projects/`; a session's title comes from its `ai-title` record. For a remote session those logs live on the SSH host and are listed over the same SSH the transport uses; `sprig-status-directories` then names paths on that host.
+The navigator scans every session log under `~/.claude/projects/` on the session host, newest first, and reads each session's own `cwd` and `ai-title` records for its project and title. For a remote session those logs live on the SSH host and are scanned over the same SSH the transport uses, in two round trips (a mtime-sorted listing, then one batched slurp of the capped set's tails), so a host with hundreds of sessions still lists quickly.
 
 ## Status / caveats
 

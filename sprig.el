@@ -30,11 +30,12 @@
 ;; `sprig-review-connect'); the transport routes its events to the review
 ;; model and its verbs steer the session directly.
 ;;
-;; Navigator: `sprig-status' lists the stored sessions for the project
-;; directories in `sprig-status-directories', plus any open review buffer
-;; that owns a live session, with per-session status and an inline preview
-;; of the last reply.  Open / connect / interrupt / disconnect act on a
-;; session-owning review buffer; `s' starts a fresh session.
+;; Navigator: `sprig-status' lists every stored session on the host,
+;; newest first and capped, plus any open review buffer that owns a live
+;; session, with per-session status and an inline preview of the last
+;; reply.  `/' narrows to a project or title, `L' lifts the cap.  Open /
+;; connect / interrupt / disconnect act on a session-owning review buffer;
+;; `s' starts a fresh session.
 
 ;;; Code:
 
@@ -97,14 +98,21 @@ When a session exits abnormally, its command, exit status, and captured
 stderr are appended here and the buffer is displayed."
   :type 'string)
 
+(defcustom sprig-status-max-sessions 30
+  "How many of the newest stored sessions the navigator lists at once.
+The `sprig-status' navigator scans every session on the host, newest
+first, and shows this many so a host with hundreds of sessions still
+paints fast.  `L' in the navigator lifts the cap for that buffer; `/'
+narrows the list to a project or title.  nil means no cap."
+  :type '(choice (const :tag "No cap" nil) integer))
+
 (defcustom sprig-status-directories nil
-  "Project working directories whose stored sessions the navigator lists.
-The `sprig-status' navigator maps each to the CLI's session-log directory
-under `sprig-claude-projects-directory' and lists the sessions there.
-When nil, use `sprig-directory' or the current `default-directory'.  Each
-entry may use a leading `~'; for a remote session they name paths on the
-SSH host."
-  :type '(choice (const :tag "Auto (sprig-directory or default-directory)" nil)
+  "Deprecated: an initial project filter for the `sprig-status' navigator.
+The navigator now lists every session on the host regardless of folder;
+narrow it live with `/'.  When this is set, the navigator opens filtered
+to the first entry's project name, preserving the old scoped-to-a-project
+feel.  Prefer leaving it nil and using `/'."
+  :type '(choice (const :tag "No initial filter" nil)
                  (repeat directory)))
 
 (defcustom sprig-status-preview-max-lines 3
@@ -654,6 +662,12 @@ session.  The review buffer is the only conversation surface."
 Large enough to hold the last reply-open sentinel for a typical turn; a
 reply longer than this simply shows no preview.")
 
+(defconst sprig--status-scan-bytes 16384
+  "Trailing bytes of a log read to recover its title and cwd for a row.
+Smaller than `sprig--status-preview-bytes': the freshest `aiTitle' and a
+`cwd'-bearing record both sit near the end, and the scan slurps one such
+tail per listed session, so keeping it small keeps the SSH transfer down.")
+
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
     (idle         . "●")
@@ -666,16 +680,22 @@ reply longer than this simply shows no preview.")
 Local sessions read it here; remote sessions read the same path on the
 SSH host.  A variable, not a defcustom, so tests can redirect it.")
 
-(defvar sprig--remote-home nil
-  "Cached value of $HOME on the session host, for encoding remote paths.")
+(defvar-local sprig--status-filter nil
+  "Case-insensitive substring the navigator narrows rows to, or nil for all.
+Matched against a row's project directory and its title.")
+
+(defvar-local sprig--status-show-all nil
+  "When non-nil, the navigator lists every session.
+It lifts the `sprig-status-max-sessions' cap for its buffer.")
 
 ;;; Enumerating stored CLI sessions as branches (option A)
 ;;
 ;; A branch is a `claude' session; the CLI already stores each as a JSONL
 ;; log under `sprig-claude-projects-directory'/<encoded-cwd>/.  The
-;; navigator lists those logs for the configured project directories, and
-;; folds in any open review buffer that owns its session (so a just-started
-;; session with no log yet, and live status, both show).
+;; navigator scans every log on the host, newest first and capped, reading
+;; each session's own cwd and title records; it folds in any open review
+;; buffer that owns its session (so a just-started session with no log yet,
+;; and live status, both show).  `/' narrows the list, `L' lifts the cap.
 
 (defvar sprig-review--events)           ; buffer-local in sprig-review-mode.el
 (defvar sprig-review--meta)             ; buffer-local in sprig-review-mode.el
@@ -697,36 +717,25 @@ One of `streaming', `idle', or `disconnected'."
    ((process-live-p (buffer-local-value 'sprig--process buf)) 'idle)
    (t 'disconnected)))
 
-(defun sprig--remote-home ()
-  "Return $HOME on the session host, caching it in `sprig--remote-home'."
-  (or sprig--remote-home
-      (setq sprig--remote-home
-            (string-trim (sprig--remote-sh "printf %s \"$HOME\"")))))
+(defun sprig--status-limit ()
+  "Maximum number of stored sessions the navigator lists, or nil for all.
+`L' in the navigator sets `sprig--status-show-all' to lift the cap;
+otherwise `sprig-status-max-sessions' bounds the newest-first scan."
+  (and (not sprig--status-show-all) sprig-status-max-sessions))
 
-(defun sprig--project-directories ()
-  "Return the project working directories whose sessions the navigator lists.
-`sprig-status-directories' when set, else `sprig-directory' or the current
-`default-directory'."
-  (or sprig-status-directories
-      (list (or sprig-directory default-directory))))
+(defun sprig--tail-cwd (text)
+  "Return the working directory recorded in session-log TEXT, or nil.
+Every CLI record carries the session's `cwd', so the log tail holds it."
+  (and (string-match "\"cwd\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text)
+       (ignore-errors (json-parse-string (match-string 1 text)))))
 
-(defun sprig--encode-project (abs)
-  "Encode absolute path ABS the way the CLI names its project directory."
-  (replace-regexp-in-string "[/.]" "-" (directory-file-name abs)))
-
-(defun sprig--project-log-dir (dir)
-  "Return the session-log directory for project DIR.
-Local: an absolute path.  Remote: a path on the SSH host, `~' left live
-for the remote shell to expand."
-  (if sprig-remote
-      (let ((abs (cond ((string-prefix-p "/" dir) dir)
-                       ((string-prefix-p "~" dir)
-                        (concat (sprig--remote-home) (substring dir 1)))
-                       (t (concat (sprig--remote-home) "/" dir)))))
-        (concat (file-name-as-directory sprig-claude-projects-directory)
-                (sprig--encode-project abs)))
-    (expand-file-name (sprig--encode-project (expand-file-name dir))
-                      (expand-file-name sprig-claude-projects-directory))))
+(defun sprig--tail-title (text)
+  "Return the freshest `aiTitle' recorded in session-log TEXT, or nil.
+The latest title record sits nearest the end, so the last match wins."
+  (let ((title nil) (pos 0))
+    (while (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text pos)
+      (setq title (match-string 1 text) pos (match-end 0)))
+    (and title (ignore-errors (json-parse-string title)))))
 
 (defun sprig--session-log-tail (file)
   "Return the trailing bytes of session-log FILE, local or remote, or nil."
@@ -740,51 +749,90 @@ for the remote shell to expand."
           (insert-file-contents file nil from size))
         (buffer-string)))))
 
-(defun sprig--session-log-title (file)
-  "Return the freshest ai-title stored in session-log FILE, or nil.
-Reads only the trailing bytes, where the latest title record sits."
-  (let ((text (sprig--session-log-tail file)) (title nil) (pos 0))
-    (while (and text
-                (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)"
-                              text pos))
-      (setq title (match-string 1 text) pos (match-end 0)))
-    (and title (ignore-errors (json-parse-string title)))))
-
-(defun sprig--session-log-files-remote (logdir)
-  "Return the remote session-log paths under LOGDIR, newest first."
-  (mapcar (lambda (f) (concat (file-name-as-directory logdir) f))
-          (split-string
-           ;; `cd' into the log dir so the `*.jsonl' glob stays unquoted and the
-           ;; remote shell expands it; quoting the pattern (as for a plain dir)
-           ;; would escape the `*' and match nothing.  `ls' then prints bare
-           ;; names, which the mapcar re-roots under LOGDIR.
-           (or (ignore-errors
-                 (sprig--remote-sh
-                  (format "cd %s 2>/dev/null && ls -1t *.jsonl 2>/dev/null"
-                          (sprig--remote-dir-arg
-                           (directory-file-name logdir)))))
-               "")
-           "\n" t)))
+(defun sprig--log-plist (file mtime tail)
+  "Build a scan plist for log FILE with MTIME and its TAIL text.
+The project directory is the session's own recorded `cwd'; the encoded log
+directory name is a fallback when the tail carries none."
+  (list :session (file-name-base file)
+        :file file
+        :dir (or (and tail (sprig--tail-cwd tail))
+                 (file-name-nondirectory
+                  (directory-file-name (file-name-directory file))))
+        :mtime mtime
+        :title (or (and tail (sprig--tail-title tail)) "(untitled)")))
 
 (defun sprig--scan-session-logs ()
-  "Return session plists for every stored log under the project directories.
-Each plist has :session, :file, :dir, :mtime, and :title.  Sorted newest
-first.  Titles come from the log's ai-title record."
-  (let (rows)
-    (dolist (dir (sprig--project-directories))
-      (let ((logdir (sprig--project-log-dir dir)))
-        (dolist (file (if sprig-remote
-                          (sprig--session-log-files-remote logdir)
-                        (and (file-directory-p logdir)
-                             (directory-files logdir t "\\.jsonl\\'" t))))
-          (push (list :session (file-name-base file)
-                      :file file :dir dir
-                      :mtime (if sprig-remote 0.0
-                               (float-time (file-attribute-modification-time
-                                            (file-attributes file))))
-                      :title (or (sprig--session-log-title file) "(untitled)"))
-                rows))))
-    (sort rows (lambda (a b) (> (plist-get a :mtime) (plist-get b :mtime))))))
+  "Return session plists for the newest stored logs on the session host.
+Each plist has :session, :file, :dir (the log's recorded cwd), :mtime,
+and :title.  Sourced host-wide from `sprig-claude-projects-directory',
+newest first, capped to `sprig--status-limit' so a host with hundreds of
+sessions still paints fast."
+  (if sprig-remote
+      (sprig--scan-session-logs-remote (sprig--status-limit))
+    (sprig--scan-session-logs-local (sprig--status-limit))))
+
+(defun sprig--scan-session-logs-local (limit)
+  "Scan the LIMIT newest local logs under `sprig-claude-projects-directory'."
+  (let* ((root (expand-file-name sprig-claude-projects-directory))
+         (files (and (file-directory-p root)
+                     (directory-files-recursively root "\\.jsonl\\'")))
+         (dated (sort (mapcar (lambda (f)
+                                (cons (float-time
+                                       (file-attribute-modification-time
+                                        (file-attributes f)))
+                                      f))
+                              files)
+                      (lambda (a b) (> (car a) (car b))))))
+    (when limit (setq dated (seq-take dated limit)))
+    (mapcar (lambda (cell)
+              (sprig--log-plist (cdr cell) (car cell)
+                                (sprig--session-log-tail (cdr cell))))
+            dated)))
+
+(defun sprig--scan-session-logs-remote (limit)
+  "Scan the LIMIT newest remote logs under `sprig-claude-projects-directory'.
+Two SSH round trips whatever LIMIT is: one lists the newest logs by mtime,
+one slurps their tails; the cwds and titles are parsed here."
+  (let* ((root (sprig--remote-dir-arg
+                (directory-file-name sprig-claude-projects-directory)))
+         (listing (ignore-errors
+                    (sprig--remote-sh
+                     (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' \
+2>/dev/null | sort -rn | head -n %d"
+                             root (or limit 1000000)))))
+         (dated (delq nil
+                      (mapcar (lambda (line)
+                                (when (string-match "\\`\\([0-9.]+\\)\t\\(.+\\)\\'"
+                                                    line)
+                                  (cons (string-to-number (match-string 1 line))
+                                        (match-string 2 line))))
+                              (split-string (or listing "") "\n" t)))))
+    (when dated
+      (let* ((paths (mapcar #'cdr dated))
+             (blob (ignore-errors
+                     (sprig--remote-sh (sprig--remote-tails-command paths))))
+             (tails (sprig--parse-tails-blob blob)))
+        (mapcar (lambda (cell)
+                  (sprig--log-plist (cdr cell) (car cell)
+                                    (gethash (cdr cell) tails)))
+                dated)))))
+
+(defun sprig--remote-tails-command (paths)
+  "Shell command printing the log tail of each of PATHS, record-separated.
+Each file is emitted as RS, its path, US, then its trailing bytes, so the
+whole set returns in one SSH round trip for `sprig--parse-tails-blob'."
+  (concat "for f in " (mapconcat #'shell-quote-argument paths " ")
+          (format "; do printf '\\036%%s\\037' \"$f\"; tail -c %d \"$f\"; done"
+                  sprig--status-scan-bytes)))
+
+(defun sprig--parse-tails-blob (blob)
+  "Parse BLOB from `sprig--remote-tails-command' into a path->tail hash table."
+  (let ((map (make-hash-table :test 'equal)))
+    (dolist (chunk (and blob (split-string blob "\036" t)))
+      (let ((us (string-search "\037" chunk)))
+        (when us
+          (puthash (substring chunk 0 us) (substring chunk (1+ us)) map))))
+    map))
 
 ;;; Last-reply preview
 
@@ -830,7 +878,8 @@ session log's tail."
   "Return status plists for all branches, deduped by session id.
 Each plist has :key, :buffer (or nil), :file (or nil), :dir, :title,
 :status, and :session.  An open session-owning review buffer wins over
-its stored log, carrying live status and a session with no log yet."
+its stored log, carrying live status and a session with no log yet.  When
+`sprig--status-filter' is set, only rows matching it are returned."
   (let ((table (make-hash-table :test 'equal))
         (order '()))
     (dolist (buf (sprig--owning-review-buffers))
@@ -859,7 +908,19 @@ its stored log, carrying live status and a session with no log yet."
                          :status 'disconnected
                          :session (plist-get e :session))
                    table))))
-    (mapcar (lambda (k) (gethash k table)) (nreverse order))))
+    (let ((rows (mapcar (lambda (k) (gethash k table)) (nreverse order))))
+      (if (and sprig--status-filter (not (string-empty-p sprig--status-filter)))
+          (seq-filter (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
+                      rows)
+        rows))))
+
+(defun sprig--entry-matches-filter (entry filter)
+  "Non-nil if ENTRY's project directory or title contains FILTER.
+Matching is case-insensitive."
+  (let ((case-fold-search t)
+        (needle (regexp-quote filter)))
+    (or (string-match-p needle (or (plist-get entry :dir) ""))
+        (string-match-p needle (or (plist-get entry :title) "")))))
 
 ;;; tabulated-list rendering
 
@@ -900,6 +961,10 @@ ids are pruned from `sprig--status-expanded' so it never outlives its row."
                               "-")))
               rows)))
     (setq sprig--status-index index)
+    (setq mode-line-process
+          (concat (and sprig--status-filter
+                       (format " /%s" sprig--status-filter))
+                  (and sprig--status-show-all " [all]")))
     (sprig--status-prune-expanded index)
     (nreverse rows)))
 
@@ -995,6 +1060,8 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
+(define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
+(define-key sprig-status-mode-map (kbd "L")   #'sprig-status-show-all)
 (define-key sprig-status-mode-map (kbd "?")   #'describe-mode)
 
 (define-derived-mode sprig-status-mode tabulated-list-mode "Sprig-Status"
@@ -1129,16 +1196,54 @@ navigator and streams like any other."
   (sprig-review-session (sprig--read-review-dir))
   (sprig--status-refresh))
 
+(defun sprig--status-project-candidates ()
+  "Distinct project directories among the rows in the current render."
+  (let (dirs)
+    (when sprig--status-index
+      (maphash (lambda (_ e)
+                 (let ((d (plist-get e :dir))) (when d (push d dirs))))
+               sprig--status-index))
+    (seq-uniq dirs)))
+
+(defun sprig-status-filter (filter)
+  "Narrow the navigator to sessions whose project or title match FILTER.
+Reads a case-insensitive substring, completing over the projects now
+listed; an empty string clears the filter."
+  (interactive
+   (list (completing-read
+          "Filter (project or title, empty to clear): "
+          (sprig--status-project-candidates) nil nil sprig--status-filter)))
+  (setq sprig--status-filter (and (not (string-empty-p filter)) filter))
+  (sprig--status-render)
+  (if sprig--status-filter
+      (message "Filtering on %S" sprig--status-filter)
+    (message "Filter cleared")))
+
+(defun sprig-status-show-all ()
+  "Toggle listing every stored session against the capped newest set."
+  (interactive)
+  (setq sprig--status-show-all (not sprig--status-show-all))
+  (sprig--status-render)
+  (message (if sprig--status-show-all
+               "Listing every session"
+             (format "Listing the %s newest sessions" sprig-status-max-sessions))))
+
 ;;;###autoload
 (defun sprig-status ()
   "Open the `*sprig-status*' navigator listing Sprig sessions.
-Lists the stored `claude' sessions for the project directories in
-`sprig-status-directories', plus any open review buffer that owns a live
-session."
+Lists every stored `claude' session on the host, newest first and capped
+to `sprig-status-max-sessions', plus any open review buffer that owns a
+live session.  Narrow with `/', lift the cap with `L'."
   (interactive)
-  (let ((buf (get-buffer-create sprig-status-buffer-name)))
+  (let ((buf (get-buffer-create sprig-status-buffer-name))
+        (seed (and sprig-status-directories
+                   (file-name-nondirectory
+                    (directory-file-name (car sprig-status-directories))))))
     (with-current-buffer buf
-      (unless (derived-mode-p 'sprig-status-mode) (sprig-status-mode))
+      (unless (derived-mode-p 'sprig-status-mode)
+        (sprig-status-mode)
+        (when (and seed (not (string-empty-p seed)))
+          (setq sprig--status-filter seed)))
       (sprig--status-render))
     (pop-to-buffer buf)))
 
