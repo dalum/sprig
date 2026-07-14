@@ -36,6 +36,7 @@
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-interrupt-owned "sprig" ())
+(declare-function sprig--mode-line-permission "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -470,6 +471,9 @@ added on top as they land.")
 Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   :group 'sprig
   (setq-local revert-buffer-function #'ignore)
+  ;; Surface the session's Claude permission mode (plan, auto, ...) in the
+  ;; mode line; nil for an offline file review, which owns no session.
+  (setq-local mode-line-process '(:eval (sprig--mode-line-permission)))
   ;; Prose wraps on word boundaries; tool headings are pre-truncated to one
   ;; line (see `sprig-review-heading-max-width'), so wrapping suits the body.
   (setq-local truncate-lines nil)

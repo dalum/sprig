@@ -92,6 +92,29 @@ for a remote session, is interpreted on the SSH host."
   "Extra arguments appended to the `claude' command line."
   :type '(repeat string))
 
+(defcustom sprig-supported-dialog-kinds '("ask_user_question" "exit_plan_mode")
+  "Dialog kinds sprig tells the CLI it can answer, via the `initialize'
+handshake.  Declaring a kind is what makes the CLI enable the tool behind
+it in headless stream-json mode: `ask_user_question' turns on the
+AskUserQuestion tool, `exit_plan_mode' the ExitPlanMode tool (in plan
+mode).  A kind sprig cannot actually render should not be listed; the CLI
+falls back to the tool's no-dialog behaviour for any kind it is not told
+about.  nil disables the handshake, matching the classic behaviour where
+neither tool is offered."
+  :type '(repeat string))
+
+(defcustom sprig-permission-function #'sprig-permission-prompt
+  "Function consulted when the CLI asks to run a tool (`can_use_tool').
+Called with the tool name (a string) and its input (an alist); returns
+non-nil to allow the call, nil to deny it.  The default prompts in the
+minibuffer.  Set it to `always' to auto-approve everything the CLI would
+otherwise gate.
+
+This function only runs for tools the CLI's own permission configuration
+does not already allow; adding `--permission-prompt-tool stdio' routes
+those escalations to sprig instead of the headless auto-deny."
+  :type 'function)
+
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
 When a session exits abnormally, its command, exit status, and captured
@@ -177,7 +200,14 @@ records the session's directory here for `sprig--directory'.")
          "--input-format" "stream-json"
          "--output-format" "stream-json"
          "--include-partial-messages"
-         "--verbose")           ; tools follow the CLI's own permission config
+         "--verbose"
+         ;; Route the CLI's interactive control requests (permission
+         ;; prompts, tool-driven dialogs) to us over stdio, rather than
+         ;; letting them auto-deny in headless mode.  This is also what
+         ;; makes the CLI enable AskUserQuestion, alongside the
+         ;; `initialize' handshake's `supportedDialogKinds' (see
+         ;; `sprig--send-initialize').
+         "--permission-prompt-tool" "stdio")
    (when sprig-model (list "--model" sprig-model))
    (when sprig-system-prompt
      (list "--append-system-prompt" sprig-system-prompt))
@@ -228,6 +258,7 @@ A local session's working directory is set by `sprig--spawn' binding
 ;;   (tool-result ID ERR TEXT) a tool result (ERR non-nil means error)
 ;;   (done COST ERR)           the turn finished
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
+;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (error MESSAGE)           a backend error to surface inline
 
 (defun sprig--filter (proc chunk)
@@ -338,6 +369,22 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ((equal .type "user")
           (sprig--claude-tool-results
            (and (listp .message) (alist-get 'content .message))))
+         ;; The CLI asks us to answer an interactive control request: a
+         ;; tool wants permission (`can_use_tool'), or a tool-driven
+         ;; dialog needs rendering (`request_user_dialog').  Surface it
+         ;; for the sink to answer via `sprig--answer-control-request'.
+         ;; Re-read the request with JSON-faithful array/false/null objects,
+         ;; so a value we echo back (AskUserQuestion's `questions') survives
+         ;; the round trip: arrays as JSON arrays (the codebase-wide list
+         ;; arrays would serialise as objects) and `false' as `false' (the
+         ;; codebase-wide nil would serialise as `null' and fail the tool's
+         ;; boolean schema).
+         ((and (equal .type "control_request") .request_id (listp .request))
+          (list (list 'control-request .request_id
+                      (alist-get 'request
+                                 (json-parse-string
+                                  line :object-type 'alist :array-type 'array
+                                  :null-object :null :false-object :false)))))
          ;; Turn complete.
          ((equal .type "result")
           (list (list 'done .total_cost_usd .is_error)))
@@ -475,7 +522,11 @@ Markdown transcript and a session-owning review buffer share it."
                 :sentinel #'sprig--sentinel)))
     (process-put proc :conv-buffer (current-buffer))
     (process-put proc :stderr-proc stderr)
-    (setq sprig--process proc)))
+    (setq sprig--process proc)
+    ;; Announce our capabilities before any user turn, so the CLI enables
+    ;; the interactive tools it would otherwise withhold in headless mode.
+    (sprig--send-initialize)
+    proc))
 
 (defun sprig--ensure ()
   "Ensure a live session, connecting if needed."
@@ -515,6 +566,114 @@ The stream-json input channel accepts these beside user messages; a
   "Ask the session to switch to permission MODE (e.g. \"plan\", \"auto\")."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
+
+(defun sprig--send-initialize ()
+  "Announce sprig's client capabilities to the freshly spawned session.
+Declaring `sprig-supported-dialog-kinds' is what makes the CLI enable the
+interactive tools (AskUserQuestion, ExitPlanMode); without it they are
+withheld in headless stream-json mode.  Sent once, before the first user
+message, and harmless on a resumed session (the CLI just re-acks it)."
+  (when sprig-supported-dialog-kinds
+    (sprig--send-control
+     (list :subtype "initialize"
+           :supportedDialogKinds (vconcat sprig-supported-dialog-kinds)))))
+
+(defun sprig--send-control-response (request-id response)
+  "Answer the CLI's control_request REQUEST-ID with RESPONSE (a plist).
+RESPONSE is the decision payload (e.g. (:behavior \"allow\")); it is
+wrapped in the success envelope the CLI expects."
+  (let ((json (json-serialize
+               (list :type "control_response"
+                     :response (list :subtype "success"
+                                     :request_id request-id
+                                     :response response)))))
+    (process-send-string sprig--process (concat json "\n"))))
+
+(defun sprig-permission-prompt (tool-name input)
+  "Default `sprig-permission-function': ask in the minibuffer.
+TOOL-NAME is the tool the CLI wants to run and INPUT its arguments alist."
+  (let ((cmd (or (alist-get 'command input)
+                 (alist-get 'file_path input)
+                 (alist-get 'path input))))
+    (y-or-n-p (format "sprig: allow %s%s? "
+                      tool-name
+                      (if cmd (format " (%s)"
+                                      (truncate-string-to-width cmd 60 nil nil "…"))
+                        "")))))
+
+(defun sprig--answer-control-request (request-id req)
+  "Answer the CLI control_request REQUEST-ID described by REQ (an alist).
+AskUserQuestion is rendered for a choice; other permission requests
+consult `sprig-permission-function'; tool-driven dialogs and anything
+unrecognised are cancelled so the turn keeps moving rather than parking
+on a prompt sprig cannot yet render.  A quit (\\`C-g') at any prompt is
+caught and answered safely, so the session never hangs on an unanswered
+request."
+  (let-alist req
+    (condition-case nil
+        (cond
+         ((and (equal .subtype "can_use_tool")
+               (equal .tool_name "AskUserQuestion"))
+          (sprig--answer-user-question request-id .input))
+         ((equal .subtype "can_use_tool")
+          (sprig--send-control-response
+           request-id
+           (if (funcall sprig-permission-function .tool_name .input)
+               ;; Omit `updatedInput': absent means "run the call
+               ;; unchanged", avoiding a lossy JSON round-trip of the input.
+               (list :behavior "allow")
+             (list :behavior "deny" :message "Denied in sprig"))))
+         ;; Rendering other tool-driven dialogs (e.g. ExitPlanMode) in the
+         ;; review buffer is future work; cancel so the CLI applies each
+         ;; dialog's default behaviour.
+         (t (sprig--send-control-response request-id (list :behavior "cancelled"))))
+      ;; Answer conservatively on quit: deny a permission, cancel a dialog.
+      (quit (sprig--send-control-response
+             request-id
+             (if (equal .subtype "can_use_tool")
+                 (list :behavior "allow") ; AskUserQuestion skip / no answer
+               (list :behavior "cancelled")))))))
+
+(defun sprig--answer-user-question (request-id input)
+  "Render the AskUserQuestion INPUT, collect answers, reply to REQUEST-ID.
+INPUT is the tool input alist carrying a `questions' list.  The chosen
+answers ride back as `updatedInput' (the input plus an `answers' map keyed
+by question text), which is how the CLI feeds them to the tool; an empty
+answer set replays as the tool's own \"skipped\" outcome."
+  (let ((answers (sprig--read-question-answers (alist-get 'questions input))))
+    (sprig--send-control-response
+     request-id
+     (if answers
+         (list :behavior "allow"
+               :updatedInput (append input (list (cons 'answers answers))))
+       (list :behavior "allow")))))
+
+(defun sprig--read-question-answers (questions)
+  "Prompt for each of QUESTIONS; return an answers alist (question -> answer).
+Each answer is the chosen option label (multi-select answers are joined
+with commas, matching the CLI); a question left blank is dropped.  Free
+text is accepted, mirroring the tool's own free-text box."
+  (delq nil
+        (mapcar
+         (lambda (q)
+           (let-alist q
+             (let* ((labels (mapcar (lambda (o) (alist-get 'label o)) .options))
+                    (prompt (format "%s " .question))
+                    (ans (if (eq .multiSelect t)
+                             (string-join
+                              (completing-read-multiple prompt labels) ", ")
+                           (completing-read prompt labels))))
+               (unless (string-empty-p ans)
+                 (cons (intern .question) ans)))))
+         questions)))
+
+(defun sprig--mode-line-permission ()
+  "Mode-line tag for this session's permission mode, or nil when unknown.
+Surfaces plan / acceptEdits / auto and friends so the active Claude mode
+is visible without opening the header."
+  (when sprig--permission-mode
+    (propertize (format " [%s]" sprig--permission-mode)
+                'help-echo "Claude permission mode")))
 
 ;;;; Review buffer
 ;;
@@ -588,9 +747,13 @@ model via `sprig-review-consume'."
   (pcase event
     (`(session ,id) (when (and id (not sprig--session-id))
                       (setq sprig--session-id id)))
-    (`(mode ,m) (setq sprig--permission-mode m))
+    (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
+    (`(control-request ,id ,req) (sprig--answer-control-request id req))
     (`(done ,_ ,_) (setq sprig--busy nil) (sprig--status-refresh)))
-  (sprig-review-consume event))
+  ;; A control-request is transport, not conversation: it carries no
+  ;; renderable content, so it is answered above and not consumed.
+  (unless (eq (car-safe event) 'control-request)
+    (sprig-review-consume event)))
 
 (defun sprig--read-review-dir ()
   "Prompt for a session working directory, returning the string.

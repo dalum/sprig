@@ -130,6 +130,23 @@
     (should-not (sprig--claude-parse-line
                  (json-serialize (list :type "user" :message "hi"))))))
 
+(ert-deftest sprig-test-parse-control-request ()
+  ;; An inbound control_request (a tool wants permission) parses to a
+  ;; `control-request' event carrying the request id and the request alist.
+  (with-temp-buffer
+    (let* ((line (json-serialize
+                  (list :type "control_request" :request_id "req-7"
+                        :request (list :subtype "can_use_tool"
+                                       :tool_name "Bash"
+                                       :input (list :command "ls")))))
+           (events (sprig--claude-parse-line line)))
+      (pcase events
+        (`((control-request ,id ,req))
+         (should (equal id "req-7"))
+         (should (equal (alist-get 'subtype req) "can_use_tool"))
+         (should (equal (alist-get 'tool_name req) "Bash")))
+        (_ (ert-fail (format "unexpected events: %S" events)))))))
+
 ;;;; Command construction
 
 (ert-deftest sprig-test-base-args ()
@@ -145,7 +162,11 @@
         (should (member "be brief" args))
         (should (member "--resume" args))
         (should (member "sess-1" args))
-        (should (member "--foo" args))))
+        (should (member "--foo" args))
+        ;; Routes the CLI's interactive control requests to us over stdio,
+        ;; which is what enables permission prompts and AskUserQuestion.
+        (should (member "--permission-prompt-tool" args))
+        (should (member "stdio" args))))
     (let ((sprig-model nil) (sprig-system-prompt nil)
           (sprig-extra-args nil) (sprig--session-id nil))
       (let ((args (sprig--base-args)))
@@ -448,6 +469,142 @@
         (should (equal (alist-get 'subtype request) "set_permission_mode"))
         (should (equal (alist-get 'mode request) "plan")))
       (should (equal sprig--permission-mode "plan")))))
+
+(ert-deftest sprig-test-initialize-wire-format ()
+  ;; The initialize handshake declares the dialog kinds as a JSON array,
+  ;; which is what makes the CLI enable AskUserQuestion / ExitPlanMode.
+  (with-temp-buffer
+    (let ((sprig-supported-dialog-kinds '("ask_user_question" "exit_plan_mode"))
+          sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--send-initialize))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist
+                                     :array-type 'list))
+             (request (alist-get 'request obj)))
+        (should (equal (alist-get 'subtype request) "initialize"))
+        (should (equal (alist-get 'supportedDialogKinds request)
+                       '("ask_user_question" "exit_plan_mode")))))))
+
+(ert-deftest sprig-test-initialize-skipped-when-no-kinds ()
+  (with-temp-buffer
+    (let ((sprig-supported-dialog-kinds nil) (sent nil))
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--send-initialize))
+      (should-not sent))))
+
+(ert-deftest sprig-test-answer-permission-allow ()
+  ;; An allowed can_use_tool replies with the success/allow envelope and,
+  ;; deliberately, no updatedInput (absent means "run the call unchanged").
+  (with-temp-buffer
+    (let ((sprig-permission-function (lambda (&rest _) t)) sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--answer-control-request
+         "req-7" '((subtype . "can_use_tool") (tool_name . "Bash")
+                   (input (command . "ls")))))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (resp (alist-get 'response obj))
+             (decision (alist-get 'response resp)))
+        (should (equal (alist-get 'type obj) "control_response"))
+        (should (equal (alist-get 'subtype resp) "success"))
+        (should (equal (alist-get 'request_id resp) "req-7"))
+        (should (equal (alist-get 'behavior decision) "allow"))
+        (should-not (alist-get 'updatedInput decision))))))
+
+(ert-deftest sprig-test-answer-permission-deny ()
+  (with-temp-buffer
+    (let ((sprig-permission-function #'ignore) sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--answer-control-request
+         "req-8" '((subtype . "can_use_tool") (tool_name . "Bash"))))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (decision (alist-get 'response (alist-get 'response obj))))
+        (should (equal (alist-get 'behavior decision) "deny"))
+        (should (stringp (alist-get 'message decision)))))))
+
+(ert-deftest sprig-test-answer-dialog-cancelled ()
+  ;; A tool-driven dialog sprig cannot yet render is cancelled, so the CLI
+  ;; falls back to the dialog's default rather than parking the turn.
+  (with-temp-buffer
+    (let (sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--answer-control-request
+         "req-9" '((subtype . "request_user_dialog")
+                   (dialog_kind . "ask_user_question"))))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (decision (alist-get 'response (alist-get 'response obj))))
+        (should (equal (alist-get 'behavior decision) "cancelled"))))))
+
+(defun sprig-tests--ask-question-line ()
+  "A control_request line carrying a single AskUserQuestion question."
+  (json-serialize
+   (list :type "control_request" :request_id "req-q"
+         :request
+         (list :subtype "can_use_tool" :tool_name "AskUserQuestion"
+               :input (list :questions
+                            (vector (list :question "Favourite colour?"
+                                          :header "Colour"
+                                          :multiSelect :false
+                                          :options (vector (list :label "Red")
+                                                           (list :label "Blue")))))))))
+
+(defun sprig-tests--answer-question (completing)
+  "Run the answer path over a stubbed COMPLETING read; return the reply string."
+  (let ((event (car (sprig--claude-parse-line (sprig-tests--ask-question-line))))
+        sent)
+    (cl-letf (((symbol-function 'process-send-string)
+               (lambda (_proc s) (setq sent s)))
+              ((symbol-function 'completing-read) completing))
+      (setq sprig--process 'dummy)
+      (pcase event
+        (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+    sent))
+
+(ert-deftest sprig-test-answer-user-question ()
+  ;; AskUserQuestion is rendered for a choice; the picked label rides back
+  ;; as updatedInput.answers, keyed by question text, alongside the echoed
+  ;; questions (the CLI replaces the whole input with updatedInput, and the
+  ;; questions array must survive the round trip as a JSON array).
+  (with-temp-buffer
+    (let ((sent (sprig-tests--answer-question (lambda (&rest _) "Red"))))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (decision (alist-get 'response (alist-get 'response obj)))
+             (upd (alist-get 'updatedInput decision))
+             (answers (alist-get 'answers upd)))
+        (should (equal (alist-get 'behavior decision) "allow"))
+        (should (vectorp (alist-get 'questions upd))) ; echoed as an array
+        ;; `false' must round-trip as JSON false, not null: the tool's
+        ;; boolean schema rejects null (caught only end-to-end otherwise).
+        (should (eq (alist-get 'multiSelect (aref (alist-get 'questions upd) 0))
+                    :false))
+        (should (equal (symbol-name (caar answers)) "Favourite colour?"))
+        (should (equal (cdar answers) "Red"))))))
+
+(ert-deftest sprig-test-answer-user-question-skip ()
+  ;; A blank answer means "skipped": plain allow, no updatedInput, which
+  ;; replays as the tool's own no-answer outcome.
+  (with-temp-buffer
+    (let ((sent (sprig-tests--answer-question (lambda (&rest _) ""))))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (decision (alist-get 'response (alist-get 'response obj))))
+        (should (equal (alist-get 'behavior decision) "allow"))
+        (should-not (alist-get 'updatedInput decision))))))
+
+(ert-deftest sprig-test-mode-line-permission ()
+  (with-temp-buffer
+    (let ((sprig--permission-mode nil))
+      (should-not (sprig--mode-line-permission)))
+    (let ((sprig--permission-mode "plan"))
+      (should (string-match-p "plan" (sprig--mode-line-permission))))))
 
 ;;;; Navigator: enumerating stored CLI sessions as branches (option A)
 

@@ -6,7 +6,7 @@ Sprig is an Emacs interface for **reviewing and steering** an LLM agent's work, 
 
 **The store is the CLI's own log.** A conversation *is* a `claude` session. The CLI already persists each session as a JSONL log under `~/.claude/projects/<cwd>/<id>.jsonl` on the host where it runs, so Sprig keeps no store of its own: history is replayed from that log, and it survives an Emacs restart because the session id names the file. The transport is a persistent **Claude Code session**, local or over **SSH**, via the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed).
 
-The agent runs with its normal tools, governed by the `claude` CLI's own permission configuration, so it can read, run, and edit as far as your CLI setup allows.
+The agent runs with its normal tools. Sprig answers the CLI's interactive control requests over the same stream: when a tool needs approval that the CLI's own permission configuration does not already grant, Sprig prompts you (rather than the headless auto-deny), and it enables the interactive tools that stay dark otherwise, so `AskUserQuestion` renders as a choice and plan-mode approval works. Set `sprig-permission-function` to `always` to approve every escalation automatically and keep to pure after-the-fact review.
 
 ## How it works
 
@@ -128,7 +128,9 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `a` | Accept: clear the marks (sends nothing, commits nothing) |
 | `c` | Transient: `c c` compose & send, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt |
 
-`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent returns a plan rather than acting), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one.
+`c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent returns a plan rather than acting), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
+
+When the agent calls `AskUserQuestion` mid-turn, Sprig renders the question and its options and reads your pick in the minibuffer (multiple questions are asked in turn; blank skips one); the choice rides back to the agent and the exchange shows inline as tool activity. A tool that needs approval prompts the same way.
 
 ## Options
 
@@ -142,6 +144,8 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `sprig-ssh-program` | `"ssh"` | SSH client program |
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
+| `sprig-supported-dialog-kinds` | `("ask_user_question" "exit_plan_mode")` | Dialog kinds Sprig tells the CLI it can answer; declaring a kind is what enables the tool behind it (nil disables both) |
+| `sprig-permission-function` | `sprig-permission-prompt` | Called with a tool name and input when the CLI asks to run a tool; non-nil allows, nil denies. Set to `always` to auto-approve |
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 | `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `L` lifts it live) |
 | `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
