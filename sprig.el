@@ -668,13 +668,12 @@ The review buffer is the only conversation surface."
   "Name of the buffer showing the `sprig-status' navigator.")
 
 (defconst sprig--status-preview-bytes 65536
-  "Trailing bytes of a session log read from its tail, for two callers.
-A row's scan reads this much to recover its `cwd' and freshest `aiTitle';
-a `TAB' preview reads the same tail for the last reply.  The `cwd' sits at
-the very end, but the CLI rewrites `aiTitle' only every turn or so, so the
-freshest one can be tens of kilobytes back: a smaller window would drop it
-and leave the row untitled.  Local and remote scans use the one window, so
-a row reads the same whichever host it lives on.")
+  "Bytes of a session log read from one end, for two callers.
+A row's scan reads this much from the head to recover its `cwd' and title,
+which both sit near the top; a `TAB' preview reads this much from the tail
+for the last reply, which lives at the end.  Local and remote read the
+same amount, so a row behaves the same whichever host it lives on, and
+either read is bounded however large the session grows.")
 
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
@@ -731,22 +730,44 @@ One of `streaming', `idle', or `disconnected'."
 otherwise `sprig-status-max-sessions' bounds the newest-first scan."
   (and (not sprig--status-show-all) sprig-status-max-sessions))
 
-(defun sprig--tail-cwd (text)
+(defun sprig--log-cwd (text)
   "Return the working directory recorded in session-log TEXT, or nil.
-Every CLI record carries the session's `cwd', so the log tail holds it."
+Every CLI record carries the session's `cwd', so any slice of the log
+holds it; the scan reads the head, where the first record already has it."
   (and (string-match "\"cwd\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text)
        (ignore-errors (json-parse-string (match-string 1 text)))))
 
-(defun sprig--tail-title (text)
-  "Return the freshest `aiTitle' recorded in session-log TEXT, or nil.
-The latest title record sits nearest the end, so the last match wins."
+(defun sprig--log-title (text)
+  "Return the `aiTitle' recorded in session-log TEXT, or nil.
+The CLI emits an `ai-title' record once, just after the opening turn, and
+re-emits the same string each turn thereafter, so the title sits near the
+head and the last match within TEXT wins whichever slice TEXT is."
   (let ((title nil) (pos 0))
     (while (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text pos)
       (setq title (match-string 1 text) pos (match-end 0)))
     (and title (ignore-errors (json-parse-string title)))))
 
+(defun sprig--session-log-head (file)
+  "Return the leading bytes of session-log FILE, local or remote, or nil.
+The scan reads the head, not the tail: a session's `cwd' is in its first
+record and the CLI writes its `ai-title' just after the opening turn, so
+both sit near the top however long the session later grows.  A tail would
+have to gamble on the title being re-emitted within the window near the
+end, which a large final record can push out."
+  (ignore-errors
+    (if sprig-remote
+        (sprig--remote-sh (format "head -c %d %s" sprig--status-preview-bytes
+                                  (sprig--remote-dir-arg file)))
+      (with-temp-buffer
+        (let ((size (file-attribute-size (file-attributes file))))
+          (insert-file-contents file nil 0 (min sprig--status-preview-bytes
+                                                 size)))
+        (buffer-string)))))
+
 (defun sprig--session-log-tail (file)
-  "Return the trailing bytes of session-log FILE, local or remote, or nil."
+  "Return the trailing bytes of session-log FILE, local or remote, or nil.
+Used for the last-reply preview, which genuinely lives at the end; the
+row scan reads the head instead (see `sprig--session-log-head')."
   (ignore-errors
     (if sprig-remote
         (sprig--remote-sh (format "tail -c %d %s" sprig--status-preview-bytes
@@ -757,13 +778,13 @@ The latest title record sits nearest the end, so the last match wins."
           (insert-file-contents file nil from size))
         (buffer-string)))))
 
-(defun sprig--log-plist (file mtime tail)
-  "Build a scan plist for log FILE with MTIME and its TAIL text.
-`:dir' is the session's own recorded `cwd', or nil when the tail carries
-none: the encoded log-directory name is not a real path (its separators
-are lossily flattened to dashes), so it is kept only as the display-only
+(defun sprig--log-plist (file mtime head)
+  "Build a scan plist for log FILE with MTIME and its HEAD text.
+`:dir' is the session's own recorded `cwd', or nil when HEAD carries none:
+the encoded log-directory name is not a real path (its separators are
+lossily flattened to dashes), so it is kept only as the display-only
 `:project' and never handed to a `cd'."
-  (let ((cwd (and tail (sprig--tail-cwd tail))))
+  (let ((cwd (and head (sprig--log-cwd head))))
     (list :session (file-name-base file)
           :file file
           :dir cwd
@@ -771,7 +792,7 @@ are lossily flattened to dashes), so it is kept only as the display-only
                        (file-name-nondirectory
                         (directory-file-name (file-name-directory file))))
           :mtime mtime
-          :title (or (and tail (sprig--tail-title tail)) "(untitled)"))))
+          :title (or (and head (sprig--log-title head)) "(untitled)"))))
 
 (defun sprig--scan-session-logs ()
   "Return session plists for the newest stored logs on the session host.
@@ -799,13 +820,13 @@ sessions still paints fast."
     (when limit (setq dated (seq-take dated limit)))
     (mapcar (lambda (cell)
               (sprig--log-plist (cdr cell) (car cell)
-                                (sprig--session-log-tail (cdr cell))))
+                                (sprig--session-log-head (cdr cell))))
             dated)))
 
 (defun sprig--scan-session-logs-remote (limit)
   "Scan the LIMIT newest remote logs under `sprig-claude-projects-directory'.
 Two SSH round trips whatever LIMIT is: one lists the newest logs by mtime,
-one slurps their tails; the cwds and titles are parsed here."
+one slurps their heads; the cwds and titles are parsed here."
   (let* ((root (sprig--remote-dir-arg
                 (directory-file-name sprig-claude-projects-directory)))
          (listing (ignore-errors
@@ -823,23 +844,23 @@ one slurps their tails; the cwds and titles are parsed here."
     (when dated
       (let* ((paths (mapcar #'cdr dated))
              (blob (ignore-errors
-                     (sprig--remote-sh (sprig--remote-tails-command paths))))
-             (tails (sprig--parse-tails-blob blob)))
+                     (sprig--remote-sh (sprig--remote-heads-command paths))))
+             (heads (sprig--parse-scan-blob blob)))
         (mapcar (lambda (cell)
                   (sprig--log-plist (cdr cell) (car cell)
-                                    (gethash (cdr cell) tails)))
+                                    (gethash (cdr cell) heads)))
                 dated)))))
 
-(defun sprig--remote-tails-command (paths)
-  "Shell command printing the log tail of each of PATHS, record-separated.
-Each file is emitted as RS, its path, US, then its trailing bytes, so the
-whole set returns in one SSH round trip for `sprig--parse-tails-blob'."
+(defun sprig--remote-heads-command (paths)
+  "Shell command printing the log head of each of PATHS, record-separated.
+Each file is emitted as RS, its path, US, then its leading bytes, so the
+whole set returns in one SSH round trip for `sprig--parse-scan-blob'."
   (concat "for f in " (mapconcat #'shell-quote-argument paths " ")
-          (format "; do printf '\\036%%s\\037' \"$f\"; tail -c %d \"$f\"; done"
+          (format "; do printf '\\036%%s\\037' \"$f\"; head -c %d \"$f\"; done"
                   sprig--status-preview-bytes)))
 
-(defun sprig--parse-tails-blob (blob)
-  "Parse BLOB from `sprig--remote-tails-command' into a path->tail hash table."
+(defun sprig--parse-scan-blob (blob)
+  "Parse BLOB from `sprig--remote-heads-command' into a path->head hash table."
   (let ((map (make-hash-table :test 'equal)))
     (dolist (chunk (and blob (split-string blob "\036" t)))
       (let ((us (string-search "\037" chunk)))

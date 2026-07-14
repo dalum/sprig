@@ -515,6 +515,29 @@ Return the log directory."
             (should (equal (plist-get row :title) "No cwd here"))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-scan-reads-head-not-tail ()
+  ;; The CLI writes the title just after the opening turn, so it sits near
+  ;; the top. A later record larger than the read window must not hide it:
+  ;; the scan reads the head, not the tail, so a huge trailing record (no
+  ;; title of its own) leaves the row's title intact.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/big")
+         (filler (make-string (* 128 1024) ?x))
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-big"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Early title")
+           `(:type "assistant" :cwd ,proj
+             :message (:role "assistant" :content ,filler)))
+          (let ((row (car (sprig--scan-session-logs))))
+            (should (equal (plist-get row :dir) proj))
+            (should (equal (plist-get row :title) "Early title"))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-scan-session-logs-remote ()
   ;; Two round trips: a mtime-sorted find, then one batched slurp of tails.
   ;; The find output pairs each mtime with a path; the tails come back
