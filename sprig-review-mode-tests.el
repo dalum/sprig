@@ -51,7 +51,7 @@ the tests that reach into a hunk section need them drawn."
   (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (let ((s (buffer-string)))
       (should (string-match-p "Editing the file\\." s))
-      (should (string-match-p "🔧 Edit" s))
+      (should (string-match-p "^Edit  " s))
       (should (string-match-p "/tmp/x\\.el" s))
       ;; The diff header shows the +/- counts.
       (should (string-match-p "(\\+1 -2)" s))
@@ -74,12 +74,12 @@ the tests that reach into a hunk section need them drawn."
   (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
     (let ((s (buffer-string)))
       ;; The heading still names the file and its line counts.
-      (should (string-match-p "🔧 Edit" s))
+      (should (string-match-p "^Edit  " s))
       (should (string-match-p "(\\+1 -2)" s))
       ;; The hunks themselves are not drawn.
       (should-not (string-match-p "^\\+new$" s)))
     (goto-char (point-min))
-    (re-search-forward "🔧 Edit")
+    (re-search-forward "^Edit  ")
     (should (oref (magit-current-section) hidden))
     (magit-section-show (magit-current-section))
     (should (string-match-p "^\\+new$" (buffer-string)))))
@@ -89,14 +89,14 @@ the tests that reach into a hunk section need them drawn."
   ;; open; a tool with no diff folds regardless.
   (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
-    (re-search-forward "🔧 Edit")
+    (re-search-forward "^Edit  ")
     (should-not (oref (magit-current-section) hidden)))
   (let ((model (sprig-review-build
                 `((tool-call "b1" "Bash" ,(json-serialize (list :command "ls")))
                   (tool-result "b1" nil "out")))))
     (sprig-review-tests--rendered-expanded model nil
       (goto-char (point-min))
-      (re-search-forward "🔧 Bash")
+      (re-search-forward "^Bash  ")
       (should (oref (magit-current-section) hidden)))))
 
 (ert-deftest sprig-review-mode-test-faces-survive-font-lock ()
@@ -112,7 +112,7 @@ the tests that reach into a hunk section need them drawn."
                 (goto-char (point-min))
                 (re-search-forward re)
                 (get-text-property (match-beginning 0) 'font-lock-face)))
-      (should (eq (face-at "🔧 Edit") 'sprig-review-tool))
+      (should (eq (face-at "^Edit  ") 'sprig-review-tool))
       (should (eq (face-at "^\\+new$") 'sprig-review-added))
       (should (eq (face-at "^-old$") 'sprig-review-removed))
       (should (eq (face-at "^/tmp/x\\.el$") 'sprig-review-file))
@@ -135,6 +135,30 @@ the tests that reach into a hunk section need them drawn."
                         (ensure-list (get-text-property (match-beginning 0)
                                                         'font-lock-face)))))))
 
+(ert-deftest sprig-review-mode-test-user-highlight-is-its-own ()
+  ;; magit paints the section under point with the shared
+  ;; `magit-section-highlight', which would drop a user turn's tint just as
+  ;; you move onto it.  Naming our own `heading-highlight-face' keeps it
+  ;; reading as yours while it is current.
+  (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (re-search-forward "the question")
+      (let ((sec (magit-current-section)))
+        (should (eq (oref sec type) 'sprig-user))
+        (should (eq (oref sec heading-highlight-face) 'sprig-review-user-highlight))
+        ;; With no heading to confine it to, magit paints it over the turn.
+        (magit-section-highlight sec)
+        (should (memq 'sprig-review-user-highlight
+                      (mapcar (lambda (o) (overlay-get o 'font-lock-face))
+                              (overlays-at (oref sec start))))))
+      ;; The agent's prose claims no face of its own, so it gets magit's.
+      (goto-char (point-min))
+      (re-search-forward "the answer")
+      (let ((sec (magit-current-section)))
+        (should (eq (oref sec type) 'sprig-text))
+        (should-not (oref sec heading-highlight-face))))))
+
 (ert-deftest sprig-review-mode-test-only-prose-is-padded ()
   ;; Prose gets a blank line above it; tool rows pack tightly, so a turn's
   ;; tool calls read as one list rather than as a spread-out ladder.
@@ -147,13 +171,13 @@ the tests that reach into a hunk section need them drawn."
     (sprig-review-tests--rendered model nil
       (let ((s (buffer-string)))
         ;; The two tool rows sit on consecutive lines, with no blank between.
-        (should (string-match-p "🔧 Read  a\n🔧 Read  b" s))
+        (should (string-match-p "^Read  a\nRead  b" s))
         ;; Prose above them keeps its own blank line.
         (should (string-match-p "\nthe question\\|\ndo it" s))
         (should (string-match-p "\n\non it" s))
         (should (string-match-p "\n\ndone" s))
         ;; And a tool row does not gain one.
-        (should-not (string-match-p "\n\n🔧" s))))))
+        (should-not (string-match-p "\n\nRead" s))))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)
@@ -190,7 +214,7 @@ the tests that reach into a hunk section need them drawn."
 (ert-deftest sprig-review-mode-test-tool-section-carries-block ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
-    (should (re-search-forward "🔧 Edit" nil t))
+    (should (re-search-forward "^Edit  " nil t))
     (let ((sec (magit-current-section)))
       (should (eq (oref sec type) 'sprig-tool))
       (should (equal (plist-get (oref sec value) :name) "Edit")))))
@@ -206,10 +230,10 @@ the tests that reach into a hunk section need them drawn."
                   (tool-result "b1" nil "output")))))
     (sprig-review-tests--rendered model nil
       (let ((s (buffer-string)))
-        (should (string-match-p "🔧 Bash" s))
+        (should (string-match-p "^Bash  " s))
         ;; Only the first command line is summarised in the heading.
         (should (string-match-p "ls -la" s))
-        (should-not (string-match-p "🔧 Bash.*second" s))))))
+        (should-not (string-match-p "^Bash  .*second" s))))))
 
 ;;;; Live sink
 
@@ -222,7 +246,7 @@ the tests that reach into a hunk section need them drawn."
     (sprig-review-flush)
     ;; Text accumulates; no tool yet.
     (should (string-match-p "Hello" (buffer-string)))
-    (should-not (string-match-p "🔧" (buffer-string)))
+    (should-not (string-match-p "^Edit  " (buffer-string)))
     (let ((input (json-serialize (list :file_path "x" :old_string "a"
                                        :new_string "b"))))
       (sprig-review-consume (list 'tool-call "t1" "Edit" input))
@@ -231,7 +255,7 @@ the tests that reach into a hunk section need them drawn."
     (sprig-review-flush)
     (let ((s (buffer-string)))
       (should (string-match-p "Hello" s))
-      (should (string-match-p "🔧 Edit" s))
+      (should (string-match-p "^Edit  " s))
       ;; The tool folds by default, so neither its diff nor its result is drawn.
       (should-not (string-match-p "↳ result" s))
       (should-not (string-match-p "ok" s))
@@ -268,7 +292,7 @@ the tests that reach into a hunk section need them drawn."
     ;; The tool folds by default; unfold it like a user would, to reach the
     ;; result section nested inside it, which folds by default too.
     (goto-char (point-min))
-    (should (re-search-forward "🔧 Edit" nil t))
+    (should (re-search-forward "^Edit  " nil t))
     (should (oref (magit-current-section) hidden))
     (magit-section-show (magit-current-section))
     (goto-char (point-min))
@@ -475,7 +499,7 @@ the tests that reach into a hunk section need them drawn."
                   (tool-result "b1" nil "ok")))))
     (sprig-review-tests--rendered model nil
       (goto-char (point-min))
-      (re-search-forward "🔧 Bash")
+      (re-search-forward "^Bash  ")
       (let (sent)
         (cl-letf (((symbol-function 'sprig-review--send)
                    (lambda (text) (setq sent text))))
@@ -530,7 +554,7 @@ the tests that reach into a hunk section need them drawn."
                   (tool-result "b1" nil "out")))))
     (sprig-review-tests--rendered model nil
       (goto-char (point-min))
-      (re-search-forward "🔧 Bash")
+      (re-search-forward "^Bash  ")
       (should (null (sprig-review--section-file (magit-current-section)))))))
 
 (ert-deftest sprig-review-mode-test-set-title ()

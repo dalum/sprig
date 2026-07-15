@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.3
+;; Version: 0.5.4
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -69,6 +69,16 @@ This is the only thing telling a user turn from the agent's output, so it
 carries no label; tinted is you, untinted is the agent.  Applied beneath
 any markdown faces, so the prose keeps its own styling on top.  `:extend'
 runs the tint to the window edge."
+  :group 'sprig)
+
+(defface sprig-review-user-highlight
+  '((((class color) (background light)) :background "#ccd8f0" :extend t)
+    (((class color) (background dark))  :background "#3c465e" :extend t)
+    (t :inherit magit-section-highlight :extend t))
+  "Face for the user turn under point.
+A stronger take on `sprig-review-user', rather than the shared
+`magit-section-highlight' every other section gets, so the turn under
+point still reads as yours instead of losing its tint to the cursor."
   :group 'sprig)
 
 (defface sprig-review-thinking '((t :inherit shadow :slant italic))
@@ -211,7 +221,7 @@ header instead pass their changes in, so this is only reached without one."
          (summary (sprig-review--input-summary name (plist-get block :input)))
          (err (plist-get (plist-get block :result) :error)))
     (concat
-     (sprig-review--face (concat "🔧 " name) 'sprig-review-tool)
+     (sprig-review--face name 'sprig-review-tool)
      (cond
       (changes
        (let ((c (car changes)))
@@ -326,8 +336,13 @@ display."
 (defun sprig-review--insert-user (block)
   "Insert a user-turn BLOCK as prose carrying the `sprig-review-user' tint.
 The tint is what tells your turn from the agent's output, so the block
-needs no label, and no heading beyond its own first line."
-  (magit-insert-section (sprig-user block)
+needs no label, and no heading beyond its own first line.
+`heading-highlight-face' is what magit paints over the section under
+point; naming our own keeps the turn tinted there too.  With no heading
+to confine it to, magit paints it over the whole section, which is what
+we want."
+  (magit-insert-section (sprig-user block nil
+                         :heading-highlight-face 'sprig-review-user-highlight)
     (let ((beg (point)))
       (insert (sprig-review--fontify-markdown
                (sprig-review--text-body (plist-get block :text))))
