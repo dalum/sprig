@@ -159,25 +159,38 @@ the tests that reach into a hunk section need them drawn."
         (should (eq (oref sec type) 'sprig-text))
         (should-not (oref sec heading-highlight-face))))))
 
-(ert-deftest sprig-review-mode-test-only-prose-is-padded ()
-  ;; Prose gets a blank line above it; tool rows pack tightly, so a turn's
-  ;; tool calls read as one list rather than as a spread-out ladder.
+(ert-deftest sprig-review-mode-test-tool-rows-pack-into-a-block ()
+  ;; A run of tool calls reads as one block: a blank line above the run, and
+  ;; none between its rows.  Prose keeps its blank line on either side.
   (let ((model (sprig-review-build
                 `((user "do it")
                   (text "on it")
                   (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))
                   (tool-call "t2" "Read" ,(json-serialize (list :file_path "b")))
+                  (tool-call "t3" "Bash" ,(json-serialize (list :command "make")))
                   (text "done")))))
     (sprig-review-tests--rendered model nil
-      (let ((s (buffer-string)))
-        ;; The two tool rows sit on consecutive lines, with no blank between.
-        (should (string-match-p "^Read  a\nRead  b" s))
-        ;; Prose above them keeps its own blank line.
-        (should (string-match-p "\nthe question\\|\ndo it" s))
-        (should (string-match-p "\n\non it" s))
-        (should (string-match-p "\n\ndone" s))
-        ;; And a tool row does not gain one.
-        (should-not (string-match-p "\n\nRead" s))))))
+      (should (equal (buffer-string)
+                     (concat "\n"
+                             "do it\n"
+                             "\n"
+                             "on it\n"
+                             "\n"
+                             "Read  a\n"
+                             "Read  b\n"
+                             "Bash  make\n"
+                             "\n"
+                             "done\n"))))))
+
+(ert-deftest sprig-review-mode-test-thinking-packs-with-the-tool-rows ()
+  ;; A thinking block folds to a one-line row too, so it joins the run
+  ;; rather than breaking it in two.
+  (let ((model (sprig-review-build
+                `((text "on it")
+                  (thinking "pondering")
+                  (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))))))
+    (sprig-review-tests--rendered model nil
+      (should (equal (buffer-string) "\non it\n\nthinking\nRead  a\n")))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)

@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.4
+;; Version: 0.5.5
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -389,11 +389,10 @@ META may carry :title, :project, :model, and :status."
     (insert "\n")))
 
 (defun sprig-review--prose-block-p (block)
-  "Return non-nil when BLOCK reads as prose, and so wants a blank line above it.
-A tool call or a thinking block folds to a one-line row; those pack
-tightly together into a list of what the agent did, and separating them
-would only spread that list out.  Prose is what you actually read, so it
-gets the air."
+  "Return non-nil when BLOCK reads as prose rather than as a one-line row.
+A tool call or a thinking block folds to a single line, and a run of them
+reads as one list of what the agent did.  Prose is what you actually
+read.  `sprig-review-render' spaces the two apart on this."
   (memq (plist-get block :type) '(user text error)))
 
 ;;;; Rendering entry points
@@ -406,19 +405,25 @@ META is an optional plist of display metadata (see
   (let* ((inhibit-read-only t)
          (blocks (plist-get model :blocks))
          (last (car (last blocks)))
+         (prev nil)
          (first t))
     (setq sprig-review--tail nil)
     (erase-buffer)
     (magit-insert-section (sprig-review)
       (sprig-review--insert-headers model meta)
       (dolist (block blocks)
-        ;; Prose gets a blank line above it, so the turns read apart, while
-        ;; the tool rows stay packed.  It goes before the block rather than
-        ;; after, which would sit between the live text section's end and
-        ;; `sprig-review--tail'.
-        (when (and (not first) (sprig-review--prose-block-p block))
+        ;; A blank line at every boundary prose is on either side of, which
+        ;; is to say: around prose, and so above the first row of a run of
+        ;; tool calls, but never between two of those rows.  A turn's tool
+        ;; calls then sit as one block with air around it, rather than as a
+        ;; ladder down the buffer.  The line goes before the block rather
+        ;; than after, which would sit between the live text section's end
+        ;; and `sprig-review--tail'.
+        (when (and (not first)
+                   (or (sprig-review--prose-block-p block)
+                       (sprig-review--prose-block-p prev)))
           (insert "\n"))
-        (setq first nil)
+        (setq first nil prev block)
         (pcase (plist-get block :type)
           ('user     (sprig-review--insert-user block))
           ;; The live tail is the last block, when it is text, and only
