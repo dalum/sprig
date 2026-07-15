@@ -114,7 +114,9 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 The review buffer is a read-only, Magit-like view of one session. It replays the whole transcript from the CLI's session log (`~/.claude/projects/<cwd>/<id>.jsonl` on the session host, fetched over SSH for a remote session) and, once connected, streams the in-flight turn in live. The agent's file edits render inline as a foldable diff, reconstructed from the `Edit` / `MultiEdit` / `Write` tool calls. Move with `n` / `p`, fold with `TAB`.
 
-Every tool call folds to its one-line heading, so a long turn reads as a list of what the agent did rather than as pages of diff; `TAB` opens the change you want to review. Set `sprig-review-expand-diffs` to `t` to have diff-bearing tools render open instead. Your own turns are set off from the agent's output by a tinted background and a blank line, so the conversation reads as an exchange at a glance.
+Every tool call folds to its one-line heading, so a long turn reads as a list of what the agent did rather than as pages of diff; `TAB` opens the change you want to review. Set `sprig-review-expand-diffs` to `t` to have diff-bearing tools render open instead.
+
+Turns carry no role labels. Your own turns are tinted (`sprig-review-user`) and the agent's are not, which is the whole of the distinction, and only prose is padded with a blank line, so a turn's tool calls stay packed into one list.
 
 It is also the steering surface. Marking is the one selection primitive; a verb acts on the marked sections, or the section at point when nothing is marked. Every change-touching verb is an instruction sent to the agent (Sprig itself never runs git):
 
@@ -161,7 +163,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.5.2, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.5.3, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

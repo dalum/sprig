@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.2
+;; Version: 0.5.3
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -60,22 +60,15 @@
   "Face for a removed line in a reconstructed hunk."
   :group 'sprig)
 
-(defface sprig-review-role '((t :inherit font-lock-function-name-face :weight bold))
-  "Face for an assistant-turn label."
-  :group 'sprig)
-
 (defface sprig-review-user
   '((((class color) (background light)) :background "#eaeef8" :extend t)
     (((class color) (background dark))  :background "#2b3040" :extend t)
     (t :inherit region :extend t))
-  "Face for a user turn: the tint its label line and its prose carry.
-Applied beneath any markdown faces, so the turn reads as one block set
-off from the agent's output.  `:extend' runs the tint to the window edge."
-  :group 'sprig)
-
-(defface sprig-review-user-label
-  '((t :inherit (font-lock-constant-face sprig-review-user) :weight bold))
-  "Face for a user-turn label."
+  "Face for a user turn's prose: the tint that marks it as yours.
+This is the only thing telling a user turn from the agent's output, so it
+carries no label; tinted is you, untinted is the agent.  Applied beneath
+any markdown faces, so the prose keeps its own styling on top.  `:extend'
+runs the tint to the window edge."
   :group 'sprig)
 
 (defface sprig-review-thinking '((t :inherit shadow :slant italic))
@@ -311,13 +304,16 @@ so this matches what the in-place append path produces."
   (concat (string-trim-right text "[\n]+") "\n"))
 
 (defun sprig-review--insert-text (block &optional open)
-  "Insert an assistant text BLOCK under a foldable role label.
-When OPEN, this is the live streaming block: render its text raw (plus a
-trailing newline) and record the tail (`sprig-review--tail') just before
-that newline, so `sprig-review--append-streamed' and a later full refresh
-produce identical text.  A settled block is normalised for tidy display."
+  "Insert an assistant text BLOCK as bare prose.
+It carries no label: a user turn is the tinted one, so the agent's output
+is simply what is not tinted.  The section has no heading either, which
+costs it nothing but the ability to fold, and prose is what you came to
+read.  When OPEN, this is the live streaming block: render its text raw
+\(plus a trailing newline) and record the tail (`sprig-review--tail') just
+before that newline, so `sprig-review--append-streamed' and a later full
+refresh produce identical text.  A settled block is normalised for tidy
+display."
   (magit-insert-section (sprig-text block)
-    (magit-insert-heading (sprig-review--face "assistant" 'sprig-review-role))
     (if open
         ;; The live block renders raw so the fast in-place append path and a
         ;; later full rebuild agree; it gains markdown faces once it settles.
@@ -328,11 +324,10 @@ produce identical text.  A settled block is normalised for tidy display."
                (sprig-review--text-body (plist-get block :text)))))))
 
 (defun sprig-review--insert-user (block)
-  "Insert a user-turn BLOCK under a foldable role label.
-Label and body both carry the `sprig-review-user' tint, so what you said
-reads as a block rather than as one more line of the agent's output."
+  "Insert a user-turn BLOCK as prose carrying the `sprig-review-user' tint.
+The tint is what tells your turn from the agent's output, so the block
+needs no label, and no heading beyond its own first line."
   (magit-insert-section (sprig-user block)
-    (magit-insert-heading (sprig-review--face "user" 'sprig-review-user-label))
     (let ((beg (point)))
       (insert (sprig-review--fontify-markdown
                (sprig-review--text-body (plist-get block :text))))
@@ -378,6 +373,14 @@ META may carry :title, :project, :model, and :status."
       (when line (insert line)))
     (insert "\n")))
 
+(defun sprig-review--prose-block-p (block)
+  "Return non-nil when BLOCK reads as prose, and so wants a blank line above it.
+A tool call or a thinking block folds to a one-line row; those pack
+tightly together into a list of what the agent did, and separating them
+would only spread that list out.  Prose is what you actually read, so it
+gets the air."
+  (memq (plist-get block :type) '(user text error)))
+
 ;;;; Rendering entry points
 
 (defun sprig-review-render (model &optional meta)
@@ -394,10 +397,12 @@ META is an optional plist of display metadata (see
     (magit-insert-section (sprig-review)
       (sprig-review--insert-headers model meta)
       (dolist (block blocks)
-        ;; A blank line between blocks, so the turns read apart.  It goes
-        ;; before the block rather than after, which would sit between the
-        ;; live text section's end and `sprig-review--tail'.
-        (unless first (insert "\n"))
+        ;; Prose gets a blank line above it, so the turns read apart, while
+        ;; the tool rows stay packed.  It goes before the block rather than
+        ;; after, which would sit between the live text section's end and
+        ;; `sprig-review--tail'.
+        (when (and (not first) (sprig-review--prose-block-p block))
+          (insert "\n"))
         (setq first nil)
         (pcase (plist-get block :type)
           ('user     (sprig-review--insert-user block))

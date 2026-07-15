@@ -50,7 +50,6 @@ the tests that reach into a hunk section need them drawn."
 (ert-deftest sprig-review-mode-test-renders-text-and-diff ()
   (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (let ((s (buffer-string)))
-      (should (string-match-p "assistant" s))
       (should (string-match-p "Editing the file\\." s))
       (should (string-match-p "🔧 Edit" s))
       (should (string-match-p "/tmp/x\\.el" s))
@@ -113,7 +112,6 @@ the tests that reach into a hunk section need them drawn."
                 (goto-char (point-min))
                 (re-search-forward re)
                 (get-text-property (match-beginning 0) 'font-lock-face)))
-      (should (eq (face-at "^assistant$") 'sprig-review-role))
       (should (eq (face-at "🔧 Edit") 'sprig-review-tool))
       (should (eq (face-at "^\\+new$") 'sprig-review-added))
       (should (eq (face-at "^-old$") 'sprig-review-removed))
@@ -123,22 +121,39 @@ the tests that reach into a hunk section need them drawn."
 (ert-deftest sprig-review-mode-test-user-block-is-set-off ()
   (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
     (sprig-review-tests--rendered model nil
-      ;; A blank line separates the turns.
-      (should (string-match-p "the question\n\nassistant" (buffer-string)))
+      ;; No role labels: the tint alone tells the turns apart, and a blank
+      ;; line separates them.
+      (should (equal (buffer-string) "\nthe question\n\nthe answer\n"))
       (goto-char (point-min))
-      (re-search-forward "^user$")
-      (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                  'sprig-review-user-label))
-      ;; The body carries the tint too, so the turn reads as one block.
       (re-search-forward "the question")
       (should (memq 'sprig-review-user
                     (ensure-list (get-text-property (match-beginning 0)
                                                     'font-lock-face))))
-      ;; The agent's output does not.
+      ;; The agent's output is the untinted one.
       (re-search-forward "the answer")
       (should-not (memq 'sprig-review-user
                         (ensure-list (get-text-property (match-beginning 0)
                                                         'font-lock-face)))))))
+
+(ert-deftest sprig-review-mode-test-only-prose-is-padded ()
+  ;; Prose gets a blank line above it; tool rows pack tightly, so a turn's
+  ;; tool calls read as one list rather than as a spread-out ladder.
+  (let ((model (sprig-review-build
+                `((user "do it")
+                  (text "on it")
+                  (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))
+                  (tool-call "t2" "Read" ,(json-serialize (list :file_path "b")))
+                  (text "done")))))
+    (sprig-review-tests--rendered model nil
+      (let ((s (buffer-string)))
+        ;; The two tool rows sit on consecutive lines, with no blank between.
+        (should (string-match-p "🔧 Read  a\n🔧 Read  b" s))
+        ;; Prose above them keeps its own blank line.
+        (should (string-match-p "\nthe question\\|\ndo it" s))
+        (should (string-match-p "\n\non it" s))
+        (should (string-match-p "\n\ndone" s))
+        ;; And a tool row does not gain one.
+        (should-not (string-match-p "\n\n🔧" s))))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)
@@ -353,12 +368,11 @@ the tests that reach into a hunk section need them drawn."
                   (text "the answer") (title "T")))))
     (sprig-review-tests--rendered model nil
       (let ((s (buffer-string)))
-        (should (string-match-p "^user$" s))
         (should (string-match-p "the question" s))
+        ;; Thinking keeps its label, being a folded row rather than prose.
         (should (string-match-p "^thinking$" s))
         ;; The thinking body folds away, so its text is not in the buffer.
         (should-not (string-match-p "pondering" s))
-        (should (string-match-p "^assistant$" s))
         (should (string-match-p "the answer" s))
         ;; The model-carried title shows in the header.
         (should (string-match-p "T" s))))
