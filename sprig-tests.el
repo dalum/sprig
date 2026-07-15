@@ -629,25 +629,32 @@
                                           :options (vector (list :label "Red")
                                                            (list :label "Blue")))))))))
 
-(defun sprig-tests--answer-question (completing)
-  "Run the answer path over a stubbed COMPLETING read; return the reply string."
+(defun sprig-tests--answer-question (answers)
+  "Run the question through the wire and answer it with ANSWERS.
+Drives the real path: the request is parsed, handed to the buffer as a
+dialog, and answered from there.  Returns the reply string."
   (let ((event (car (sprig--claude-parse-line (sprig-tests--ask-question-line))))
-        sent)
+        dialog sent)
     (cl-letf (((symbol-function 'process-send-string)
                (lambda (_proc s) (setq sent s)))
-              ((symbol-function 'completing-read) completing))
+              ((symbol-function 'sprig-review-consume)
+               (lambda (event) (when (eq (car event) 'dialog) (setq dialog event)))))
       (setq sprig--process 'dummy)
       (pcase event
-        (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+        (`(control-request ,id ,req) (sprig--answer-control-request id req)))
+      ;; The question is now pending; answer it as the buffer would.
+      (pcase dialog
+        (`(dialog ,id ,_kind ,input)
+         (sprig--review-answer-dialog id input answers))))
     sent))
 
 (ert-deftest sprig-test-answer-user-question ()
-  ;; AskUserQuestion is rendered for a choice; the picked label rides back
-  ;; as updatedInput.answers, keyed by question text, alongside the echoed
-  ;; questions (the CLI replaces the whole input with updatedInput, and the
-  ;; questions array must survive the round trip as a JSON array).
+  ;; The picked label rides back as updatedInput.answers, keyed by question
+  ;; text, alongside the echoed questions (the CLI replaces the whole input
+  ;; with updatedInput, so the questions array must survive the round trip).
   (with-temp-buffer
-    (let ((sent (sprig-tests--answer-question (lambda (&rest _) "Red"))))
+    (let ((sent (sprig-tests--answer-question
+                 (list (cons (intern "Favourite colour?") "Red")))))
       (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
              (decision (alist-get 'response (alist-get 'response obj)))
              (upd (alist-get 'updatedInput decision))
@@ -662,10 +669,10 @@
         (should (equal (cdar answers) "Red"))))))
 
 (ert-deftest sprig-test-answer-user-question-skip ()
-  ;; A blank answer means "skipped": plain allow, no updatedInput, which
-  ;; replays as the tool's own no-answer outcome.
+  ;; No answers means "skipped": plain allow, no updatedInput, which replays
+  ;; as the tool's own no-answer outcome.
   (with-temp-buffer
-    (let ((sent (sprig-tests--answer-question (lambda (&rest _) ""))))
+    (let ((sent (sprig-tests--answer-question nil)))
       (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
              (decision (alist-get 'response (alist-get 'response obj))))
         (should (equal (alist-get 'behavior decision) "allow"))
@@ -1000,6 +1007,88 @@ Return the log directory."
             (should (= 1 (length rows)))
             (should (equal (plist-get (car rows) :session) "keep-1"))))
       (delete-directory root t))))
+
+(ert-deftest sprig-review-test-build-dialog-blocks ()
+  ;; A question stands pending until an answer of the same id settles it, so
+  ;; a rebuild (which every render does) still knows it was settled.
+  (let* ((input '((questions . [((question . "Which?")
+                                 (options . [((label . "A")) ((label . "B"))]))])))
+         (model (sprig-review-build
+                 `((dialog "req-1" "ask_user_question" ,input))))
+         (block (car (plist-get model :blocks))))
+    (should (eq (plist-get block :type) 'dialog))
+    (should (equal (plist-get block :id) "req-1"))
+    (should-not (plist-get block :answered))
+    (should (eq block (sprig-review-pending-dialog model))))
+  ;; Answered: settled, and no longer pending.
+  (let* ((input '((questions . [((question . "Which?")
+                                 (options . [((label . "A"))]))])))
+         (model (sprig-review-build
+                 `((dialog "req-1" "ask_user_question" ,input)
+                   (dialog-answer "req-1" ((Which? . "A"))))))
+         (block (car (plist-get model :blocks))))
+    (should (plist-get block :answered))
+    (should (equal (plist-get block :answers) '((Which? . "A"))))
+    (should-not (sprig-review-pending-dialog model)))
+  ;; Waved through: settled with nothing, and still not pending.
+  (let* ((input '((questions . [((question . "Which?") (options . []))])))
+         (model (sprig-review-build
+                 `((dialog "req-1" "ask_user_question" ,input)
+                   (dialog-answer "req-1" nil)))))
+    (should (plist-get (car (plist-get model :blocks)) :answered))
+    (should-not (sprig-review-pending-dialog model))))
+
+(ert-deftest sprig-test-user-question-does-not-block-the-filter ()
+  ;; The control request is handled inside the process filter.  Prompting
+  ;; there held the filter, and Emacs with it, until the question was
+  ;; answered.  It must only hand the question over and return.
+  (with-temp-buffer
+    (let (consumed responded)
+      (cl-letf (((symbol-function 'sprig-review-consume)
+                 (lambda (event) (push event consumed)))
+                ((symbol-function 'sprig--send-control-response)
+                 (lambda (&rest _) (setq responded t)))
+                ;; Any prompt reaching the minibuffer is the bug.
+                ((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "prompted in the filter")))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "prompted in the filter"))))
+        (sprig--answer-control-request
+         "req-1" '((subtype . "can_use_tool")
+                   (tool_name . "AskUserQuestion")
+                   (input . ((questions . [((question . "Which?"))]))))))
+      ;; Handed to the buffer, and nothing said back yet: the agent waits.
+      (should (equal (car consumed)
+                     '(dialog "req-1" "ask_user_question"
+                              ((questions . [((question . "Which?"))])))))
+      (should-not responded))))
+
+(ert-deftest sprig-test-answer-dialog-replies-with-updated-input ()
+  ;; The answers ride back as `updatedInput', the input plus an `answers'
+  ;; map, which is how the CLI feeds them to the tool.
+  (with-temp-buffer
+    (let ((input '((questions . [((question . "Which?"))])))
+          sent consumed)
+      (cl-letf (((symbol-function 'sprig--send-control-response)
+                 (lambda (id response) (setq sent (list id response))))
+                ((symbol-function 'sprig-review-consume)
+                 (lambda (event) (setq consumed event))))
+        (sprig--review-answer-dialog "req-1" input '((Which? . "A"))))
+      (should (equal (car sent) "req-1"))
+      (should (equal (plist-get (cadr sent) :behavior) "allow"))
+      (should (equal (alist-get 'answers (plist-get (cadr sent) :updatedInput))
+                     '((Which? . "A"))))
+      ;; And the buffer is told, so the block settles.
+      (should (equal consumed '(dialog-answer "req-1" ((Which? . "A")))))))
+  ;; Skipped: allowed with no answers, which the tool replays as its own
+  ;; skip rather than as an error.
+  (with-temp-buffer
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig--send-control-response)
+                 (lambda (_id response) (setq sent response)))
+                ((symbol-function 'sprig-review-consume) #'ignore))
+        (sprig--review-answer-dialog "req-1" '((questions . [])) nil))
+      (should (equal sent '(:behavior "allow"))))))
 
 (ert-deftest sprig-test-review-steer-writes-into-the-live-turn ()
   ;; Steering writes the message to the session's stdin and echoes it, without

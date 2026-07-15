@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.9.0
+;; Version: 0.10.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -37,6 +37,7 @@
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
+(declare-function sprig--review-answer-dialog "sprig" (id input answers))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
@@ -114,6 +115,19 @@ point still reads as yours instead of losing its tint to the cursor."
 
 (defface sprig-review-idle '((t :inherit shadow :extend t))
   "Face for the state line of a conversation with nothing running."
+  :group 'sprig)
+
+(defface sprig-review-waiting
+  '((t :inherit warning :inverse-video t :weight bold :extend t))
+  "Face for the state line while a question waits on you."
+  :group 'sprig)
+
+(defface sprig-review-dialog '((t :inherit font-lock-builtin-face :weight bold))
+  "Face for a question the agent is waiting on."
+  :group 'sprig)
+
+(defface sprig-review-dialog-picked '((t :inherit success :weight bold))
+  "Face for an option picked in a question."
   :group 'sprig)
 
 (defface sprig-review-marked '((t :inherit highlight))
@@ -462,6 +476,93 @@ we want."
     (magit-insert-heading (sprig-review--face "error" 'error))
     (insert (string-trim-right (or (plist-get block :text) "")) "\n")))
 
+;;;; Dialogs
+;;
+;; A question the agent asked mid-turn renders here, in the buffer, rather
+;; than in the minibuffer: the turn it is about is on screen, and a
+;; minibuffer prompt would hold the process filter (and Emacs with it) for
+;; as long as the question went unanswered.  So the block stands pending,
+;; you answer it with the same keys you review with, and the turn goes on.
+
+(defun sprig-review--question-list (input)
+  "Return INPUT's questions as a list.
+The control request is re-read with JSON-faithful arrays, so `questions'
+and `options' arrive as vectors and `multiSelect' as `:false'."
+  (append (alist-get 'questions input) nil))
+
+(defun sprig-review--multi-select-p (question)
+  "Return non-nil when QUESTION takes more than one answer."
+  (eq (alist-get 'multiSelect question) t))
+
+(defun sprig-review--option-label (option)
+  "Return OPTION's label."
+  (alist-get 'label option))
+
+(defun sprig-review--recommended-option (question)
+  "Return the label QUESTION recommends, or its first option's.
+The tool's own convention is to mark the recommended option in its label
+and to put it first, so the first option is the fallback rather than a
+guess."
+  (let* ((options (append (alist-get 'options question) nil))
+         (recommended
+          (seq-find (lambda (option)
+                      (string-match-p "recommend"
+                                      (downcase (or (sprig-review--option-label
+                                                     option)
+                                                    ""))))
+                    options)))
+    (sprig-review--option-label (or recommended (car options)))))
+
+(defun sprig-review--insert-question (block question index)
+  "Insert QUESTION, the INDEX'th of dialog BLOCK, and what it offers.
+The options are shown but not pickable: this buffer is for reading, and
+the answering has a buffer of its own (see `sprig-review-answer')."
+  (let ((answered (plist-get block :answered))
+        (multi (sprig-review--multi-select-p question))
+        (text (alist-get 'question question)))
+    (magit-insert-section (sprig-question (list :dialog (plist-get block :id)
+                                                :index index))
+      (magit-insert-heading
+        (concat (sprig-review--face (concat "? " text) 'sprig-review-dialog)
+                (if (and multi (not answered))
+                    (sprig-review--face "  (any of)" 'sprig-review-meta-key)
+                  "")))
+      (if answered
+          ;; Settled: what was said, not what might have been.
+          (insert "    "
+                  (sprig-review--face
+                   (or (alist-get (intern text) (plist-get block :answers))
+                       "skipped")
+                   'sprig-review-dialog-picked)
+                  "\n")
+        (seq-do
+         (lambda (option)
+           (insert "    "
+                   (sprig-review--face (sprig-review--option-label option)
+                                       'default)
+                   (let ((description (alist-get 'description option)))
+                     (if (and description (not (string-empty-p description)))
+                         (sprig-review--face
+                          (concat "  " (sprig-review--truncate
+                                        description
+                                        sprig-review-heading-max-width))
+                          'sprig-review-meta-key)
+                       ""))
+                   "\n"))
+         (alist-get 'options question))))))
+
+(defun sprig-review--insert-dialog (block)
+  "Insert dialog BLOCK: what the agent asked, and what there is to answer."
+  (magit-insert-section (sprig-dialog block)
+    (seq-do-indexed
+     (lambda (question index)
+       (sprig-review--insert-question block question index))
+     (sprig-review--question-list (plist-get block :input)))
+    (unless (plist-get block :answered)
+      (insert (sprig-review--face "    a a to answer · a r to take the recommended"
+                                  'sprig-review-meta-key)
+              "\n"))))
+
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
   (when (and value (not (string-empty-p (format "%s" value))))
@@ -493,8 +594,8 @@ META may carry :title, :project, :model, and :status."
   "Return non-nil when BLOCK reads as prose rather than as a one-line row.
 A tool call or a thinking block folds to a single line, and a run of them
 reads as one list of what the agent did.  Prose is what you actually
-read.  `sprig-review-render' spaces the two apart on this."
-  (memq (plist-get block :type) '(user text error)))
+read, and a dialog is a question put to you, which wants the same air."
+  (memq (plist-get block :type) '(user text error dialog)))
 
 ;;;; The state line
 ;;
@@ -508,6 +609,10 @@ read.  `sprig-review-render' spaces the two apart on this."
 (defun sprig-review--state (model)
   "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended."
   (cond
+   ;; Before anything else: the turn is not working, it is stopped, and it
+   ;; is stopped on you.
+   ((sprig-review-pending-dialog model)
+    (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
    (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
    ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
    ((plist-get model :done)
@@ -580,6 +685,7 @@ META is an optional plist of display metadata (see
                         block (and sprig-review--streaming (eq block last))))
             ('thinking (sprig-review--insert-thinking block))
             ('tool     (sprig-review--insert-tool block))
+            ('dialog   (sprig-review--insert-dialog block))
             ('error    (sprig-review--insert-error block)))
           (sprig-review--insert-margin start (plist-get block :time))))
       ;; Below the last message, and last of all, so it is what the buffer
@@ -1166,6 +1272,230 @@ interrupted and restarted.  With no turn running, this just sends."
   (quit-window t)
   (message "sprig: message cancelled"))
 
+;;;; Answering: the verbs, and the buffer they open
+
+(defvar-local sprig-answer--review nil
+  "Review buffer whose question this answer buffer is answering.")
+(defvar-local sprig-answer--dialog nil
+  "The dialog block being answered.")
+(defvar-local sprig-answer--index 0
+  "Which of the dialog's questions is on screen.")
+(defvar-local sprig-answer--answers nil
+  "Answers settled so far, an alist of question symbol to label string.")
+(defvar-local sprig-answer--picked nil
+  "Labels picked so far for the question on screen (multi-select).")
+
+(defun sprig-review--pending-dialog ()
+  "Return this buffer's question waiting on an answer, or signal there is none."
+  (or (sprig-review-pending-dialog
+       (sprig-review-build (reverse sprig-review--events)))
+      (user-error "No question is waiting")))
+
+(defun sprig-review--answer-dialog (dialog answers)
+  "Answer DIALOG with ANSWERS, and say so."
+  (sprig--review-answer-dialog (plist-get dialog :id)
+                               (plist-get dialog :input)
+                               answers)
+  (message "sprig: %s" (if answers
+                           (format "answered (%d)" (length answers))
+                         "skipped; the agent goes on unanswered")))
+
+;;;###autoload
+(defun sprig-review-answer ()
+  "Answer the waiting question, one question at a time, in its own buffer."
+  (interactive)
+  (let ((dialog (sprig-review--pending-dialog))
+        (review (current-buffer))
+        (buffer (get-buffer-create "*sprig-answer*")))
+    (with-current-buffer buffer
+      (sprig-answer-mode)
+      (setq sprig-answer--review review
+            sprig-answer--dialog dialog
+            sprig-answer--index 0
+            sprig-answer--answers nil
+            sprig-answer--picked nil)
+      (sprig-answer--render))
+    (pop-to-buffer buffer)))
+
+(defun sprig-review-answer-recommended ()
+  "Answer every waiting question with the option it recommends.
+The tool marks its recommended option and puts it first, so a question
+recommending nothing takes its first option (see
+`sprig-review--recommended-option')."
+  (interactive)
+  (let* ((dialog (sprig-review--pending-dialog))
+         (answers (mapcar (lambda (question)
+                            (cons (intern (alist-get 'question question))
+                                  (sprig-review--recommended-option question)))
+                          (sprig-review--question-list
+                           (plist-get dialog :input)))))
+    (sprig-review--answer-dialog dialog (delq nil answers))))
+
+(defun sprig-review-answer-skip ()
+  "Skip the waiting question; the agent goes on without an answer."
+  (interactive)
+  (sprig-review--answer-dialog (sprig-review--pending-dialog) nil))
+
+(transient-define-prefix sprig-review-answer-dispatch ()
+  "Answer the question the agent is waiting on."
+  [["Answer"
+    ("a" "answer, one question at a time" sprig-review-answer)
+    ("r" "take every recommended option" sprig-review-answer-recommended)
+    ("s" "skip; go on unanswered" sprig-review-answer-skip)]
+   ["Marks"
+    ("k" "accept (clear marks)" sprig-review-accept)]])
+
+;;;; Answering: the a transient, and its buffer
+;;
+;; The review buffer shows the question and stays a review buffer; the
+;; answering happens in a buffer of its own, the way `c c' composes in one,
+;; one question at a time so a four-question dialog is four small choices
+;; rather than one wall.  `a r' skips the buffer entirely for the common
+;; case of going with what was recommended.
+
+(defvar sprig-answer-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'sprig-answer-pick)
+    (define-key map (kbd "SPC") #'sprig-answer-pick)
+    (define-key map (kbd "n")   #'next-line)
+    (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "C-c C-c") #'sprig-answer-confirm)
+    (define-key map (kbd "C-c C-k") #'sprig-answer-cancel)
+    (dotimes (i 9)
+      (define-key map (kbd (number-to-string (1+ i))) #'sprig-answer-pick-number))
+    map)
+  "Keymap for `sprig-answer-mode'.")
+
+(define-derived-mode sprig-answer-mode special-mode "Sprig-Answer"
+  "Answer one of the agent's questions.
+\\<sprig-answer-mode-map>\\[sprig-answer-pick] picks the option at point, \
+1-9 picks by number, \\[sprig-answer-cancel] cancels."
+  (setq-local truncate-lines nil))
+
+(defun sprig-answer--question ()
+  "Return the question on screen."
+  (nth sprig-answer--index
+       (sprig-review--question-list (plist-get sprig-answer--dialog :input))))
+
+(defun sprig-answer--options ()
+  "Return the options of the question on screen, as a list."
+  (append (alist-get 'options (sprig-answer--question)) nil))
+
+(defun sprig-answer--render ()
+  "Draw the question on screen, and what has been picked of it."
+  (let* ((question (sprig-answer--question))
+         (questions (sprig-review--question-list
+                     (plist-get sprig-answer--dialog :input)))
+         (multi (sprig-review--multi-select-p question))
+         (inhibit-read-only t))
+    (erase-buffer)
+    (when (> (length questions) 1)
+      (insert (propertize (format "Question %d of %d\n\n"
+                                  (1+ sprig-answer--index) (length questions))
+                          'face 'sprig-review-meta-key)))
+    (insert (propertize (concat "? " (alist-get 'question question))
+                        'face 'sprig-review-dialog)
+            (if multi (propertize "  (pick any)" 'face 'sprig-review-meta-key) "")
+            "\n\n")
+    (seq-do-indexed
+     (lambda (option index)
+       (let* ((label (sprig-review--option-label option))
+              (picked (member label sprig-answer--picked)))
+         (insert (propertize (format "%s%d  " (if picked "▸" " ") (1+ index))
+                            'face (if picked 'sprig-review-dialog-picked
+                                    'sprig-review-meta-key))
+                 (propertize label 'face (if picked 'sprig-review-dialog-picked
+                                           'default))
+                 "\n")
+         (when-let ((description (alist-get 'description option)))
+           (unless (string-empty-p description)
+             (insert (propertize (concat "     " description "\n")
+                                 'face 'sprig-review-meta-key))))))
+     (sprig-answer--options))
+    (insert "\n"
+            (propertize (if multi
+                            "RET or 1-9 toggles · C-c C-c takes them · C-c C-k skips"
+                          "RET or 1-9 picks · C-c C-c skips this one · C-c C-k skips all")
+                        'face 'sprig-review-meta-key)
+            "\n")
+    (goto-char (point-min))))
+
+(defun sprig-answer--settle (label)
+  "Settle the question on screen with LABEL, or with nothing when nil."
+  (let ((text (alist-get 'question (sprig-answer--question))))
+    (when label
+      (push (cons (intern text) label) sprig-answer--answers)))
+  (setq sprig-answer--picked nil)
+  (if (< (1+ sprig-answer--index)
+         (length (sprig-review--question-list
+                  (plist-get sprig-answer--dialog :input))))
+      (progn (setq sprig-answer--index (1+ sprig-answer--index))
+             (sprig-answer--render))
+    (sprig-answer--send)))
+
+(defun sprig-answer--send ()
+  "Send what was answered back to the agent, and be done."
+  (let ((review sprig-answer--review)
+        (dialog sprig-answer--dialog)
+        (answers (nreverse sprig-answer--answers)))
+    (quit-window t)
+    (if (buffer-live-p review)
+        (with-current-buffer review
+          (sprig-review--answer-dialog dialog answers))
+      (message "sprig: the review buffer is gone; the question went unanswered"))))
+
+(defun sprig-answer-pick ()
+  "Pick the option at point."
+  (interactive)
+  (let* ((line (- (line-number-at-pos) 1))
+         (options (sprig-answer--options))
+         (label (seq-some (lambda (option)
+                            (let ((l (sprig-review--option-label option)))
+                              (and (save-excursion
+                                     (beginning-of-line)
+                                     (looking-at-p (format ".*%s"
+                                                           (regexp-quote l))))
+                                   l)))
+                          options)))
+    (ignore line)
+    (unless label (user-error "No option on this line"))
+    (sprig-answer--take label)))
+
+(defun sprig-answer-pick-number ()
+  "Pick the option whose number is the key just pressed."
+  (interactive)
+  (let* ((n (- last-command-event ?1))
+         (option (nth n (sprig-answer--options))))
+    (unless option (user-error "No option %d here" (1+ n)))
+    (sprig-answer--take (sprig-review--option-label option))))
+
+(defun sprig-answer--take (label)
+  "Take LABEL for the question on screen: toggling it, or settling on it."
+  (if (sprig-review--multi-select-p (sprig-answer--question))
+      (progn
+        (setq sprig-answer--picked
+              (if (member label sprig-answer--picked)
+                  (remove label sprig-answer--picked)
+                (append sprig-answer--picked (list label))))
+        (sprig-answer--render))
+    (sprig-answer--settle label)))
+
+(defun sprig-answer-confirm ()
+  "Take what is picked for this question, or skip it when nothing is."
+  (interactive)
+  (sprig-answer--settle (and sprig-answer--picked
+                             (string-join sprig-answer--picked ", "))))
+
+(defun sprig-answer-cancel ()
+  "Skip the rest of the questions; the agent goes on without an answer."
+  (interactive)
+  (setq sprig-answer--picked nil)
+  (let ((questions (sprig-review--question-list
+                    (plist-get sprig-answer--dialog :input))))
+    (setq sprig-answer--index (length questions)))
+  (sprig-answer--send))
+
 ;;;; The c transient
 
 (transient-define-prefix sprig-review-dispatch ()
@@ -1189,7 +1519,10 @@ interrupted and restarted.  With no turn running, this just sends."
 (define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
-(define-key sprig-review-mode-map (kbd "a")   #'sprig-review-accept)
+;; `a' answers, rather than accepting.  Accept is `sprig-review-unmark-all'
+;; with a message, which `U' already does and `c a' already reaches, so the
+;; key was worth more to the question the agent is waiting on.
+(define-key sprig-review-mode-map (kbd "a")   #'sprig-review-answer-dispatch)
 (define-key sprig-review-mode-map (kbd "C")   #'sprig-review-commit)
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
 (define-key sprig-review-mode-map (kbd "RET") #'sprig-review-visit)

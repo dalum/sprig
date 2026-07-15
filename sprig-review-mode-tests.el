@@ -420,6 +420,133 @@ timestamp, or the state line's rule."
     (setq-local sprig--busy t)
     (should-error (sprig-review-refresh) :type 'user-error)))
 
+(defun sprig-review-tests--dialog-input (&optional multi)
+  "A two-option question, MULTI when it takes more than one answer."
+  `((questions . [((question . "Which approach?")
+                   (header . "Approach")
+                   (multiSelect . ,(if multi t :false))
+                   (options . [((label . "Rewrite it (Recommended)")
+                                (description . "start over"))
+                               ((label . "Patch it")
+                                (description . "keep going"))]))])))
+
+(ert-deftest sprig-review-mode-test-pending-dialog-renders-and-waits ()
+  ;; A question renders in the buffer, with what it offers, and the state
+  ;; line says the turn is stopped on you rather than working.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "I need to know something."))
+    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-review-tests--dialog-input)))
+    (sprig-review-flush)
+    (let ((s (buffer-string)))
+      (should (string-match-p "? Which approach?" s))
+      (should (string-match-p "Rewrite it (Recommended)" s))
+      (should (string-match-p "Patch it" s))
+      ;; It says how to answer, rather than pretending to be pickable.
+      (should (string-match-p "a a to answer" s)))
+    ;; Waiting beats working: the turn is stopped, not running.
+    (should (equal (sprig-review-tests--state-line)
+                   '("?  waiting on you  ·  a a to answer" . sprig-review-waiting)))))
+
+(ert-deftest sprig-review-mode-test-answered-dialog-shows-the-answer ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-review-tests--dialog-input)))
+    (sprig-review-consume (list 'dialog-answer "req-1"
+                                (list (cons (intern "Which approach?")
+                                            "Patch it"))))
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    (let ((s (buffer-string)))
+      (should (string-match-p "? Which approach?" s))
+      ;; Settled: what was said, and no longer how to say it.
+      (should (string-match-p "Patch it" s))
+      (should-not (string-match-p "a a to answer" s)))
+    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over  ·  $0.0100"))))
+
+(ert-deftest sprig-review-mode-test-answer-recommended ()
+  ;; `a r' takes the option the tool marked, without opening anything.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-review-tests--dialog-input)))
+    (sprig-review-flush)
+    (let (answered)
+      (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+                 (lambda (id _input answers) (setq answered (list id answers)))))
+        (sprig-review-answer-recommended))
+      (should (equal (car answered) "req-1"))
+      (should (equal (cdar (cadr answered)) "Rewrite it (Recommended)")))))
+
+(ert-deftest sprig-review-mode-test-answer-skip ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-review-tests--dialog-input)))
+    (sprig-review-flush)
+    (let (answered)
+      (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+                 (lambda (_id _input answers) (setq answered (list :answers answers)))))
+        (sprig-review-answer-skip))
+      (should (equal answered '(:answers nil)))))
+  ;; With nothing waiting, the verbs say so rather than doing something.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (should-error (sprig-review-answer-skip) :type 'user-error)
+    (should-error (sprig-review-answer-recommended) :type 'user-error)
+    (should-error (sprig-review-answer) :type 'user-error)))
+
+(ert-deftest sprig-review-mode-test-answer-buffer-picks-and-sends ()
+  ;; `a a' opens a buffer on the question; picking an option answers it.
+  (let (answered)
+    (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+               (lambda (id _input answers) (setq answered (list id answers))))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'quit-window) #'ignore))
+      (with-temp-buffer
+        (sprig-review-mode)
+        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-review-tests--dialog-input)))
+        (sprig-review-flush)
+        (sprig-review-answer)
+        (with-current-buffer "*sprig-answer*"
+          (should (string-match-p "? Which approach?" (buffer-string)))
+          (should (string-match-p "1  Rewrite it" (buffer-string)))
+          (should (string-match-p "2  Patch it" (buffer-string)))
+          ;; Pick the second by number.
+          (setq last-command-event ?2)
+          (sprig-answer-pick-number))))
+    (should (equal (car answered) "req-1"))
+    (should (equal (cdar (cadr answered)) "Patch it")))
+  (kill-buffer "*sprig-answer*"))
+
+(ert-deftest sprig-review-mode-test-answer-buffer-multi-select ()
+  ;; A multi-select question toggles rather than settling, and takes what is
+  ;; picked on C-c C-c, joined the way the CLI joins them.
+  (let (answered)
+    (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+               (lambda (_id _input answers) (setq answered answers)))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'quit-window) #'ignore))
+      (with-temp-buffer
+        (sprig-review-mode)
+        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-review-tests--dialog-input t)))
+        (sprig-review-flush)
+        (sprig-review-answer)
+        (with-current-buffer "*sprig-answer*"
+          (setq last-command-event ?1)
+          (sprig-answer-pick-number)
+          (should-not answered)          ; toggled, not settled
+          (setq last-command-event ?2)
+          (sprig-answer-pick-number)
+          (should (string-match-p "▸1" (buffer-string)))
+          (sprig-answer-confirm))))
+    (should (equal (cdar answered) "Rewrite it (Recommended), Patch it")))
+  (kill-buffer "*sprig-answer*"))
+
 (ert-deftest sprig-review-mode-test-verbs-are-bound ()
   ;; Every verb the README documents as a key has to actually be on that key.
   ;; `C' was documented and unbound, reachable only through the transient.
@@ -430,7 +557,7 @@ timestamp, or the state line's rule."
                     ("U"   . sprig-review-unmark-all)
                     ("c"   . sprig-review-dispatch)
                     ("k"   . sprig-review-reject)
-                    ("a"   . sprig-review-accept)
+                    ("a"   . sprig-review-answer-dispatch)
                     ("C"   . sprig-review-commit)
                     ("x"   . sprig-review-run)
                     ("RET" . sprig-review-visit)

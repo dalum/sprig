@@ -134,14 +134,22 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
 | `x` | Run: ask the agent to run the marked tool call's command |
 | `C` | Commit: ask the agent to commit the current changes |
-| `a` | Accept: clear the marks (sends nothing, commits nothing) |
+| `a` | Transient for the agent's questions: `a a` answer, `a r` take the recommended, `a s` skip (`a k` accepts, i.e. clears the marks) |
 | `c` | Transient, listing every verb: `c c` compose & send, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, and `c k` / `c a` / `c C` / `c x` for the four above |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
 `c s` **steers the turn already in flight**, rather than waiting it out or killing it. The CLI's stdin stays open for the length of a turn, so the message is queued and handed to the agent at its next tool-call boundary: it reads it and changes course *within the same turn*, no interrupt and no restart. Watching a turn head the wrong way, `c s` is the cheap correction and `c i` the expensive one. A `c c` mid-turn still refuses, since that would be a second turn. If the turn happens to finish while you are still composing, the message is sent as an ordinary turn rather than lost.
 
-When the agent calls `AskUserQuestion` mid-turn, Sprig renders the question and its options and reads your pick in the minibuffer (multiple questions are asked in turn; blank skips one); the choice rides back to the agent and the exchange shows inline as tool activity. A tool that needs approval prompts the same way. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
+When the agent calls `AskUserQuestion` mid-turn, the question renders **in the buffer**, with its options, and the state line turns to `? waiting on you`: the turn is not working, it is stopped, and it is stopped on you. The review buffer stays a review buffer, so answering has a buffer of its own, the way `c c` composes in one:
+
+| Key | Does |
+|---|---|
+| `a a` | Answer, one question at a time, in `*sprig-answer*` (`RET` or `1`-`9` picks, `C-c C-c` skips one, `C-c C-k` skips the rest) |
+| `a r` | Take the option each question recommends, without opening anything |
+| `a s` | Skip; the agent goes on unanswered |
+
+The choice rides back to the agent and the question settles in place, showing what was said. Nothing is read in the minibuffer, and nothing blocks: the CLI's request is handled inside the process filter, so a prompt there would hold Emacs itself for as long as the question went unanswered. A tool that needs approval still prompts in the minibuffer, as does `ExitPlanMode`. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
 
 ## Options
 
@@ -171,7 +179,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.9.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.10.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

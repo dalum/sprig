@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.9.0
+;; Version: 0.10.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -614,7 +614,7 @@ session never hangs on an unanswered request."
         (cond
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "AskUserQuestion"))
-          (sprig--answer-user-question request-id .input))
+          (sprig--offer-user-question request-id .input))
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "ExitPlanMode"))
           (sprig--answer-plan request-id .input))
@@ -663,38 +663,31 @@ is on screen before the prompt blocks."
          (list :behavior "deny"
                :message (if (string-empty-p feedback) "Plan rejected." feedback)))))))
 
-(defun sprig--answer-user-question (request-id input)
-  "Render the AskUserQuestion INPUT, collect answers, reply to REQUEST-ID.
-INPUT is the tool input alist carrying a `questions' list.  The chosen
-answers ride back as `updatedInput' (the input plus an `answers' map keyed
-by question text), which is how the CLI feeds them to the tool; an empty
-answer set replays as the tool's own \"skipped\" outcome."
-  (let ((answers (sprig--read-question-answers (alist-get 'questions input))))
-    (sprig--send-control-response
-     request-id
-     (if answers
-         (list :behavior "allow"
-               :updatedInput (append input (list (cons 'answers answers))))
-       (list :behavior "allow")))))
+(defun sprig--offer-user-question (request-id input)
+  "Put the AskUserQuestion INPUT into the buffer, to be answered there.
+Nothing is sent back yet.  This runs inside the process filter, so a
+prompt here would block the filter, and with it every other session's
+output and Emacs itself, for as long as the question went unanswered; and
+the question deserves the buffer anyway, where the conversation it is
+about already is.  So it is handed over as a `dialog' event and stands
+pending until `sprig--review-answer-dialog' hears back (see
+`sprig-review-dialog-send')."
+  (sprig-review-consume (list 'dialog request-id "ask_user_question" input)))
 
-(defun sprig--read-question-answers (questions)
-  "Prompt for each of QUESTIONS; return an answers alist (question -> answer).
-Each answer is the chosen option label (multi-select answers are joined
-with commas, matching the CLI); a question left blank is dropped.  Free
-text is accepted, mirroring the tool's own free-text box."
-  (delq nil
-        (mapcar
-         (lambda (q)
-           (let-alist q
-             (let* ((labels (mapcar (lambda (o) (alist-get 'label o)) .options))
-                    (prompt (format "%s " .question))
-                    (ans (if (eq .multiSelect t)
-                             (string-join
-                              (completing-read-multiple prompt labels) ", ")
-                           (completing-read prompt labels))))
-               (unless (string-empty-p ans)
-                 (cons (intern .question) ans)))))
-         questions)))
+(defun sprig--review-answer-dialog (id input answers)
+  "Answer the pending dialog ID, whose tool INPUT gets ANSWERS.
+ANSWERS is an alist of question text to the chosen label (multi-select
+labels joined with commas, matching the CLI); nil waves the question
+through, which the tool replays as its own \"skipped\" outcome.  The
+answers ride back as `updatedInput', the input plus an `answers' map,
+which is how the CLI feeds them to the tool."
+  (sprig--send-control-response
+   id
+   (if answers
+       (list :behavior "allow"
+             :updatedInput (append input (list (cons 'answers answers))))
+     (list :behavior "allow")))
+  (sprig-review-consume (list 'dialog-answer id answers)))
 
 (defun sprig--mode-line-permission ()
   "Mode-line tag for this session's permission mode, or nil when unknown.

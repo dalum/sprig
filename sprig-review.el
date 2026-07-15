@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.9.0
+;; Version: 0.10.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -131,6 +131,8 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;   (:type thinking :text STR :time ISO)
 ;;   (:type tool     :id ID :name NAME :input JSON :changes CHANGES
 ;;                   :result (:error BOOL :text STR) | nil :time ISO)
+;;   (:type dialog   :id ID :kind KIND :input INPUT
+;;                   :answered BOOL :answers ANSWERS :time ISO)
 ;;   (:type error    :text STR :time ISO)
 ;;
 ;; Consecutive `text' (or `thinking') events coalesce into one block; a
@@ -139,6 +141,14 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; unmatched `tool' block of the same id.  The live wire path never emits
 ;; `user' events (sprig sent that turn); the stored-session path does, so
 ;; a replayed transcript shows the user's turns too.
+;;
+;; A `dialog' event is the CLI asking the user something mid-turn (an
+;; `AskUserQuestion', say) and waiting on the answer.  It is conversation,
+;; not transport, because it is rendered and answered in the buffer rather
+;; than in the minibuffer: the block stands pending until a `dialog-answer'
+;; event of the same id resolves it, and the answer lands in the event list
+;; so a rebuild still knows the question was settled.  ANSWERS is the alist
+;; the tool gets back, or nil for a question waved through.
 ;;
 ;; A `time' event carries an ISO 8601 UTC stamp and opens no block of its
 ;; own; it just says when what follows happened.  The stored log stamps
@@ -156,6 +166,22 @@ for tools that touch no files, or when INPUT lacks a file path."
                    (equal (plist-get b :id) id)
                    (null (plist-get b :result))))
             blocks))
+
+(defun sprig-review--find-dialog (blocks id)
+  "Return the dialog block in BLOCKS with ID, or nil."
+  (seq-find (lambda (b)
+              (and (eq (plist-get b :type) 'dialog)
+                   (equal (plist-get b :id) id)))
+            blocks))
+
+(defun sprig-review-pending-dialog (model)
+  "Return MODEL's dialog block still waiting on an answer, or nil.
+The turn is stopped on it: the CLI asked, and will not go on until it
+hears back."
+  (seq-find (lambda (b)
+              (and (eq (plist-get b :type) 'dialog)
+                   (not (plist-get b :answered))))
+            (plist-get model :blocks)))
 
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
@@ -202,6 +228,16 @@ See the section commentary for the event vocabulary and block shapes."
                          :result (list :error is-error :text rtext)
                          :time time)
                    blocks))))
+        (`(dialog ,id ,kind ,input)
+         (setq open nil)
+         (push (list :type 'dialog :id id :kind kind :input input
+                     :answered nil :answers nil :time time)
+               blocks))
+        (`(dialog-answer ,id ,answers)
+         (setq open nil)
+         (when-let ((blk (sprig-review--find-dialog blocks id)))
+           (plist-put blk :answered t)
+           (plist-put blk :answers answers)))
         (`(done ,c ,e) (setq done t cost c error e))
         (`(error ,m)
          (setq open nil)
