@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.6.0
+;; Version: 0.6.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1024,6 +1024,7 @@ With PLAN non-nil, send the turn in plan mode (`c p')."
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 (define-key sprig-review-mode-map (kbd "a")   #'sprig-review-accept)
+(define-key sprig-review-mode-map (kbd "C")   #'sprig-review-commit)
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
 (define-key sprig-review-mode-map (kbd "RET") #'sprig-review-visit)
 (define-key sprig-review-mode-map (kbd "t")   #'sprig-review-set-title)

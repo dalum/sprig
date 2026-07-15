@@ -291,6 +291,26 @@ text, so they have to be read back off the overlays."
                                                 :blocks))
                                 :time))))))
 
+(ert-deftest sprig-review-mode-test-verbs-are-bound ()
+  ;; Every verb the README documents as a key has to actually be on that key.
+  ;; `C' was documented and unbound, reachable only through the transient.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (dolist (pair '(("SPC" . sprig-review-toggle-mark)
+                    ("m"   . sprig-review-toggle-mark)
+                    ("U"   . sprig-review-unmark-all)
+                    ("c"   . sprig-review-dispatch)
+                    ("k"   . sprig-review-reject)
+                    ("a"   . sprig-review-accept)
+                    ("C"   . sprig-review-commit)
+                    ("x"   . sprig-review-run)
+                    ("RET" . sprig-review-visit)
+                    ("t"   . sprig-review-set-title)))
+      (should (eq (key-binding (kbd (car pair))) (cdr pair))))
+    ;; magit-section's own navigation still comes through the parent map.
+    (should (eq (key-binding (kbd "n")) 'magit-section-forward))
+    (should (eq (key-binding (kbd "p")) 'magit-section-backward))))
+
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)
       '(:title "My branch" :project "~/p" :model "claude-opus-4-8"

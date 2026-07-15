@@ -132,7 +132,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `x` | Run: ask the agent to run the marked tool call's command |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Accept: clear the marks (sends nothing, commits nothing) |
-| `c` | Transient: `c c` compose & send, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt |
+| `c` | Transient, listing every verb: `c c` compose & send, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt, and `c k` / `c a` / `c C` / `c x` for the four above |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
@@ -166,7 +166,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.6.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.6.1, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
