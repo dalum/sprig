@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.0
+;; Version: 0.5.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -60,11 +60,21 @@
   "Face for a removed line in a reconstructed hunk."
   :group 'sprig)
 
-(defface sprig-review-role '((t :inherit magit-section-secondary-heading))
+(defface sprig-review-role '((t :inherit font-lock-function-name-face :weight bold))
   "Face for an assistant-turn label."
   :group 'sprig)
 
-(defface sprig-review-user '((t :inherit magit-section-secondary-heading :slant italic))
+(defface sprig-review-user
+  '((((class color) (background light)) :background "#eaeef8" :extend t)
+    (((class color) (background dark))  :background "#2b3040" :extend t)
+    (t :inherit region :extend t))
+  "Face for a user turn: the tint its label line and its prose carry.
+Applied beneath any markdown faces, so the turn reads as one block set
+off from the agent's output.  `:extend' runs the tint to the window edge."
+  :group 'sprig)
+
+(defface sprig-review-user-label
+  '((t :inherit (font-lock-constant-face sprig-review-user) :weight bold))
   "Face for a user-turn label."
   :group 'sprig)
 
@@ -92,9 +102,18 @@
   "Pending coalescing-refresh timer for this buffer, or nil.")
 (defvar-local sprig-review--tail nil
   "Marker where streamed text is appended in place, or nil.
-`sprig-review-render' sets it to the end of the last text section when the
-conversation ends in assistant text, so consecutive `text' events extend
+`sprig-review-render' sets it to the end of the last text section when a
+turn is streaming into this buffer, so consecutive `text' events extend
 that section without a full re-render.  Any structural event clears it.")
+
+(defvar-local sprig-review--streaming nil
+  "Non-nil while a turn is streaming into this buffer.
+Only then does `sprig-review-render' open the last text block as the live
+tail, which costs that block its markdown fontification (see
+`sprig-review--insert-text').  A settled or replayed conversation is not
+streaming, so every one of its blocks renders fontified.  Liveness cannot
+be read off the model instead: a replayed session log carries no `done'
+event, so its last block would otherwise pass for a live tail forever.")
 (defvar-local sprig-review--marks nil
   "Idents (per `magit-section-ident') of the marked sections.
 Idents rather than section objects, so marks survive a re-render.")
@@ -111,12 +130,60 @@ is one TAB away, since the tool section folds to its heading."
   :type 'integer
   :group 'sprig)
 
+(defcustom sprig-review-expand-diffs nil
+  "When non-nil, a tool call that reconstructs a diff renders expanded.
+By default every tool section folds to its one-line heading, so a long
+turn reads as a list of what the agent did rather than as pages of diff;
+TAB opens the one you want to review."
+  :type 'boolean
+  :group 'sprig)
+
 (defcustom sprig-review-fontify-markdown t
   "When non-nil, render user and assistant prose with `markdown-mode' faces.
 Markup characters (`*', `#', ...) are hidden.  Has no effect when
 `markdown-mode' is not installed."
   :type 'boolean
   :group 'sprig)
+
+;;;; Face helpers
+;;
+;; Everything rendered here carries its colours as `font-lock-face', not
+;; `face'.  `magit-section-mode' deliberately turns font-lock on (with no
+;; keywords) so that `font-lock-face' is honoured, and font-lock's
+;; unfontify pass strips the plain `face' property off every region it
+;; redisplays (see `font-lock-default-unfontify-region').  Text propertized
+;; with `face' therefore loses its colours the moment the window scrolls
+;; over it; `font-lock-face' survives and displays identically.
+
+(defun sprig-review--face (string face)
+  "Return STRING carrying FACE, as a property the buffer's font-lock keeps."
+  (propertize string 'font-lock-face face))
+
+(defun sprig-review--add-face (beg end face)
+  "Add FACE beneath the faces already on the buffer text between BEG and END.
+Appending rather than replacing leaves a foreground set by, say, markdown
+fontification in front of FACE's background."
+  (let ((pos beg))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'font-lock-face nil end))
+            (val (get-text-property pos 'font-lock-face)))
+        (put-text-property pos next 'font-lock-face
+                           (append (ensure-list val) (list face)))
+        (setq pos next)))))
+
+(defun sprig-review--adopt-faces (string)
+  "Return STRING with each `face' property moved over to `font-lock-face'.
+Font-lock fontifies with `face', so a string fontified elsewhere (see
+`sprig-review--fontify-markdown') needs this before it is inserted here."
+  (let ((pos 0) (end (length string)))
+    (while (< pos end)
+      (let ((next (next-single-property-change pos 'face string end))
+            (val (get-text-property pos 'face string)))
+        (when val
+          (put-text-property pos next 'font-lock-face val string)
+          (remove-list-of-text-properties pos next '(face) string))
+        (setq pos next)))
+    string))
 
 ;;;; Heading helpers
 
@@ -151,7 +218,7 @@ header instead pass their changes in, so this is only reached without one."
          (summary (sprig-review--input-summary name (plist-get block :input)))
          (err (plist-get (plist-get block :result) :error)))
     (concat
-     (propertize (concat "🔧 " name) 'face 'sprig-review-tool)
+     (sprig-review--face (concat "🔧 " name) 'sprig-review-tool)
      (cond
       (changes
        (let ((c (car changes)))
@@ -159,7 +226,7 @@ header instead pass their changes in, so this is only reached without one."
       (summary (concat "  " (sprig-review--truncate
                              summary sprig-review-heading-max-width)))
       (t ""))
-     (if err (propertize "  [error]" 'face 'error) ""))))
+     (if err (sprig-review--face "  [error]" 'error) ""))))
 
 ;;;; Section insertion
 
@@ -167,15 +234,15 @@ header instead pass their changes in, so this is only reached without one."
   "Insert HUNK as removed lines then added lines, each a coloured section line."
   (magit-insert-section (sprig-hunk hunk)
     (dolist (l (plist-get hunk :old))
-      (insert (propertize (concat "-" l) 'face 'sprig-review-removed) "\n"))
+      (insert (sprig-review--face (concat "-" l) 'sprig-review-removed) "\n"))
     (dolist (l (plist-get hunk :new))
-      (insert (propertize (concat "+" l) 'face 'sprig-review-added) "\n"))))
+      (insert (sprig-review--face (concat "+" l) 'sprig-review-added) "\n"))))
 
 (defun sprig-review--insert-change (change)
   "Insert CHANGE as a foldable file section holding its hunks."
   (magit-insert-section (sprig-change change)
     (magit-insert-heading
-      (propertize (plist-get change :file) 'face 'sprig-review-file))
+      (sprig-review--face (plist-get change :file) 'sprig-review-file))
     (dolist (hunk (plist-get change :hunks))
       (sprig-review--insert-hunk hunk))))
 
@@ -193,13 +260,15 @@ header instead pass their changes in, so this is only reached without one."
 
 (defun sprig-review--insert-tool (block)
   "Insert tool BLOCK: heading, its file-change diffs, then its result.
-A tool with no diff (Read, Bash, Grep, ...) folds to its one-line
-heading, since its body is context, not a change to review; a diff-
-bearing tool stays open so the change is visible at a glance."
-  (magit-insert-section (sprig-tool block (not (plist-get block :changes)))
+Every tool folds to its one-line heading, so a turn reads as a list of
+what the agent did; TAB opens the change you want.  Set
+`sprig-review-expand-diffs' to render diff-bearing tools open instead."
+  (magit-insert-section (sprig-tool block
+                                    (not (and sprig-review-expand-diffs
+                                              (plist-get block :changes))))
     (magit-insert-heading (sprig-review--tool-heading block))
-    ;; Deferred so a folded no-diff tool (Bash, Read, ...) keeps its body
-    ;; folded; for a diff-bearing tool the section is open, so this runs now.
+    ;; Deferred so a folded tool keeps its body out of the buffer; magit only
+    ;; draws the fold when the body goes through `magit-insert-section-body'.
     (magit-insert-section-body
       (dolist (change (plist-get block :changes))
         (sprig-review--insert-change change))
@@ -214,7 +283,9 @@ bearing tool stays open so the change is visible at a glance."
   "Return TEXT fontified with `markdown-mode', its markup characters hidden.
 Fontifies in a reusable hidden buffer and copies the propertized string,
 so the `*'/`#' markup carries an `invisible' property the review buffer's
-invisibility spec then hides (see `sprig-review-mode').  Returns TEXT
+invisibility spec then hides (see `sprig-review-mode').  The copy's faces
+are adopted onto `font-lock-face', without which this buffer's font-lock
+would strip them (see `sprig-review--adopt-faces').  Returns TEXT
 unchanged when `sprig-review-fontify-markdown' is nil or markdown-mode is
 not installed."
   (if (and sprig-review-fontify-markdown
@@ -230,7 +301,7 @@ not installed."
             (ignore-errors (markdown-toggle-markup-hiding 1)))
           (insert text)
           (font-lock-ensure)
-          (buffer-string)))
+          (sprig-review--adopt-faces (buffer-string))))
     text))
 
 (defun sprig-review--text-body (text)
@@ -246,7 +317,7 @@ trailing newline) and record the tail (`sprig-review--tail') just before
 that newline, so `sprig-review--append-streamed' and a later full refresh
 produce identical text.  A settled block is normalised for tidy display."
   (magit-insert-section (sprig-text block)
-    (magit-insert-heading (propertize "assistant" 'face 'sprig-review-role))
+    (magit-insert-heading (sprig-review--face "assistant" 'sprig-review-role))
     (if open
         ;; The live block renders raw so the fast in-place append path and a
         ;; later full rebuild agree; it gains markdown faces once it settles.
@@ -257,30 +328,34 @@ produce identical text.  A settled block is normalised for tidy display."
                (sprig-review--text-body (plist-get block :text)))))))
 
 (defun sprig-review--insert-user (block)
-  "Insert a user-turn BLOCK under a foldable role label."
+  "Insert a user-turn BLOCK under a foldable role label.
+Label and body both carry the `sprig-review-user' tint, so what you said
+reads as a block rather than as one more line of the agent's output."
   (magit-insert-section (sprig-user block)
-    (magit-insert-heading (propertize "user" 'face 'sprig-review-user))
-    (insert (sprig-review--fontify-markdown
-             (string-trim-right (plist-get block :text)))
-            "\n")))
+    (magit-insert-heading (sprig-review--face "user" 'sprig-review-user-label))
+    (let ((beg (point)))
+      (insert (sprig-review--fontify-markdown
+               (sprig-review--text-body (plist-get block :text))))
+      (sprig-review--add-face beg (point) 'sprig-review-user))))
 
 (defun sprig-review--insert-thinking (block)
   "Insert a thinking BLOCK, folded by default since it is verbose."
   (magit-insert-section (sprig-thinking block t)
-    (magit-insert-heading (propertize "thinking" 'face 'sprig-review-thinking))
+    (magit-insert-heading (sprig-review--face "thinking" 'sprig-review-thinking))
     (magit-insert-section-body
       (insert (string-trim-right (plist-get block :text)) "\n"))))
 
 (defun sprig-review--insert-error (block)
   "Insert an error BLOCK."
   (magit-insert-section (sprig-error block)
-    (magit-insert-heading (propertize "error" 'face 'error))
+    (magit-insert-heading (sprig-review--face "error" 'error))
     (insert (string-trim-right (or (plist-get block :text) "")) "\n")))
 
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
   (when (and value (not (string-empty-p (format "%s" value))))
-    (concat (propertize (format "%-9s" (concat key ":")) 'face 'sprig-review-meta-key)
+    (concat (sprig-review--face (format "%-9s" (concat key ":"))
+                                'sprig-review-meta-key)
             (format "%s" value) "\n")))
 
 (defun sprig-review--insert-headers (model meta)
@@ -312,16 +387,24 @@ META is an optional plist of display metadata (see
 `sprig-review-mode'."
   (let* ((inhibit-read-only t)
          (blocks (plist-get model :blocks))
-         (last (car (last blocks))))
+         (last (car (last blocks)))
+         (first t))
     (setq sprig-review--tail nil)
     (erase-buffer)
     (magit-insert-section (sprig-review)
       (sprig-review--insert-headers model meta)
       (dolist (block blocks)
+        ;; A blank line between blocks, so the turns read apart.  It goes
+        ;; before the block rather than after, which would sit between the
+        ;; live text section's end and `sprig-review--tail'.
+        (unless first (insert "\n"))
+        (setq first nil)
         (pcase (plist-get block :type)
           ('user     (sprig-review--insert-user block))
-          ;; Only the last block, when it is text, is the live tail.
-          ('text     (sprig-review--insert-text block (eq block last)))
+          ;; The live tail is the last block, when it is text, and only
+          ;; while a turn is actually streaming in.
+          ('text     (sprig-review--insert-text
+                      block (and sprig-review--streaming (eq block last))))
           ('thinking (sprig-review--insert-thinking block))
           ('tool     (sprig-review--insert-tool block))
           ('error    (sprig-review--insert-error block)))))
@@ -425,6 +508,12 @@ re-render, whenever a tail is established.  Every other event, and the
 first `text' of a run, clears the tail and schedules a coalesced render
 \(see `sprig-review-refresh-delay'), which re-establishes the tail."
   (push event sprig-review--events)
+  ;; Track whether a turn is in flight, so a settled block renders fontified
+  ;; rather than as a raw live tail (see `sprig-review--streaming').
+  (pcase (car event)
+    ('text (setq sprig-review--streaming t))
+    ((or 'done 'error) (setq sprig-review--streaming nil))
+    (_ nil))
   (if (and (eq (car event) 'text)
            sprig-review--tail (marker-position sprig-review--tail))
       (sprig-review--append-streamed (cadr event))
@@ -436,16 +525,19 @@ first `text' of a run, clears the tail and schedules a coalesced render
   "Drop this review buffer's accumulated events and render empty.
 With META, replace the header metadata plist."
   (sprig-review--cancel-timer)
-  (setq sprig-review--events nil sprig-review--dirty nil)
+  (setq sprig-review--events nil sprig-review--dirty nil
+        sprig-review--streaming nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
 (defun sprig-review-seed (events &optional meta)
   "Seed this review buffer with EVENTS (in order) and refresh synchronously.
 Use this to replay history before the live sink appends more, so a later
-`sprig-review-consume' rebuilds from history plus the new event."
+`sprig-review-consume' rebuilds from history plus the new event.  Replayed
+history is settled, so it renders with no live tail."
   (sprig-review--cancel-timer)
-  (setq sprig-review--events (reverse events) sprig-review--dirty nil)
+  (setq sprig-review--events (reverse events) sprig-review--dirty nil
+        sprig-review--streaming nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 

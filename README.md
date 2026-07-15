@@ -77,7 +77,7 @@ With `use-package` and a local checkout:
 
 1. `M-x sprig-status` opens the navigator, listing every stored session on the host, newest first; `/` narrows it to a project or title.
 2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history. `s` starts a fresh session, prompting for its working directory. `M-x sprig-review-session` does the same directly.
-3. In the review buffer, review the agent's work: its file edits show as a foldable diff, prose and tool activity as folded sections. Move with `n` / `p`, fold with `TAB`.
+3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
 5. `c i` (or `k` in the navigator) interrupts a streaming turn; the session resumes on the next send.
 
@@ -113,6 +113,8 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 ### Review buffer
 
 The review buffer is a read-only, Magit-like view of one session. It replays the whole transcript from the CLI's session log (`~/.claude/projects/<cwd>/<id>.jsonl` on the session host, fetched over SSH for a remote session) and, once connected, streams the in-flight turn in live. The agent's file edits render inline as a foldable diff, reconstructed from the `Edit` / `MultiEdit` / `Write` tool calls. Move with `n` / `p`, fold with `TAB`.
+
+Every tool call folds to its one-line heading, so a long turn reads as a list of what the agent did rather than as pages of diff; `TAB` opens the change you want to review. Set `sprig-review-expand-diffs` to `t` to have diff-bearing tools render open instead. Your own turns are set off from the agent's output by a tinted background and a blank line, so the conversation reads as an exchange at a glance.
 
 It is also the steering surface. Marking is the one selection primitive; a verb acts on the marked sections, or the section at point when nothing is marked. Every change-touching verb is an instruction sent to the agent (Sprig itself never runs git):
 
@@ -152,13 +154,14 @@ When the agent calls `AskUserQuestion` mid-turn, Sprig renders the question and 
 | `sprig-status-ignore-directories` | `nil` | Regexps matched against a session's encoded project directory; matches are hidden from the navigator (e.g. throwaway `/tmp` / SDK-probe runs) |
 | `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
 | `sprig-review-refresh-delay` | `0.1` | Seconds to coalesce structural events before re-rendering a review buffer |
+| `sprig-review-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |
 
 The navigator scans every session log under `~/.claude/projects/` on the session host, newest first, and reads each session's own `cwd` and `ai-title` records for its project and title. For a remote session those logs live on the SSH host and are scanned over the same SSH the transport uses, in two round trips (a mtime-sorted listing, then one batched slurp of the capped set's tails), so a host with hundreds of sessions still lists quickly.
 
 ## Status / caveats
 
-- v0.5.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.5.1, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

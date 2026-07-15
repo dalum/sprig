@@ -27,6 +27,14 @@
      (goto-char (point-min))
      ,@body))
 
+(defmacro sprig-review-tests--rendered-expanded (model meta &rest body)
+  "Like `sprig-review-tests--rendered', with diff-bearing tools expanded.
+Tools fold by default, which keeps their hunks out of the buffer entirely;
+the tests that reach into a hunk section need them drawn."
+  (declare (indent 2) (debug (form form body)))
+  `(let ((sprig-review-expand-diffs t))
+     (sprig-review-tests--rendered ,model ,meta ,@body)))
+
 (defun sprig-review-tests--edit-model ()
   "A model with one Edit call and its result, plus a text block."
   (let ((input (json-serialize
@@ -40,7 +48,7 @@
        (done 0.0123 nil)))))
 
 (ert-deftest sprig-review-mode-test-renders-text-and-diff ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (let ((s (buffer-string)))
       (should (string-match-p "assistant" s))
       (should (string-match-p "Editing the file\\." s))
@@ -60,6 +68,77 @@
     (should (re-search-forward "↳ result" nil t))
     (magit-section-show (magit-current-section))
     (should (string-match-p "applied" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-tools-fold-by-default ()
+  ;; Every tool folds to its one-line heading, diff-bearing or not, so a long
+  ;; turn reads as a list of what the agent did.  The diff is one TAB away.
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (let ((s (buffer-string)))
+      ;; The heading still names the file and its line counts.
+      (should (string-match-p "🔧 Edit" s))
+      (should (string-match-p "(\\+1 -2)" s))
+      ;; The hunks themselves are not drawn.
+      (should-not (string-match-p "^\\+new$" s)))
+    (goto-char (point-min))
+    (re-search-forward "🔧 Edit")
+    (should (oref (magit-current-section) hidden))
+    (magit-section-show (magit-current-section))
+    (should (string-match-p "^\\+new$" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-expand-diffs-option ()
+  ;; `sprig-review-expand-diffs' opts back into a diff-bearing tool rendering
+  ;; open; a tool with no diff folds regardless.
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+    (goto-char (point-min))
+    (re-search-forward "🔧 Edit")
+    (should-not (oref (magit-current-section) hidden)))
+  (let ((model (sprig-review-build
+                `((tool-call "b1" "Bash" ,(json-serialize (list :command "ls")))
+                  (tool-result "b1" nil "out")))))
+    (sprig-review-tests--rendered-expanded model nil
+      (goto-char (point-min))
+      (re-search-forward "🔧 Bash")
+      (should (oref (magit-current-section) hidden)))))
+
+(ert-deftest sprig-review-mode-test-faces-survive-font-lock ()
+  ;; `magit-section-mode' turns font-lock on, and font-lock's unfontify pass
+  ;; strips the plain `face' property off every region it redisplays.  So
+  ;; everything rendered must carry `font-lock-face' instead, or it silently
+  ;; loses its colours as soon as the window scrolls over it.
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model)
+      '(:title "T")
+    (font-lock-mode 1)
+    (font-lock-fontify-region (point-min) (point-max))
+    (cl-flet ((face-at (re)
+                (goto-char (point-min))
+                (re-search-forward re)
+                (get-text-property (match-beginning 0) 'font-lock-face)))
+      (should (eq (face-at "^assistant$") 'sprig-review-role))
+      (should (eq (face-at "🔧 Edit") 'sprig-review-tool))
+      (should (eq (face-at "^\\+new$") 'sprig-review-added))
+      (should (eq (face-at "^-old$") 'sprig-review-removed))
+      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-review-file))
+      (should (eq (face-at "Title:") 'sprig-review-meta-key)))))
+
+(ert-deftest sprig-review-mode-test-user-block-is-set-off ()
+  (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
+    (sprig-review-tests--rendered model nil
+      ;; A blank line separates the turns.
+      (should (string-match-p "the question\n\nassistant" (buffer-string)))
+      (goto-char (point-min))
+      (re-search-forward "^user$")
+      (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                  'sprig-review-user-label))
+      ;; The body carries the tint too, so the turn reads as one block.
+      (re-search-forward "the question")
+      (should (memq 'sprig-review-user
+                    (ensure-list (get-text-property (match-beginning 0)
+                                                    'font-lock-face))))
+      ;; The agent's output does not.
+      (re-search-forward "the answer")
+      (should-not (memq 'sprig-review-user
+                        (ensure-list (get-text-property (match-beginning 0)
+                                                        'font-lock-face)))))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)
@@ -86,7 +165,7 @@
 (ert-deftest sprig-review-mode-test-hunk-section-carries-plist ()
   ;; The verbs will read the object under point; a hunk section must hold
   ;; its hunk plist on the `value' slot.
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
     (should (re-search-forward "^\\+new$" nil t))
     (let ((sec (magit-current-section)))
@@ -138,8 +217,8 @@
     (let ((s (buffer-string)))
       (should (string-match-p "Hello" s))
       (should (string-match-p "🔧 Edit" s))
-      ;; The result folds by default, so its heading shows but its body does not.
-      (should (string-match-p "↳ result" s))
+      ;; The tool folds by default, so neither its diff nor its result is drawn.
+      (should-not (string-match-p "↳ result" s))
       (should-not (string-match-p "ok" s))
       (should (string-match-p "\\$0\\.02" s)))))
 
@@ -171,15 +250,20 @@
       (sprig-review-consume (list 'tool-call "t1" "Edit" input))
       (sprig-review-consume '(tool-result "t1" nil "secret")))
     (sprig-review-flush)
+    ;; The tool folds by default; unfold it like a user would, to reach the
+    ;; result section nested inside it, which folds by default too.
+    (goto-char (point-min))
+    (should (re-search-forward "🔧 Edit" nil t))
+    (should (oref (magit-current-section) hidden))
+    (magit-section-show (magit-current-section))
     (goto-char (point-min))
     (should (re-search-forward "↳ result" nil t))
     (let ((sec (magit-current-section)))
       (should (eq (oref sec type) 'sprig-result))
-      ;; Results fold by default; unfold like a user would.
       (should (oref sec hidden))
       (magit-section-show sec)
       (should-not (oref sec hidden)))
-    ;; A later event refreshes the buffer; the unfold must survive.
+    ;; A later event refreshes the buffer; both unfolds must survive.
     (sprig-review-consume '(done 0.01 nil))
     (sprig-review-flush)
     (goto-char (point-min))
@@ -236,6 +320,32 @@
     (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
     (sprig-review-flush)
     (should (string-match-p "line1\nline2" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-replayed-text-is-not-a-live-tail ()
+  ;; A stored session log carries no `done' event, so the last text block must
+  ;; not be taken for a streaming tail on position alone: replayed history is
+  ;; settled, and a live tail renders raw, costing that block its markdown.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-seed '((user "q") (text "the answer")))
+    (should-not sprig-review--streaming)
+    (should-not sprig-review--tail)
+    (should (string-match-p "the answer" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-tail-follows-streaming ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "partial"))
+    (sprig-review-flush)
+    ;; Mid-turn: the block is live, so it takes appends in place.
+    (should sprig-review--streaming)
+    (should sprig-review--tail)
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    ;; The turn settled, so the block re-renders as prose, with no tail.
+    (should-not sprig-review--streaming)
+    (should-not sprig-review--tail)
+    (should (string-match-p "partial" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
   (let ((model (sprig-review-build
@@ -308,7 +418,7 @@
                           (sprig-review-run-instruction "make test"))))
 
 (ert-deftest sprig-review-mode-test-marking ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
     (should (re-search-forward "^\\+new$" nil t))
     (let ((ident (magit-section-ident (magit-current-section))))
@@ -322,7 +432,7 @@
       (should-not (member ident sprig-review--marks)))))
 
 (ert-deftest sprig-review-mode-test-reject-pairs ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
     (let ((pairs (sprig-review--reject-pairs (list (magit-current-section)))))
@@ -333,7 +443,7 @@
 (ert-deftest sprig-review-mode-test-reject-verb ()
   ;; The whole verb path: extract the hunk at point, build the instruction,
   ;; hand it to the send (stubbed here to capture it).
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
     (let (sent)
@@ -388,7 +498,7 @@
                    "/ssh:me@host:/a/b.el"))))
 
 (ert-deftest sprig-review-mode-test-section-file ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     ;; On a hunk: the owning change's file.
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
