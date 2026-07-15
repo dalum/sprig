@@ -393,6 +393,35 @@
     (should (equal (sprig-review-parse-session-line result)
                    '((tool-result "t1" nil "ok"))))))
 
+(ert-deftest sprig-review-test-session-parse-user-text-blocks ()
+  ;; The CLI spells a user turn's prose either as a bare string or as a list
+  ;; of `text' blocks, and picks per record.  Reading only the string form
+  ;; drops the block-form turns, so a replayed session shows no user input.
+  (let ((blocks (json-serialize
+                 (list :type "user"
+                       :message (list :role "user"
+                                      :content (vector (list :type "text"
+                                                             :text "do it"))))))
+        ;; A turn can mix its prose with a tool result in the one message.
+        (mixed (json-serialize
+                (list :type "user"
+                      :message
+                      (list :content
+                            (vector (list :type "tool_result" :tool_use_id "t1"
+                                          :is_error :false :content "ok")
+                                    (list :type "text" :text "now this")))))))
+    (should (equal (sprig-review-parse-session-line blocks) '((user "do it"))))
+    (should (equal (sprig-review-parse-session-line mixed)
+                   '((tool-result "t1" nil "ok") (user "now this"))))))
+
+(ert-deftest sprig-review-test-session-parse-user-skips-empty-text ()
+  ;; An empty or whitespace-only text block is not a turn.
+  (let ((blank (json-serialize
+                (list :type "user"
+                      :message (list :content (vector (list :type "text"
+                                                            :text "  \n")))))))
+    (should (null (sprig-review-parse-session-line blank)))))
+
 (ert-deftest sprig-review-test-session-title-and-sidechain ()
   (let ((title (json-serialize (list :type "ai-title" :aiTitle "My title")))
         (side (json-serialize
@@ -928,6 +957,26 @@ Return the log directory."
             (should (= 1 (length rows)))
             (should (equal (plist-get (car rows) :session) "keep-1"))))
       (delete-directory root t))))
+
+(ert-deftest sprig-test-undefine-faces-lets-a-reload-restyle ()
+  ;; `defface' is a no-op on an already-defined face, so `sprig-reload' has
+  ;; to undefine sprig's faces first or an edited spec keeps its stale
+  ;; attributes until Emacs restarts.
+  (let ((face 'sprig-tests--throwaway-face))
+    (unwind-protect
+        (progn
+          (face-spec-set face '((t :slant italic)) 'face-defface-spec)
+          (should (eq (face-attribute face :slant nil t) 'italic))
+          ;; A plain re-`defface' does not take: the old slant survives.
+          (custom-declare-face face '((t :weight bold)) "")
+          (should (eq (face-attribute face :slant nil t) 'italic))
+          ;; Undefining first is what lets the new spec land.
+          (cl-letf (((symbol-function 'face-list) (lambda () (list face))))
+            (sprig--undefine-faces))
+          (custom-declare-face face '((t :weight bold)) "")
+          (should (eq (face-attribute face :slant nil t) 'unspecified))
+          (should (eq (face-attribute face :weight nil t) 'bold)))
+      (put face 'face-defface-spec nil))))
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

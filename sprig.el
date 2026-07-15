@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.1
+;; Version: 0.5.2
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1569,15 +1569,29 @@ live session.  Narrow with `/', lift the cap with `L'."
 (defvar sprig--source-files '("sprig-review" "sprig" "sprig-review-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
+(defun sprig--undefine-faces ()
+  "Drop the definitions of sprig's own faces, so a reload re-applies them.
+`defface' declares a face only when it is not already defined, so simply
+re-loading a file leaves an edited face spec with its stale attributes
+until Emacs restarts, which is the very thing `sprig-reload' is meant to
+spare you.  Clearing `face-defface-spec' makes the next `defface' take.
+A face customized or themed by the user keeps that, since those specs
+override the defface one anyway."
+  (dolist (face (face-list))
+    (when (string-prefix-p "sprig-" (symbol-name face))
+      (put face 'face-defface-spec nil))))
+
 ;;;###autoload
 (defun sprig-reload ()
   "Reload sprig's source files from disk, in dependency order.
 A development convenience: after editing any of `sprig-review', `sprig',
 or `sprig-review-mode', re-load all three from `sprig--source-directory'
 so the change takes effect without restarting Emacs.  The `.el' source is
-loaded, not any stale byte code beside it.  Open buffers keep their state;
-only their behaviour picks up the new definitions."
+loaded, not any stale byte code beside it.  Edited faces take effect too
+\(see `sprig--undefine-faces').  Open buffers keep their state; only their
+behaviour picks up the new definitions."
   (interactive)
+  (sprig--undefine-faces)
   (dolist (file sprig--source-files)
     (load (expand-file-name (concat file ".el") sprig--source-directory) nil t))
   (message "sprig: reloaded %d files from %s"

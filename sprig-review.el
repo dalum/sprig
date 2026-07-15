@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.1
+;; Version: 0.5.2
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -255,22 +255,34 @@ over SSH.  CWD is encoded the way the CLI names its project directory."
                (_ nil)))
            content))))
 
-(defun sprig-review--user-result-event (b)
-  "Map a user-message tool_result block B to a `tool-result' event, or nil."
-  (when (and (consp b) (equal (alist-get 'type b) "tool_result"))
-    (list 'tool-result
-          (or (alist-get 'tool_use_id b) "t")
-          (alist-get 'is_error b)
-          (string-trim (sprig-review--flatten-content (alist-get 'content b))))))
+(defun sprig-review--user-block-event (b)
+  "Map one block B of a user message to an event, or nil.
+A `tool_result' block carries a tool call's output back; a `text' block is
+the turn's own prose, which the CLI spells this way as often as it spells
+it a bare string."
+  (when (consp b)
+    (pcase (alist-get 'type b)
+      ("tool_result"
+       (list 'tool-result
+             (or (alist-get 'tool_use_id b) "t")
+             (alist-get 'is_error b)
+             (string-trim (sprig-review--flatten-content (alist-get 'content b)))))
+      ("text"
+       (let ((text (string-trim (or (alist-get 'text b) ""))))
+         (unless (string-empty-p text) (list 'user text)))))))
 
 (defun sprig-review--user-events (content)
-  "Map a user message CONTENT (string prose or tool_result blocks) to events."
+  "Map a user message CONTENT to events.
+CONTENT is either the turn's prose as a bare string, or a list of blocks
+holding that prose, a tool call's result, or both.  Both spellings of the
+prose have to be read: the CLI picks between them per record, so taking
+only the string one drops half a session's user turns from the replay."
   (cond
    ((stringp content)
     (unless (string-empty-p (string-trim content))
       (list (list 'user (string-trim content)))))
    ((listp content)
-    (delq nil (mapcar #'sprig-review--user-result-event content)))))
+    (delq nil (mapcar #'sprig-review--user-block-event content)))))
 
 (defun sprig-review-session-record-events (record)
   "Map one parsed session-log RECORD (an alist) to a list of events.
