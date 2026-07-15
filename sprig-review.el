@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.5
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -123,14 +123,15 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;
 ;; `sprig-review-build' folds a list of transport events into a turn
 ;; model, a plist (:session ID :cost N :error BOOL :done BOOL :blocks
-;; BLOCKS).  Each block is one of:
+;; BLOCKS).  Every block carries the `:time' of the most recent `time'
+;; event before it, and is one of:
 ;;
-;;   (:type user     :text STR)
-;;   (:type text     :text STR)
-;;   (:type thinking :text STR)
+;;   (:type user     :text STR :time ISO)
+;;   (:type text     :text STR :time ISO)
+;;   (:type thinking :text STR :time ISO)
 ;;   (:type tool     :id ID :name NAME :input JSON :changes CHANGES
-;;                   :result (:error BOOL :text STR) | nil)
-;;   (:type error    :text STR)
+;;                   :result (:error BOOL :text STR) | nil :time ISO)
+;;   (:type error    :text STR :time ISO)
 ;;
 ;; Consecutive `text' (or `thinking') events coalesce into one block; a
 ;; `text-block' event, a differing block kind, or any structural event
@@ -138,6 +139,15 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; unmatched `tool' block of the same id.  The live wire path never emits
 ;; `user' events (sprig sent that turn); the stored-session path does, so
 ;; a replayed transcript shows the user's turns too.
+;;
+;; A `time' event carries an ISO 8601 UTC stamp and opens no block of its
+;; own; it just says when what follows happened.  The stored log stamps
+;; every record, so replayed history keeps its real times; the wire
+;; carries none, so the sink stamps events as they arrive (see
+;; `sprig-review-consume').  Either way the stamp lands in the event list
+;; itself, which is what keeps it stable: the model is rebuilt from that
+;; list on every render, so a time read off the clock here would tick
+;; forward under a conversation that had long since finished.
 
 (defun sprig-review--find-open-tool (blocks id)
   "Return the tool block in BLOCKS with ID and no result yet, or nil."
@@ -151,6 +161,7 @@ for tools that touch no files, or when INPUT lacks a file path."
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes."
   (let ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
+        (time nil)          ; the stamp the next block opened takes
         (blocks '())        ; built in reverse
         (open nil))         ; the open text/thinking block being coalesced
     (dolist (ev events)
@@ -158,25 +169,26 @@ See the section commentary for the event vocabulary and block shapes."
         (`(session ,id) (setq session id))
         (`(title ,tt) (setq title tt))
         (`(mode ,m) (setq mode m))
+        (`(time ,ts) (setq time ts))
         (`(text-block) (setq open nil))
         (`(text ,s)
          (if (and open (eq (plist-get open :type) 'text))
              (plist-put open :text (concat (plist-get open :text) s))
-           (setq open (list :type 'text :text s))
+           (setq open (list :type 'text :text s :time time))
            (push open blocks)))
         (`(thinking ,s)
          (if (and open (eq (plist-get open :type) 'thinking))
              (plist-put open :text (concat (plist-get open :text) s))
-           (setq open (list :type 'thinking :text s))
+           (setq open (list :type 'thinking :text s :time time))
            (push open blocks)))
         (`(user ,text)
          (setq open nil)
-         (push (list :type 'user :text text) blocks))
+         (push (list :type 'user :text text :time time) blocks))
         (`(tool-call ,id ,name ,input)
          (setq open nil)
          (push (list :type 'tool :id id :name name :input input
                      :changes (sprig-review-tool-changes name input)
-                     :result nil)
+                     :result nil :time time)
                blocks))
         (`(tool-result ,id ,is-error ,rtext)
          (setq open nil)
@@ -187,12 +199,13 @@ See the section commentary for the event vocabulary and block shapes."
              ;; rather than drop it, so nothing is silently lost.
              (push (list :type 'tool :id id :name nil :input nil
                          :changes nil
-                         :result (list :error is-error :text rtext))
+                         :result (list :error is-error :text rtext)
+                         :time time)
                    blocks))))
         (`(done ,c ,e) (setq done t cost c error e))
         (`(error ,m)
          (setq open nil)
-         (push (list :type 'error :text m) blocks))))
+         (push (list :type 'error :text m :time time) blocks))))
     (list :session session :title title :mode mode
           :cost cost :error error :done done
           :blocks (nreverse blocks))))
@@ -284,10 +297,20 @@ only the string one drops half a session's user turns from the replay."
    ((listp content)
     (delq nil (mapcar #'sprig-review--user-block-event content)))))
 
+(defun sprig-review--stamp-events (record events)
+  "Prefix EVENTS with a `time' event carrying RECORD's timestamp.
+Returns EVENTS unchanged when it is empty or the record is unstamped, so
+no stray `time' event outlives the blocks it was meant to date."
+  (let ((ts (alist-get 'timestamp record)))
+    (if (and events (stringp ts))
+        (cons (list 'time ts) events)
+      events)))
+
 (defun sprig-review-session-record-events (record)
   "Map one parsed session-log RECORD (an alist) to a list of events.
 Skips sidechain (subagent) records and bookkeeping records that carry no
-conversation content."
+conversation content.  A conversation record is stamped with its own
+`timestamp', so replayed history dates from the log rather than from now."
   (let ((type (alist-get 'type record)))
     (cond
      ((equal type "ai-title")
@@ -295,13 +318,17 @@ conversation content."
      ;; Only the main thread; sidechains are subagent transcripts.
      ((eq (alist-get 'isSidechain record) t) nil)
      ((equal type "assistant")
-      (sprig-review--assistant-events
-       (alist-get 'content (alist-get 'message record))))
+      (sprig-review--stamp-events
+       record
+       (sprig-review--assistant-events
+        (alist-get 'content (alist-get 'message record)))))
      ((equal type "user")
       (let ((mode (alist-get 'permissionMode record))
             (events (sprig-review--user-events
                      (alist-get 'content (alist-get 'message record)))))
-        (if mode (cons (list 'mode mode) events) events))))))
+        (sprig-review--stamp-events
+         record
+         (if mode (cons (list 'mode mode) events) events)))))))
 
 (defun sprig-review-parse-session-line (line)
   "Parse one JSONL session-log LINE into a list of events, or nil."

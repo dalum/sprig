@@ -35,6 +35,19 @@ the tests that reach into a hunk section need them drawn."
   `(let ((sprig-review-expand-diffs t))
      (sprig-review-tests--rendered ,model ,meta ,@body)))
 
+(defun sprig-review-tests--margin-stamps ()
+  "Return the timestamps hanging in the current buffer's left margin, in order.
+They ride an overlay's `before-string' display property, not the buffer
+text, so they have to be read back off the overlays."
+  (let (stamps)
+    (dolist (ov (overlays-in (point-min) (point-max)))
+      (when (overlay-get ov 'sprig-review-margin)
+        (let ((display (get-text-property 0 'display
+                                          (overlay-get ov 'before-string))))
+          (should (equal (car display) '(margin left-margin)))
+          (push (cons (overlay-start ov) (cadr display)) stamps))))
+    (mapcar #'cdr (sort stamps (lambda (a b) (< (car a) (car b)))))))
+
 (defun sprig-review-tests--edit-model ()
   "A model with one Edit call and its result, plus a text block."
   (let ((input (json-serialize
@@ -191,6 +204,92 @@ the tests that reach into a hunk section need them drawn."
                   (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))))))
     (sprig-review-tests--rendered model nil
       (should (equal (buffer-string) "\non it\n\nthinking\nRead  a\n")))))
+
+(defmacro sprig-review-tests--with-tz (tz &rest body)
+  "Run BODY with the local timezone set to TZ, restoring it after."
+  (declare (indent 1) (debug (form body)))
+  `(let ((old (getenv "TZ")))
+     (unwind-protect (progn (setenv "TZ" ,tz) ,@body)
+       (setenv "TZ" old))))
+
+(ert-deftest sprig-review-mode-test-time-string ()
+  ;; The log stamps in UTC; the margin shows local time.
+  (sprig-review-tests--with-tz "UTC0"
+    (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z") "09:16"))
+    (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
+      (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z")
+                     "07-15 09:16"))))
+  ;; POSIX TZ signs are inverted: UTC-2 is two hours east of Greenwich.
+  (sprig-review-tests--with-tz "UTC-2"
+    (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z") "11:16")))
+  ;; A block with no usable time is worth more than a render that dies on one.
+  (should-not (sprig-review--time-string "not a time"))
+  (should-not (sprig-review--time-string nil))
+  (let ((sprig-review-timestamp-format nil))
+    (should-not (sprig-review--time-string "2026-07-15T09:16:56.955Z"))))
+
+(ert-deftest sprig-review-mode-test-margin-width ()
+  ;; The margin sizes itself to the format, and gives the room back when off.
+  (let ((sprig-review-timestamp-format "%H:%M"))
+    (should (= (sprig-review--margin-width) 6)))
+  (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
+    (should (= (sprig-review--margin-width) 12)))
+  (let ((sprig-review-timestamp-format nil))
+    (should (= (sprig-review--margin-width) 0))))
+
+(ert-deftest sprig-review-mode-test-timestamp-rides-the-margin ()
+  ;; The stamp hangs off an overlay, so it dates the block without putting a
+  ;; character into the buffer text the verbs read.
+  (sprig-review-tests--with-tz "UTC0"
+    (let ((model (sprig-review-build
+                  `((time "2026-07-15T09:16:56.955Z")
+                    (user "q")
+                    (time "2026-07-15T09:17:30.000Z")
+                    (tool-call "t1" "Bash" ,(json-serialize (list :command "ls")))))))
+      (sprig-review-tests--rendered model nil
+        (should (equal (buffer-string) "\nq\n\nBash  ls\n"))
+        (let ((stamps (sprig-review-tests--margin-stamps)))
+          ;; One per block, each against its own first line.
+          (should (equal stamps '("09:16" "09:17")))))
+      ;; With the format off, the margin is empty and claims no width.
+      (let ((sprig-review-timestamp-format nil))
+        (sprig-review-tests--rendered model nil
+          (should (null (sprig-review-tests--margin-stamps)))
+          (should (= left-margin-width 0)))))))
+
+(ert-deftest sprig-review-mode-test-live-stamps-once-per-block ()
+  ;; The wire carries no times, so the sink stamps on arrival: once per block,
+  ;; not once per streamed token.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "Hel"))
+    (sprig-review-consume '(text "lo"))
+    (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
+    (should (= 2 (seq-count (lambda (e) (eq (car e) 'time)) sprig-review--events)))
+    ;; And the stamps reach the blocks.
+    (let ((blocks (plist-get (sprig-review-build (reverse sprig-review--events))
+                             :blocks)))
+      (should (= 2 (length blocks)))
+      (should (plist-get (nth 0 blocks) :time))
+      (should (plist-get (nth 1 blocks) :time)))))
+
+(ert-deftest sprig-review-mode-test-live-stamp-survives-a-rebuild ()
+  ;; The stamp lives in the event list, not the clock, so rebuilding the model
+  ;; (which every render does) redates nothing.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "hi"))
+    (let ((first (plist-get (car (plist-get (sprig-review-build
+                                             (reverse sprig-review--events))
+                                            :blocks))
+                            :time)))
+      (should first)
+      (sprig-review-consume '(done 0.01 nil))
+      (should (equal first
+                     (plist-get (car (plist-get (sprig-review-build
+                                                 (reverse sprig-review--events))
+                                                :blocks))
+                                :time))))))
 
 (ert-deftest sprig-review-mode-test-header ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model)

@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.5
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -28,6 +28,7 @@
 
 (require 'magit-section)
 (require 'diff-mode)                     ; for the diff-* faces
+(require 'iso8601)                       ; for the log's own timestamps
 (require 'sprig-review)
 (require 'subr-x)
 (require 'eieio)
@@ -89,6 +90,10 @@ point still reads as yours instead of losing its tint to the cursor."
   "Face for a metadata key in the header."
   :group 'sprig)
 
+(defface sprig-review-time '((t :inherit font-lock-comment-face))
+  "Face for a block's timestamp in the left margin."
+  :group 'sprig)
+
 (defface sprig-review-marked '((t :inherit highlight))
   "Face for the heading of a marked section."
   :group 'sprig)
@@ -141,6 +146,17 @@ TAB opens the one you want to review."
   :type 'boolean
   :group 'sprig)
 
+(defcustom sprig-review-timestamp-format "%H:%M"
+  "Time format for the left-margin timestamp against each block.
+A `format-time-string' format, rendered in local time.  nil shows no
+timestamps and takes the margin back.  Widen it (say \"%m-%d %H:%M\") to
+date a conversation spanning days; the margin sizes itself to fit.
+
+Replayed history is dated from the session log's own record timestamps;
+a live turn is dated when its first event reaches the buffer."
+  :type '(choice (const :tag "No timestamps" nil) string)
+  :group 'sprig)
+
 (defcustom sprig-review-fontify-markdown t
   "When non-nil, render user and assistant prose with `markdown-mode' faces.
 Markup characters (`*', `#', ...) are hidden.  Has no effect when
@@ -187,6 +203,54 @@ Font-lock fontifies with `face', so a string fontified elsewhere (see
           (remove-list-of-text-properties pos next '(face) string))
         (setq pos next)))
     string))
+
+;;;; Timestamp margin
+;;
+;; A block's time shows in the left margin, the way magit-log shows a
+;; commit's date: it dates every row without spending a column of the
+;; prose itself, and it cannot be confused for something the agent said.
+;; The stamp rides on an overlay's `before-string', so it stays out of the
+;; buffer text, and out of the way of the verbs that read that text.
+
+(defun sprig-review--time-string (iso)
+  "Return ISO, an ISO 8601 stamp, formatted per `sprig-review-timestamp-format'.
+Returns nil when timestamps are off, or when ISO is missing or unparsable
+\(a hand-edited log, or a record shape we have not seen), since a block
+with no time is worth more than a render that dies over one."
+  (when (and sprig-review-timestamp-format (stringp iso))
+    (ignore-errors
+      (format-time-string sprig-review-timestamp-format
+                          (encode-time (iso8601-parse iso))))))
+
+(defun sprig-review--margin-width ()
+  "Return the columns the timestamp margin needs, or 0 when it is off."
+  (if sprig-review-timestamp-format
+      ;; Formatted now, purely to measure the format; every stamp it makes
+      ;; is the same width, bar a format holding a variable-width field.
+      (1+ (string-width (format-time-string sprig-review-timestamp-format)))
+    0))
+
+(defun sprig-review--update-margin ()
+  "Size the left margin of every window showing this buffer to fit a stamp.
+`left-margin-width' alone only reaches a window on the next
+`set-window-buffer', so the live windows are set too, and a change to
+`sprig-review-timestamp-format' shows on the next render."
+  (setq left-margin-width (sprig-review--margin-width))
+  (dolist (win (get-buffer-window-list nil nil t))
+    (set-window-margins win left-margin-width right-margin-width)))
+
+(defun sprig-review--insert-margin-time (pos iso)
+  "Show ISO's time in the left margin, against the line holding POS."
+  (when-let ((stamp (sprig-review--time-string iso)))
+    (let ((ov (make-overlay pos (min (1+ pos) (point-max)))))
+      (overlay-put ov 'sprig-review-margin t)
+      (overlay-put ov 'before-string
+                   (propertize " " 'display
+                               ;; `face', not `font-lock-face': an overlay
+                               ;; string is not buffer text, so font-lock
+                               ;; never sees it to strip it.
+                               `((margin left-margin)
+                                 ,(propertize stamp 'face 'sprig-review-time)))))))
 
 ;;;; Heading helpers
 
@@ -408,6 +472,8 @@ META is an optional plist of display metadata (see
          (prev nil)
          (first t))
     (setq sprig-review--tail nil)
+    ;; Before the erase: these hang off buffer text that is about to go.
+    (remove-overlays (point-min) (point-max) 'sprig-review-margin t)
     (erase-buffer)
     (magit-insert-section (sprig-review)
       (sprig-review--insert-headers model meta)
@@ -424,15 +490,20 @@ META is an optional plist of display metadata (see
                        (sprig-review--prose-block-p prev)))
           (insert "\n"))
         (setq first nil prev block)
-        (pcase (plist-get block :type)
-          ('user     (sprig-review--insert-user block))
-          ;; The live tail is the last block, when it is text, and only
-          ;; while a turn is actually streaming in.
-          ('text     (sprig-review--insert-text
-                      block (and sprig-review--streaming (eq block last))))
-          ('thinking (sprig-review--insert-thinking block))
-          ('tool     (sprig-review--insert-tool block))
-          ('error    (sprig-review--insert-error block)))))
+        ;; Held from before the block is drawn, so the stamp lands against
+        ;; its first line rather than against whatever follows it.
+        (let ((start (point)))
+          (pcase (plist-get block :type)
+            ('user     (sprig-review--insert-user block))
+            ;; The live tail is the last block, when it is text, and only
+            ;; while a turn is actually streaming in.
+            ('text     (sprig-review--insert-text
+                        block (and sprig-review--streaming (eq block last))))
+            ('thinking (sprig-review--insert-thinking block))
+            ('tool     (sprig-review--insert-tool block))
+            ('error    (sprig-review--insert-error block)))
+          (sprig-review--insert-margin-time start (plist-get block :time)))))
+    (sprig-review--update-margin)
     (goto-char (point-min))))
 
 ;;;; Live sink: accumulate events, refresh the buffer
@@ -526,12 +597,27 @@ Called by the coalescing timer, and usable to force a render immediately."
           (run-with-timer sprig-review-refresh-delay nil
                           #'sprig-review-flush (current-buffer)))))
 
+(defun sprig-review--stamp-arrival (event)
+  "Push a `time' event dating EVENT's arrival, unless it inherits one.
+The wire carries no times, so a live turn is dated when it reaches the
+buffer, and dated here rather than at render, since the model is rebuilt
+from this event list every render and a time read off the clock there
+would tick forward under a finished conversation.  One stamp per block is
+enough: only the first `text' of a run opens a block, and the deltas
+extending it are contiguous, so a `text' behind a `text' takes the stamp
+already in the list rather than adding thousands of its own."
+  (unless (and (eq (car event) 'text)
+               (eq (car-safe (car sprig-review--events)) 'text))
+    (push (list 'time (format-time-string "%FT%T.%3NZ" nil t))
+          sprig-review--events)))
+
 (defun sprig-review-consume (event)
   "Fold transport EVENT into the current review buffer.
 A streamed `text' delta extends the live text section in place, with no
 re-render, whenever a tail is established.  Every other event, and the
 first `text' of a run, clears the tail and schedules a coalesced render
 \(see `sprig-review-refresh-delay'), which re-establishes the tail."
+  (sprig-review--stamp-arrival event)
   (push event sprig-review--events)
   ;; Track whether a turn is in flight, so a settled block renders fontified
   ;; rather than as a raw live tail (see `sprig-review--streaming').
@@ -597,7 +683,10 @@ Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   (setq-local word-wrap t)
   ;; Markdown markup (`*', `#', ...) carries `invisible markdown-markup' from
   ;; `sprig-review--fontify-markdown'; hide it here so only the styling shows.
-  (add-to-invisibility-spec 'markdown-markup))
+  (add-to-invisibility-spec 'markdown-markup)
+  ;; Claim the margin the timestamps hang in before the buffer is displayed,
+  ;; so its first window comes up with the right width.
+  (setq-local left-margin-width (sprig-review--margin-width)))
 
 (defun sprig-review-show (model &optional meta name)
   "Show review MODEL in a review buffer named NAME and select it.

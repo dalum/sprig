@@ -414,6 +414,49 @@
     (should (equal (sprig-review-parse-session-line mixed)
                    '((tool-result "t1" nil "ok") (user "now this"))))))
 
+(ert-deftest sprig-review-test-session-stamps-records ()
+  ;; Every conversation record in the log carries its own timestamp, so a
+  ;; replayed turn is dated from the log rather than from whenever it is read.
+  (let ((prose (json-serialize
+                '(:type "user" :timestamp "2026-07-15T09:16:56.955Z"
+                  :message (:role "user" :content "do it"))))
+        (reply (json-serialize
+                '(:type "assistant" :timestamp "2026-07-15T09:17:01.000Z"
+                  :message (:content [(:type "text" :text "on it")])))))
+    (should (equal (sprig-review-parse-session-line prose)
+                   '((time "2026-07-15T09:16:56.955Z") (user "do it"))))
+    (should (equal (sprig-review-parse-session-line reply)
+                   '((time "2026-07-15T09:17:01.000Z") (text "on it")))))
+  ;; A record carrying no conversation content leaves no stray `time' event
+  ;; behind to misdate the next block.
+  (let ((empty (json-serialize
+                '(:type "user" :timestamp "2026-07-15T09:16:56.955Z"
+                  :message (:content [])))))
+    (should (null (sprig-review-parse-session-line empty))))
+  ;; An unstamped record still parses.
+  (let ((bare (json-serialize
+               '(:type "user" :message (:role "user" :content "do it")))))
+    (should (equal (sprig-review-parse-session-line bare) '((user "do it"))))))
+
+(ert-deftest sprig-review-test-build-stamps-blocks ()
+  (let* ((model (sprig-review-build
+                 '((time "2026-07-15T09:00:00.000Z")
+                   (user "q")
+                   (time "2026-07-15T09:01:00.000Z")
+                   (text "a") (text "b")
+                   (time "2026-07-15T09:02:00.000Z")
+                   (tool-call "t1" "Bash" "{}"))))
+         (blocks (plist-get model :blocks)))
+    (should (equal (plist-get (nth 0 blocks) :time) "2026-07-15T09:00:00.000Z"))
+    ;; Coalesced text keeps the stamp of the delta that opened the block, so
+    ;; a reply is dated when it started rather than when it finished.
+    (should (equal (plist-get (nth 1 blocks) :text) "ab"))
+    (should (equal (plist-get (nth 1 blocks) :time) "2026-07-15T09:01:00.000Z"))
+    (should (equal (plist-get (nth 2 blocks) :time) "2026-07-15T09:02:00.000Z")))
+  ;; A `time' event opens no block of its own.
+  (should (null (plist-get (sprig-review-build '((time "2026-07-15T09:00:00.000Z")))
+                           :blocks))))
+
 (ert-deftest sprig-review-test-session-parse-user-skips-empty-text ()
   ;; An empty or whitespace-only text block is not a turn.
   (let ((blank (json-serialize
