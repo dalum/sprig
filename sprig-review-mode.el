@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.7.1
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -97,6 +97,13 @@ point still reads as yours instead of losing its tint to the cursor."
   "Face for a block's timestamp in the left margin."
   :group 'sprig)
 
+(defface sprig-review-running '((t :inherit warning :inverse-video t))
+  "Face for the left-margin bar marking the turn in flight.
+The bar runs down the side of what the agent is working on and is gone
+the moment the turn lands, so a buffer still working and a buffer done
+tell apart at a glance, without reading anything."
+  :group 'sprig)
+
 (defface sprig-review-marked '((t :inherit highlight))
   "Face for the heading of a marked section."
   :group 'sprig)
@@ -119,12 +126,17 @@ that section without a full re-render.  Any structural event clears it.")
 
 (defvar-local sprig-review--streaming nil
   "Non-nil while a turn is streaming into this buffer.
-Only then does `sprig-review-render' open the last text block as the live
-tail, which costs that block its markdown fontification (see
-`sprig-review--insert-text').  A settled or replayed conversation is not
-streaming, so every one of its blocks renders fontified.  Liveness cannot
-be read off the model instead: a replayed session log carries no `done'
-event, so its last block would otherwise pass for a live tail forever.")
+Two things hang off it.  The last text block opens as the live tail only
+while it is set, which costs that block its markdown fontification (see
+`sprig-review--insert-text'); and the turn's blocks carry the running bar
+down the margin only while it is set, which is what says the agent is
+still working (see `sprig-review--live-blocks').  A settled or replayed
+conversation is not streaming, so it renders fontified and unbarred.
+
+Liveness cannot be read off the model instead: a replayed session log
+carries no `done' event, so its last block would pass for a live tail
+forever, and a conversation read from disk would look like it was still
+being worked on.")
 (defvar-local sprig-review--marks nil
   "Idents (per `magit-section-ident') of the marked sections.
 Idents rather than section objects, so marks survive a re-render.")
@@ -156,8 +168,9 @@ TAB opens the one you want to review."
 (defcustom sprig-review-timestamp-format "%H:%M"
   "Time format for the left-margin timestamp against each block.
 A `format-time-string' format, rendered in local time.  nil shows no
-timestamps and takes the margin back.  Widen it (say \"%m-%d %H:%M\") to
-date a conversation spanning days; the margin sizes itself to fit.
+timestamps, narrowing the margin to the running bar alone.  Widen it (say
+\"%m-%d %H:%M\") to date a conversation spanning days; the margin sizes
+itself to fit.
 
 Replayed history is dated from the session log's own record timestamps;
 a live turn is dated when its first event reaches the buffer."
@@ -229,13 +242,30 @@ with no time is worth more than a render that dies over one."
       (format-time-string sprig-review-timestamp-format
                           (encode-time (iso8601-parse iso))))))
 
-(defun sprig-review--margin-width ()
-  "Return the columns the timestamp margin needs, or 0 when it is off."
+(defun sprig-review--stamp-width ()
+  "Return the columns a timestamp needs, or 0 when they are off."
   (if sprig-review-timestamp-format
       ;; Formatted now, purely to measure the format; every stamp it makes
       ;; is the same width, bar a format holding a variable-width field.
-      (1+ (string-width (format-time-string sprig-review-timestamp-format)))
+      (string-width (format-time-string sprig-review-timestamp-format))
     0))
+
+(defun sprig-review--margin-width ()
+  "Return the columns the left margin needs.
+The stamp, plus one for the running bar, which doubles as the gap holding
+the stamp off the text.  So the bar costs nothing when timestamps are on,
+and the margin narrows to just the bar when they are off."
+  (1+ (sprig-review--stamp-width)))
+
+(defun sprig-review--margin-string (iso running)
+  "Return the margin content for a block: its ISO time, then the running bar.
+The bar sits against the text, so a run of RUNNING blocks draws one line
+down the side of the turn in flight."
+  (concat
+   (propertize (string-pad (or (sprig-review--time-string iso) "")
+                           (sprig-review--stamp-width))
+               'face 'sprig-review-time)
+   (if running (propertize "▌" 'face 'sprig-review-running) " ")))
 
 (defun sprig-review--update-margin ()
   "Size the left margin of every window showing this buffer to fit a stamp.
@@ -246,18 +276,17 @@ with no time is worth more than a render that dies over one."
   (dolist (win (get-buffer-window-list nil nil t))
     (set-window-margins win left-margin-width right-margin-width)))
 
-(defun sprig-review--insert-margin-time (pos iso)
-  "Show ISO's time in the left margin, against the line holding POS."
-  (when-let ((stamp (sprig-review--time-string iso)))
-    (let ((ov (make-overlay pos (min (1+ pos) (point-max)))))
-      (overlay-put ov 'sprig-review-margin t)
-      (overlay-put ov 'before-string
-                   (propertize " " 'display
-                               ;; `face', not `font-lock-face': an overlay
-                               ;; string is not buffer text, so font-lock
-                               ;; never sees it to strip it.
-                               `((margin left-margin)
-                                 ,(propertize stamp 'face 'sprig-review-time)))))))
+(defun sprig-review--insert-margin (pos iso running)
+  "Show a block's ISO time, and the bar when RUNNING, against POS's line."
+  (let ((ov (make-overlay pos (min (1+ pos) (point-max)))))
+    (overlay-put ov 'sprig-review-margin t)
+    (overlay-put ov 'before-string
+                 (propertize " " 'display
+                             ;; `face', not `font-lock-face': an overlay
+                             ;; string is not buffer text, so font-lock
+                             ;; never sees it to strip it.
+                             `((margin left-margin)
+                               ,(sprig-review--margin-string iso running))))))
 
 ;;;; Heading helpers
 
@@ -466,6 +495,18 @@ reads as one list of what the agent did.  Prose is what you actually
 read.  `sprig-review-render' spaces the two apart on this."
   (memq (plist-get block :type) '(user text error)))
 
+(defun sprig-review--live-blocks (blocks)
+  "Return the tail of BLOCKS belonging to the turn in flight, or nil.
+That is everything after the last user turn: what the agent has done since
+you last spoke, which is the turn now running.  Nil when nothing is
+running, so nothing is marked as though it were."
+  (when sprig-review--streaming
+    (let ((live blocks))
+      (dolist (block blocks)
+        (when (eq (plist-get block :type) 'user)
+          (setq live (cdr (memq block blocks)))))
+      live)))
+
 ;;;; Rendering entry points
 
 (defun sprig-review-render (model &optional meta)
@@ -476,6 +517,7 @@ META is an optional plist of display metadata (see
   (let* ((inhibit-read-only t)
          (blocks (plist-get model :blocks))
          (last (car (last blocks)))
+         (live (sprig-review--live-blocks blocks))
          (prev nil)
          (first t))
     (setq sprig-review--tail nil)
@@ -509,7 +551,8 @@ META is an optional plist of display metadata (see
             ('thinking (sprig-review--insert-thinking block))
             ('tool     (sprig-review--insert-tool block))
             ('error    (sprig-review--insert-error block)))
-          (sprig-review--insert-margin-time start (plist-get block :time)))))
+          (sprig-review--insert-margin start (plist-get block :time)
+                                       (and live (memq block live) t)))))
     (sprig-review--update-margin)
     (goto-char (point-min))))
 
@@ -626,10 +669,12 @@ first `text' of a run, clears the tail and schedules a coalesced render
 \(see `sprig-review-refresh-delay'), which re-establishes the tail."
   (sprig-review--stamp-arrival event)
   (push event sprig-review--events)
-  ;; Track whether a turn is in flight, so a settled block renders fontified
-  ;; rather than as a raw live tail (see `sprig-review--streaming').
+  ;; Track whether a turn is in flight, which decides both the live tail and
+  ;; the running bar (see `sprig-review--streaming').  Any event the agent
+  ;; produces means it is working; a `user' event is you, mid-turn or not, and
+  ;; says nothing either way.
   (pcase (car event)
-    ('text (setq sprig-review--streaming t))
+    ((or 'text 'thinking 'tool-call) (setq sprig-review--streaming t))
     ((or 'done 'error) (setq sprig-review--streaming nil))
     (_ nil))
   (if (and (eq (car event) 'text)

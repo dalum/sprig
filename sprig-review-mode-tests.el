@@ -35,18 +35,21 @@ the tests that reach into a hunk section need them drawn."
   `(let ((sprig-review-expand-diffs t))
      (sprig-review-tests--rendered ,model ,meta ,@body)))
 
-(defun sprig-review-tests--margin-stamps ()
-  "Return the timestamps hanging in the current buffer's left margin, in order.
+(defun sprig-review-tests--margins ()
+  "Return the current buffer's left-margin strings, in buffer order.
 They ride an overlay's `before-string' display property, not the buffer
-text, so they have to be read back off the overlays."
-  (let (stamps)
+text, so they have to be read back off the overlays.  Each is the block's
+timestamp followed by the running-bar column."
+  (let (margins)
     (dolist (ov (overlays-in (point-min) (point-max)))
       (when (overlay-get ov 'sprig-review-margin)
         (let ((display (get-text-property 0 'display
                                           (overlay-get ov 'before-string))))
           (should (equal (car display) '(margin left-margin)))
-          (push (cons (overlay-start ov) (cadr display)) stamps))))
-    (mapcar #'cdr (sort stamps (lambda (a b) (< (car a) (car b)))))))
+          (push (cons (overlay-start ov)
+                      (substring-no-properties (cadr display)))
+                margins))))
+    (mapcar #'cdr (sort margins (lambda (a b) (< (car a) (car b)))))))
 
 (defun sprig-review-tests--edit-model ()
   "A model with one Edit call and its result, plus a text block."
@@ -229,13 +232,15 @@ text, so they have to be read back off the overlays."
     (should-not (sprig-review--time-string "2026-07-15T09:16:56.955Z"))))
 
 (ert-deftest sprig-review-mode-test-margin-width ()
-  ;; The margin sizes itself to the format, and gives the room back when off.
+  ;; The margin is the stamp plus one column for the running bar, so the bar
+  ;; costs nothing next to a timestamp and the margin narrows to just the bar
+  ;; when timestamps are off.
   (let ((sprig-review-timestamp-format "%H:%M"))
     (should (= (sprig-review--margin-width) 6)))
   (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
     (should (= (sprig-review--margin-width) 12)))
   (let ((sprig-review-timestamp-format nil))
-    (should (= (sprig-review--margin-width) 0))))
+    (should (= (sprig-review--margin-width) 1))))
 
 (ert-deftest sprig-review-mode-test-timestamp-rides-the-margin ()
   ;; The stamp hangs off an overlay, so it dates the block without putting a
@@ -248,14 +253,66 @@ text, so they have to be read back off the overlays."
                     (tool-call "t1" "Bash" ,(json-serialize (list :command "ls")))))))
       (sprig-review-tests--rendered model nil
         (should (equal (buffer-string) "\nq\n\nBash  ls\n"))
-        (let ((stamps (sprig-review-tests--margin-stamps)))
-          ;; One per block, each against its own first line.
-          (should (equal stamps '("09:16" "09:17")))))
-      ;; With the format off, the margin is empty and claims no width.
+        ;; One per block, each against its own first line.  Nothing is
+        ;; running, so the bar column is blank.
+        (should (equal (sprig-review-tests--margins) '("09:16 " "09:17 "))))
+      ;; With the format off, only the bar column is left.
       (let ((sprig-review-timestamp-format nil))
         (sprig-review-tests--rendered model nil
-          (should (null (sprig-review-tests--margin-stamps)))
-          (should (= left-margin-width 0)))))))
+          (should (equal (sprig-review-tests--margins) '(" " " ")))
+          (should (= left-margin-width 1)))))))
+
+(ert-deftest sprig-review-mode-test-running-bar-marks-the-turn-in-flight ()
+  ;; The bar runs down the side of what the agent is working on, and goes the
+  ;; moment the turn lands: that is the whole signal that nothing is still
+  ;; running in the background.
+  (cl-flet ((bars ()
+              ;; Just the bar column; the live path stamps its own arrival
+              ;; times, so the rest of the margin is the clock's business.
+              (mapcar (lambda (m) (substring m -1))
+                      (sprig-review-tests--margins))))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(user "do it"))
+      (sprig-review-consume '(text "on it"))
+      (sprig-review-consume (list 'tool-call "t1" "Bash"
+                                  (json-serialize (list :command "ls"))))
+      (sprig-review-flush)
+      ;; Mid-turn: your own turn is unbarred, the agent's work carries it.
+      (should sprig-review--streaming)
+      (should (equal (bars) '(" " "▌" "▌")))
+      ;; The turn lands and every bar goes.
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      (should-not sprig-review--streaming)
+      (should (equal (bars) '(" " " " " "))))))
+
+(ert-deftest sprig-review-mode-test-a-tool-only-turn-is-barred ()
+  ;; The bar has to follow the turn, not the prose: a turn opening with a tool
+  ;; call is working just as much as one opening with text.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'tool-call "t1" "Bash"
+                                (json-serialize (list :command "ls"))))
+    (sprig-review-flush)
+    (should sprig-review--streaming)
+    (should (equal (mapcar (lambda (m) (substring m -1))
+                           (sprig-review-tests--margins))
+                   '("▌")))))
+
+(ert-deftest sprig-review-mode-test-replayed-history-is-never-barred ()
+  ;; A conversation read from disk is finished by definition; it must not
+  ;; read as though work were still going on in the background.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-seed '((time "2026-07-15T09:00:00.000Z") (user "q")
+                         (time "2026-07-15T09:01:00.000Z") (text "a")))
+    (should-not sprig-review--streaming)
+    (should-not (sprig-review--live-blocks
+                 (plist-get (sprig-review-build (reverse sprig-review--events))
+                            :blocks)))
+    (dolist (margin (sprig-review-tests--margins))
+      (should-not (string-match-p "▌" margin)))))
 
 (ert-deftest sprig-review-mode-test-live-stamps-once-per-block ()
   ;; The wire carries no times, so the sink stamps on arrival: once per block,

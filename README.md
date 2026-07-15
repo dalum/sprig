@@ -118,7 +118,9 @@ Every tool call folds to its one-line heading, so a long turn reads as a list of
 
 Turns carry no role labels. Your own turns are tinted (`sprig-review-user`) and the agent's are not, which is the whole of the distinction, and only prose is padded with a blank line, so a turn's tool calls stay packed into one list.
 
-Every block is dated in the left margin, the way `magit-log` dates a commit, so the stamp costs the prose no width and can never be mistaken for something the agent said. Replayed history is dated from the session log's own record timestamps, and a live turn is dated when it reaches the buffer; both show in local time. `sprig-review-timestamp-format` sets the format (`nil` drops the margin, a wider format like `"%m-%d %H:%M"` dates a conversation spanning days, and the margin sizes itself to fit).
+Every block is dated in the left margin, the way `magit-log` dates a commit, so the stamp costs the prose no width and can never be mistaken for something the agent said. Replayed history is dated from the session log's own record timestamps, and a live turn is dated when it reaches the buffer; both show in local time. `sprig-review-timestamp-format` sets the format (a wider format like `"%m-%d %H:%M"` dates a conversation spanning days, `nil` drops the timestamps, and the margin sizes itself to fit).
+
+The margin's last column is the **running bar**: while a turn is in flight, `▌` (`sprig-review-running`) runs down the side of everything the agent has done since you last spoke, and it is gone the moment the turn lands. So a buffer still working and a buffer finished tell apart at a glance, without reading a word of it. Replayed history is finished by definition and never carries the bar.
 
 It is also the steering surface. Marking is the one selection primitive; a verb acts on the marked sections, or the section at point when nothing is marked. Every change-touching verb is an instruction sent to the agent (Sprig itself never runs git):
 
@@ -169,7 +171,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.7.1, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.8.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
