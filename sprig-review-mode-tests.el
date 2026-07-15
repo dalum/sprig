@@ -39,7 +39,7 @@ the tests that reach into a hunk section need them drawn."
   "Return the current buffer's left-margin strings, in buffer order.
 They ride an overlay's `before-string' display property, not the buffer
 text, so they have to be read back off the overlays.  Each is the block's
-timestamp followed by the running-bar column."
+timestamp, or the state line's rule."
   (let (margins)
     (dolist (ov (overlays-in (point-min) (point-max)))
       (when (overlay-get ov 'sprig-review-margin)
@@ -139,7 +139,8 @@ timestamp followed by the running-bar column."
     (sprig-review-tests--rendered model nil
       ;; No role labels: the tint alone tells the turns apart, and a blank
       ;; line separates them.
-      (should (equal (buffer-string) "\nthe question\n\nthe answer\n"))
+      (should (equal (buffer-string)
+                     "\nthe question\n\nthe answer\n\n●  idle\n"))
       (goto-char (point-min))
       (re-search-forward "the question")
       (should (memq 'sprig-review-user
@@ -196,7 +197,9 @@ timestamp followed by the running-bar column."
                              "Read  b\n"
                              "Bash  make\n"
                              "\n"
-                             "done\n"))))))
+                             "done\n"
+                             "\n"
+                             "●  idle\n"))))))
 
 (ert-deftest sprig-review-mode-test-thinking-packs-with-the-tool-rows ()
   ;; A thinking block folds to a one-line row too, so it joins the run
@@ -206,7 +209,8 @@ timestamp followed by the running-bar column."
                   (thinking "pondering")
                   (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))))))
     (sprig-review-tests--rendered model nil
-      (should (equal (buffer-string) "\non it\n\nthinking\nRead  a\n")))))
+      (should (equal (buffer-string)
+                     "\non it\n\nthinking\nRead  a\n\n●  idle\n")))))
 
 (defmacro sprig-review-tests--with-tz (tz &rest body)
   "Run BODY with the local timezone set to TZ, restoring it after."
@@ -240,7 +244,7 @@ timestamp followed by the running-bar column."
   (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
     (should (= (sprig-review--margin-width) 12)))
   (let ((sprig-review-timestamp-format nil))
-    (should (= (sprig-review--margin-width) 1))))
+    (should (= (sprig-review--margin-width) 0))))
 
 (ert-deftest sprig-review-mode-test-timestamp-rides-the-margin ()
   ;; The stamp hangs off an overlay, so it dates the block without putting a
@@ -252,67 +256,90 @@ timestamp followed by the running-bar column."
                     (time "2026-07-15T09:17:30.000Z")
                     (tool-call "t1" "Bash" ,(json-serialize (list :command "ls")))))))
       (sprig-review-tests--rendered model nil
-        (should (equal (buffer-string) "\nq\n\nBash  ls\n"))
+        (should (equal (buffer-string) "\nq\n\nBash  ls\n\n●  idle\n"))
         ;; One per block, each against its own first line.  Nothing is
         ;; running, so the bar column is blank.
-        (should (equal (sprig-review-tests--margins) '("09:16 " "09:17 "))))
+        (should (equal (sprig-review-tests--margins)
+                       (list "09:16" "09:17" (make-string 6 ?━)))))
       ;; With the format off, only the bar column is left.
       (let ((sprig-review-timestamp-format nil))
         (sprig-review-tests--rendered model nil
-          (should (equal (sprig-review-tests--margins) '(" " " ")))
-          (should (= left-margin-width 1)))))))
+          (should (equal (sprig-review-tests--margins) nil))
+          (should (= left-margin-width 0)))))))
 
-(ert-deftest sprig-review-mode-test-running-bar-marks-the-turn-in-flight ()
-  ;; The bar runs down the side of what the agent is working on, and goes the
-  ;; moment the turn lands: that is the whole signal that nothing is still
-  ;; running in the background.
-  (cl-flet ((bars ()
-              ;; Just the bar column; the live path stamps its own arrival
-              ;; times, so the rest of the margin is the clock's business.
-              (mapcar (lambda (m) (substring m -1))
-                      (sprig-review-tests--margins))))
-    (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(user "do it"))
-      (sprig-review-consume '(text "on it"))
-      (sprig-review-consume (list 'tool-call "t1" "Bash"
-                                  (json-serialize (list :command "ls"))))
-      (sprig-review-flush)
-      ;; Mid-turn: your own turn is unbarred, the agent's work carries it.
-      (should sprig-review--streaming)
-      (should (equal (bars) '(" " "▌" "▌")))
-      ;; The turn lands and every bar goes.
-      (sprig-review-consume '(done 0.01 nil))
-      (sprig-review-flush)
-      (should-not sprig-review--streaming)
-      (should (equal (bars) '(" " " " " "))))))
+(defun sprig-review-tests--state-line ()
+  "Return the buffer's last line, which is the state line, and its face."
+  (save-excursion
+    (goto-char (point-max))
+    (forward-line -1)
+    (cons (buffer-substring-no-properties (line-beginning-position)
+                                          (line-end-position))
+          (get-text-property (line-beginning-position) 'font-lock-face))))
 
-(ert-deftest sprig-review-mode-test-a-tool-only-turn-is-barred ()
-  ;; The bar has to follow the turn, not the prose: a turn opening with a tool
-  ;; call is working just as much as one opening with text.
+(ert-deftest sprig-review-mode-test-state-line-says-the-turn-is-over ()
+  ;; The buffer has to say a turn landed, below the last message, rather than
+  ;; leave it to be inferred from nothing having moved for a while.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(user "do it"))
+    (sprig-review-consume '(text "on it"))
+    (sprig-review-consume (list 'tool-call "t1" "Bash"
+                                (json-serialize (list :command "ls"))))
+    (sprig-review-flush)
+    (should sprig-review--streaming)
+    (should (equal (sprig-review-tests--state-line)
+                   '("▶  working…" . sprig-review-working)))
+    ;; The turn lands: said outright, with what it cost.
+    (sprig-review-consume '(done 0.0312 nil))
+    (sprig-review-flush)
+    (should-not sprig-review--streaming)
+    (should (equal (sprig-review-tests--state-line)
+                   '("✓  turn over  ·  $0.0312" . sprig-review-done)))
+    ;; A new turn takes the line back.
+    (sprig-review-consume '(text "more"))
+    (sprig-review-flush)
+    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
+
+(ert-deftest sprig-review-mode-test-state-line-reports-a-failed-turn ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "trying"))
+    (sprig-review-consume '(done nil t))
+    (sprig-review-flush)
+    (should (equal (sprig-review-tests--state-line)
+                   '("✗  turn failed" . sprig-review-failed)))))
+
+(ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
+  ;; A conversation read from disk carries no `done', but nothing is running
+  ;; in it either; it must not claim to be working, nor to have just landed.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-seed '((user "q") (text "a")))
+    (should-not sprig-review--streaming)
+    (should (equal (sprig-review-tests--state-line)
+                   '("●  idle" . sprig-review-idle)))))
+
+(ert-deftest sprig-review-mode-test-state-line-rules-the-side-bar ()
+  ;; The side bar carries the same mark, in the same colour, so the gutter
+  ;; ends the turn as plainly as the line does.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "hi"))
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    (let ((rule (car (last (sprig-review-tests--margins)))))
+      (should (equal rule (make-string (sprig-review--margin-width) ?━))))))
+
+(ert-deftest sprig-review-mode-test-a-tool-only-turn-is-working ()
+  ;; The state line follows the turn, not the prose: a turn opening with a
+  ;; tool call is working just as much as one opening with text.
   (with-temp-buffer
     (sprig-review-mode)
     (sprig-review-consume (list 'tool-call "t1" "Bash"
                                 (json-serialize (list :command "ls"))))
     (sprig-review-flush)
     (should sprig-review--streaming)
-    (should (equal (mapcar (lambda (m) (substring m -1))
-                           (sprig-review-tests--margins))
-                   '("▌")))))
-
-(ert-deftest sprig-review-mode-test-replayed-history-is-never-barred ()
-  ;; A conversation read from disk is finished by definition; it must not
-  ;; read as though work were still going on in the background.
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-seed '((time "2026-07-15T09:00:00.000Z") (user "q")
-                         (time "2026-07-15T09:01:00.000Z") (text "a")))
-    (should-not sprig-review--streaming)
-    (should-not (sprig-review--live-blocks
-                 (plist-get (sprig-review-build (reverse sprig-review--events))
-                            :blocks)))
-    (dolist (margin (sprig-review-tests--margins))
-      (should-not (string-match-p "▌" margin)))))
+    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
 
 (ert-deftest sprig-review-mode-test-live-stamps-once-per-block ()
   ;; The wire carries no times, so the sink stamps on arrival: once per block,
@@ -542,6 +569,45 @@ timestamp followed by the running-bar column."
     (goto-char (point-min))
     (should (re-search-forward "↳ result" nil t))
     (should-not (oref (magit-current-section) hidden))))
+
+(ert-deftest sprig-review-mode-test-refresh-keeps-a-window-put ()
+  ;; A window has its own point and start, and `erase-buffer' collapses both.
+  ;; The refresh also runs from a timer, in whatever buffer is current, so the
+  ;; buffer's own point is not the one on screen.  Restoring only that threw
+  ;; the window to the top of the buffer mid-turn.
+  (let ((buf (get-buffer-create "*sprig-review-scroll-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (sprig-review-mode)
+          (dotimes (i 60)
+            (sprig-review-consume (list 'text (format "line %d\n" i)))
+            (sprig-review-consume '(text-block)))
+          (sprig-review-flush)
+          (let ((win (display-buffer buf '(display-buffer-same-window))))
+            (should (window-live-p win))
+            (set-window-buffer win buf)
+            ;; Park the window part-way down, as if reading mid-turn.
+            (goto-char (point-min))
+            (re-search-forward "line 40")
+            (let ((mark (magit-section-ident (magit-current-section))))
+              (set-window-point win (point))
+              (set-window-start win (line-beginning-position))
+              (let ((start-line (line-number-at-pos (window-start win))))
+                ;; A refresh driven from another buffer, exactly as the
+                ;; coalescing timer drives it.
+                (with-temp-buffer
+                  (sprig-review-flush buf)
+                  (with-current-buffer buf (sprig-review--refresh)))
+                ;; The window is still on the same section, not at the top.
+                (should (window-live-p win))
+                (should (equal (save-excursion (goto-char (window-point win))
+                                               (magit-section-ident
+                                                (magit-current-section)))
+                               mark))
+                (should (> (line-number-at-pos (window-start win)) 1))
+                (should (= (line-number-at-pos (window-start win))
+                           start-line))))))
+      (kill-buffer buf))))
 
 (ert-deftest sprig-review-mode-test-reset ()
   (with-temp-buffer

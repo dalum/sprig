@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.8.0
+;; Version: 0.9.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -97,11 +97,23 @@ point still reads as yours instead of losing its tint to the cursor."
   "Face for a block's timestamp in the left margin."
   :group 'sprig)
 
-(defface sprig-review-running '((t :inherit warning :inverse-video t))
-  "Face for the left-margin bar marking the turn in flight.
-The bar runs down the side of what the agent is working on and is gone
-the moment the turn lands, so a buffer still working and a buffer done
-tell apart at a glance, without reading anything."
+(defface sprig-review-working
+  '((t :inherit warning :inverse-video t :weight bold :extend t))
+  "Face for the state line while a turn is in flight."
+  :group 'sprig)
+
+(defface sprig-review-done
+  '((t :inherit success :inverse-video t :weight bold :extend t))
+  "Face for the state line once a turn has landed."
+  :group 'sprig)
+
+(defface sprig-review-failed
+  '((t :inherit error :inverse-video t :weight bold :extend t))
+  "Face for the state line when a turn ended badly."
+  :group 'sprig)
+
+(defface sprig-review-idle '((t :inherit shadow :extend t))
+  "Face for the state line of a conversation with nothing running."
   :group 'sprig)
 
 (defface sprig-review-marked '((t :inherit highlight))
@@ -128,15 +140,14 @@ that section without a full re-render.  Any structural event clears it.")
   "Non-nil while a turn is streaming into this buffer.
 Two things hang off it.  The last text block opens as the live tail only
 while it is set, which costs that block its markdown fontification (see
-`sprig-review--insert-text'); and the turn's blocks carry the running bar
-down the margin only while it is set, which is what says the agent is
-still working (see `sprig-review--live-blocks').  A settled or replayed
-conversation is not streaming, so it renders fontified and unbarred.
+`sprig-review--insert-text'); and the header line says the buffer is
+working only while it is set (see `sprig-review--state').  A settled
+or replayed conversation is not streaming, so it renders fontified, and
+says so.
 
 Liveness cannot be read off the model instead: a replayed session log
 carries no `done' event, so its last block would pass for a live tail
-forever, and a conversation read from disk would look like it was still
-being worked on.")
+forever, and a conversation read from disk would claim to be working.")
 (defvar-local sprig-review--marks nil
   "Idents (per `magit-section-ident') of the marked sections.
 Idents rather than section objects, so marks survive a re-render.")
@@ -251,21 +262,10 @@ with no time is worth more than a render that dies over one."
     0))
 
 (defun sprig-review--margin-width ()
-  "Return the columns the left margin needs.
-The stamp, plus one for the running bar, which doubles as the gap holding
-the stamp off the text.  So the bar costs nothing when timestamps are on,
-and the margin narrows to just the bar when they are off."
-  (1+ (sprig-review--stamp-width)))
-
-(defun sprig-review--margin-string (iso running)
-  "Return the margin content for a block: its ISO time, then the running bar.
-The bar sits against the text, so a run of RUNNING blocks draws one line
-down the side of the turn in flight."
-  (concat
-   (propertize (string-pad (or (sprig-review--time-string iso) "")
-                           (sprig-review--stamp-width))
-               'face 'sprig-review-time)
-   (if running (propertize "▌" 'face 'sprig-review-running) " ")))
+  "Return the columns the timestamp margin needs, or 0 when it is off.
+The extra column is the gap holding the stamp off the text."
+  (let ((width (sprig-review--stamp-width)))
+    (if (> width 0) (1+ width) 0)))
 
 (defun sprig-review--update-margin ()
   "Size the left margin of every window showing this buffer to fit a stamp.
@@ -276,17 +276,18 @@ down the side of the turn in flight."
   (dolist (win (get-buffer-window-list nil nil t))
     (set-window-margins win left-margin-width right-margin-width)))
 
-(defun sprig-review--insert-margin (pos iso running)
-  "Show a block's ISO time, and the bar when RUNNING, against POS's line."
-  (let ((ov (make-overlay pos (min (1+ pos) (point-max)))))
-    (overlay-put ov 'sprig-review-margin t)
-    (overlay-put ov 'before-string
-                 (propertize " " 'display
-                             ;; `face', not `font-lock-face': an overlay
-                             ;; string is not buffer text, so font-lock
-                             ;; never sees it to strip it.
-                             `((margin left-margin)
-                               ,(sprig-review--margin-string iso running))))))
+(defun sprig-review--insert-margin (pos iso)
+  "Show ISO's time in the left margin, against the line holding POS."
+  (when-let ((stamp (sprig-review--time-string iso)))
+    (let ((ov (make-overlay pos (min (1+ pos) (point-max)))))
+      (overlay-put ov 'sprig-review-margin t)
+      (overlay-put ov 'before-string
+                   (propertize " " 'display
+                               ;; `face', not `font-lock-face': an overlay
+                               ;; string is not buffer text, so font-lock
+                               ;; never sees it to strip it.
+                               `((margin left-margin)
+                                 ,(propertize stamp 'face 'sprig-review-time)))))))
 
 ;;;; Heading helpers
 
@@ -495,17 +496,47 @@ reads as one list of what the agent did.  Prose is what you actually
 read.  `sprig-review-render' spaces the two apart on this."
   (memq (plist-get block :type) '(user text error)))
 
-(defun sprig-review--live-blocks (blocks)
-  "Return the tail of BLOCKS belonging to the turn in flight, or nil.
-That is everything after the last user turn: what the agent has done since
-you last spoke, which is the turn now running.  Nil when nothing is
-running, so nothing is marked as though it were."
-  (when sprig-review--streaming
-    (let ((live blocks))
-      (dolist (block blocks)
-        (when (eq (plist-get block :type) 'user)
-          (setq live (cdr (memq block blocks)))))
-      live)))
+;;;; The state line
+;;
+;; The one question the buffer has to answer without being read is whether
+;; anything is still going on in it.  It goes below the last message,
+;; where you are already reading when a turn is coming in, and it is
+;; stated rather than implied: the turn being over is the thing you are
+;; waiting on, so the buffer says so, instead of leaving you to notice
+;; that nothing has moved for a while.
+
+(defun sprig-review--state (model)
+  "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended."
+  (cond
+   (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
+   ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
+   ((plist-get model :done)
+    (list "✓" (concat "turn over"
+                      (if-let ((cost (plist-get model :cost)))
+                          (format "  ·  $%.4f" cost)
+                        ""))
+          'sprig-review-done))
+   ;; Replayed history, or a session not yet sent to: nothing is running,
+   ;; but no turn of ours ended either, so claim neither.
+   (t (list "●" "idle" 'sprig-review-idle))))
+
+(defun sprig-review--insert-state (model)
+  "Insert the state line, below the last message: what is going on, or ended.
+The side bar carries a rule in the same colour, so the gutter marks the
+end of the turn as plainly as the line does."
+  (pcase-let ((`(,glyph ,text ,face) (sprig-review--state model))
+              (start (point)))
+    (magit-insert-section (sprig-state)
+      (insert (sprig-review--face (format "%s  %s" glyph text) face) "\n"))
+    (when (> (sprig-review--margin-width) 0)
+      (let ((ov (make-overlay start (min (1+ start) (point-max)))))
+        (overlay-put ov 'sprig-review-margin t)
+        (overlay-put ov 'before-string
+                     (propertize " " 'display
+                                 `((margin left-margin)
+                                   ,(propertize
+                                     (make-string (sprig-review--margin-width) ?━)
+                                     'face face))))))))
 
 ;;;; Rendering entry points
 
@@ -517,7 +548,6 @@ META is an optional plist of display metadata (see
   (let* ((inhibit-read-only t)
          (blocks (plist-get model :blocks))
          (last (car (last blocks)))
-         (live (sprig-review--live-blocks blocks))
          (prev nil)
          (first t))
     (setq sprig-review--tail nil)
@@ -551,8 +581,13 @@ META is an optional plist of display metadata (see
             ('thinking (sprig-review--insert-thinking block))
             ('tool     (sprig-review--insert-tool block))
             ('error    (sprig-review--insert-error block)))
-          (sprig-review--insert-margin start (plist-get block :time)
-                                       (and live (memq block live) t)))))
+          (sprig-review--insert-margin start (plist-get block :time))))
+      ;; Below the last message, and last of all, so it is what the buffer
+      ;; ends on.  The live tail sits inside the block above and is not
+      ;; disturbed by an insertion after it, so streamed text still lands
+      ;; above this line rather than through it.
+      (when blocks (insert "\n"))
+      (sprig-review--insert-state model))
     (sprig-review--update-margin)
     (goto-char (point-min))))
 
@@ -593,26 +628,57 @@ often.  Streamed text does not wait on this; it appends in place."
   :type 'number
   :group 'sprig)
 
+(defun sprig-review--locate (pos)
+  "Return a locator for POS that survives a re-render, or nil.
+A section's ident and an offset into it, rather than a raw position: the
+render erases the buffer, so a position means nothing across it, while a
+section can be found again."
+  (save-excursion
+    (goto-char pos)
+    (when-let ((section (magit-current-section)))
+      (cons (magit-section-ident section) (- pos (oref section start))))))
+
+(defun sprig-review--relocate (locator fallback)
+  "Return where LOCATOR points now, or FALLBACK when its section is gone."
+  (or (and locator
+           (when-let ((section (magit-get-section (car locator))))
+             (min (+ (oref section start) (max 0 (cdr locator)))
+                  (or (oref section end) (point-max)))))
+      (min fallback (point-max))))
+
 (defun sprig-review--refresh ()
   "Rebuild the model from accumulated events and re-render in place.
-Keep folds (via magit-section's visibility cache) and restore point to
-the same section, or to its previous position when that section is gone."
+Keeps folds (via magit-section's visibility cache), and puts point and the
+scroll back where they were, in every window showing the buffer.
+
+The windows have to be done one by one, and by more than point: a window
+keeps its own point and its own start, `erase-buffer' collapses both, and
+a refresh driven by the coalescing timer runs in whatever buffer happens
+to be current, so the buffer's own point is not the point you are looking
+at.  Restoring only that is what threw a window to the top of the buffer
+while a turn came in."
   ;; Do not bind `magit-insert-section--oldroot' here: the
   ;; `magit-insert-section' macro captures it from `magit-root-section'
   ;; itself, and only then advances `magit-root-section' to the new root.
   ;; Pre-binding it leaves the root stale and breaks section finishing.
   (let* ((model (sprig-review-build (reverse sprig-review--events)))
-         (section (magit-current-section))
-         (ident (and section (magit-section-ident section)))
-         (offset (and section (- (point) (oref section start))))
-         (pos (point)))
+         (pos (point))
+         (locator (sprig-review--locate pos))
+         (windows (mapcar (lambda (win)
+                            (list win
+                                  (sprig-review--locate (window-point win))
+                                  (window-point win)
+                                  (sprig-review--locate (window-start win))
+                                  (window-start win)))
+                          (get-buffer-window-list nil nil t))))
     (sprig-review-render model sprig-review--meta)
-    (let ((found (and ident (magit-get-section ident))))
-      (goto-char
-       (if found
-           (min (+ (oref found start) (max 0 (or offset 0)))
-                (or (oref found end) (point-max)))
-         (min pos (point-max)))))
+    (goto-char (sprig-review--relocate locator pos))
+    (pcase-dolist (`(,win ,point-loc ,point-pos ,start-loc ,start-pos) windows)
+      (when (window-live-p win)
+        (set-window-point win (sprig-review--relocate point-loc point-pos))
+        ;; NOFORCE, so a start that would now put point off screen is
+        ;; recomputed rather than obeyed.
+        (set-window-start win (sprig-review--relocate start-loc start-pos) t)))
     (sprig-review--apply-marks)))
 
 (defun sprig-review--cancel-timer ()
