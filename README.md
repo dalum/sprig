@@ -125,6 +125,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | Key | Does |
 |---|---|
 | `RET` | Visit the file the section points to (over SSH/TRAMP if remote) |
+| `g` | Re-read the session log into the buffer (its history is seeded once at open, never re-read after) |
 | `t` | Retitle the buffer's header (display only; the CLI owns the stored title) |
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
@@ -168,7 +169,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.7.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.7.1, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

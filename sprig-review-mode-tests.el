@@ -291,6 +291,51 @@ text, so they have to be read back off the overlays."
                                                 :blocks))
                                 :time))))))
 
+(ert-deftest sprig-review-mode-test-refresh-re-reads-the-log ()
+  ;; A buffer's events are seeded once at open and never re-read, so a log
+  ;; that has grown (or a parser taught to read more of it) needs `g'.  This
+  ;; is why a timestamp added to the parser did not reach an open buffer.
+  (let ((file (make-temp-file "sprig-session" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (insert (json-serialize
+                     '(:type "user" :timestamp "2026-07-15T09:00:00.000Z"
+                       :message (:role "user" :content "first")))
+                    "\n"))
+          (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+            (sprig-review-open-file file))
+          (with-current-buffer (format "*sprig-review: %s*" (file-name-base file))
+            (should (string-match-p "first" (buffer-string)))
+            ;; The log grows behind the buffer's back.
+            (with-temp-buffer
+              (insert (json-serialize
+                       '(:type "assistant" :timestamp "2026-07-15T09:01:00.000Z"
+                         :message (:content [(:type "text" :text "second")])))
+                      "\n")
+              (append-to-file (point-min) (point-max) file))
+            ;; A re-render alone does not notice: it rebuilds from the events
+            ;; the buffer already holds.
+            (sprig-review--refresh)
+            (should-not (string-match-p "second" (buffer-string)))
+            ;; `g' re-reads the file it was opened from.
+            (sprig-review-refresh)
+            (should (string-match-p "second" (buffer-string)))
+            (kill-buffer)))
+      (delete-file file))))
+
+(ert-deftest sprig-review-mode-test-refresh-is-on-g-and-waits-for-the-turn ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    ;; `g' is bound to `revert-buffer' by the parent mode, so the refresh has
+    ;; to hang off `revert-buffer-function' to be reachable there at all.
+    (should (eq (key-binding (kbd "g")) 'revert-buffer))
+    (should (eq revert-buffer-function #'sprig-review-refresh))
+    ;; Mid-turn it refuses: the in-flight turn is not in the log yet, so
+    ;; re-seeding from the log would drop it out of the buffer.
+    (setq-local sprig--busy t)
+    (should-error (sprig-review-refresh) :type 'user-error)))
+
 (ert-deftest sprig-review-mode-test-verbs-are-bound ()
   ;; Every verb the README documents as a key has to actually be on that key.
   ;; `C' was documented and unbound, reachable only through the transient.

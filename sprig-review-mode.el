@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.7.0
+;; Version: 0.7.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -39,10 +39,12 @@
 (declare-function sprig--review-steer "sprig" (text))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
+(declare-function sprig--session-log-lines "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
 (defvar sprig--sink)
+(defvar sprig--busy)
 
 ;;;; Faces
 
@@ -129,6 +131,10 @@ Idents rather than section objects, so marks survive a re-render.")
 (defvar-local sprig-review--remote nil
   "SSH destination of the session host, or nil for local.
 Set by `sprig-review-set-remote' so visiting a file reaches it over TRAMP.")
+(defvar-local sprig-review--file nil
+  "Session-log file this buffer was opened from, or nil.
+Set by `sprig-review-open-file', so a refresh re-reads that file; a buffer
+that owns a session leaves this nil and finds its log by session id.")
 
 ;;;; Options
 
@@ -653,6 +659,28 @@ history is settled, so it renders with no live tail."
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
+(defun sprig-review-refresh (&rest _)
+  "Re-read this review's history from its log, and re-render it.
+A buffer's events are seeded once, when it is opened, and are never read
+again: a render rebuilds the model from the events the buffer has already
+accumulated, not from disk.  So this is what picks up a log that has
+grown since, or a parser that has since learned to read more out of it,
+`sprig-reload' being a reload of the code and not of a buffer's events.
+
+Bound to \\`g', through `revert-buffer'.  Refuses while a turn is in
+flight, since that turn is not in the log yet and re-seeding would drop it
+from the buffer."
+  (interactive)
+  (when (and (boundp 'sprig--busy) sprig--busy)
+    (user-error "A turn is in flight; refresh once it lands"))
+  (let ((events (sprig-review-session-events
+                 (if sprig-review--file
+                     (sprig-review-read-session-lines sprig-review--file)
+                   (sprig--session-log-lines)))))
+    (sprig-review-seed events sprig-review--meta)
+    (message "sprig: re-read %d event%s from the log"
+             (length events) (if (= (length events) 1) "" "s"))))
+
 (defun sprig-review-buffer (name)
   "Return a buffer named NAME, put into `sprig-review-mode'."
   (let ((buffer (get-buffer-create name)))
@@ -674,7 +702,9 @@ added on top as they land.")
   "Major mode for reviewing an agent conversation as read-only sections.
 Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   :group 'sprig
-  (setq-local revert-buffer-function #'ignore)
+  ;; `g' is bound to `revert-buffer' by the parent mode; point it at a re-read
+  ;; of the log, rather than leaving the one key that means refresh a no-op.
+  (setq-local revert-buffer-function #'sprig-review-refresh)
   ;; Surface the session's Claude permission mode (plan, auto, ...) in the
   ;; mode line; nil for an offline file review, which owns no session.
   (setq-local mode-line-process '(:eval (sprig--mode-line-permission)))
@@ -715,6 +745,7 @@ and is fetched by the integration layer, not here."
   (let ((buffer (sprig-review-buffer
                  (format "*sprig-review: %s*" (file-name-base file)))))
     (with-current-buffer buffer
+      (setq sprig-review--file file)     ; so `g' re-reads this same file
       (sprig-review-seed (sprig-review-session-events
                           (sprig-review-read-session-lines file))))
     (pop-to-buffer buffer)))
