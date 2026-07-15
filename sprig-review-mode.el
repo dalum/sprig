@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.10.0
+;; Version: 0.11.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -38,6 +38,8 @@
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
 (declare-function sprig--review-answer-dialog "sprig" (id input answers))
+(declare-function sprig--review-approve-plan "sprig" (id))
+(declare-function sprig--review-reject-plan "sprig" (id feedback))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
@@ -494,6 +496,23 @@ and `options' arrive as vectors and `multiSelect' as `:false'."
   "Return non-nil when QUESTION takes more than one answer."
   (eq (alist-get 'multiSelect question) t))
 
+(defconst sprig-review--plan-question
+  '((question . "Approve this plan?")
+    (multiSelect . :false)
+    (options . [((label . "Approve")
+                 (description . "the agent leaves plan mode and starts work"))
+                ((label . "Reject")
+                 (description . "say what is wrong; the agent plans again"))]))
+  "The one thing a plan asks.
+ExitPlanMode does not put it as a question, so it is put as one here, and
+a plan is then answered by everything that answers a question.")
+
+(defun sprig-review--dialog-questions (block)
+  "Return the questions dialog BLOCK asks."
+  (if (equal (plist-get block :kind) "exit_plan_mode")
+      (list sprig-review--plan-question)
+    (sprig-review--question-list (plist-get block :input))))
+
 (defun sprig-review--option-label (option)
   "Return OPTION's label."
   (alist-get 'label option))
@@ -551,16 +570,38 @@ the answering has a buffer of its own (see `sprig-review-answer')."
                    "\n"))
          (alist-get 'options question))))))
 
+(defun sprig-review--insert-plan (block)
+  "Insert the plan dialog BLOCK holds, and what it says of it.
+The plan itself, not a summary of it: approving is the point, and the
+whole of what you are approving is here to read."
+  (let ((plan (alist-get 'plan (plist-get block :input)))
+        (answered (plist-get block :answered)))
+    (magit-insert-section (sprig-plan block)
+      (magit-insert-heading
+        (sprig-review--face "? The agent has a plan" 'sprig-review-dialog))
+      (insert (sprig-review--fontify-markdown
+               (sprig-review--text-body (or plan ""))))
+      (when answered
+        (insert "    "
+                (sprig-review--face (format "%s" (plist-get block :answers))
+                                    'sprig-review-dialog-picked)
+                "\n")))))
+
 (defun sprig-review--insert-dialog (block)
   "Insert dialog BLOCK: what the agent asked, and what there is to answer."
   (magit-insert-section (sprig-dialog block)
-    (seq-do-indexed
-     (lambda (question index)
-       (sprig-review--insert-question block question index))
-     (sprig-review--question-list (plist-get block :input)))
+    (if (equal (plist-get block :kind) "exit_plan_mode")
+        (sprig-review--insert-plan block)
+      (seq-do-indexed
+       (lambda (question index)
+         (sprig-review--insert-question block question index))
+       (sprig-review--question-list (plist-get block :input))))
     (unless (plist-get block :answered)
-      (insert (sprig-review--face "    a a to answer · a r to take the recommended"
-                                  'sprig-review-meta-key)
+      (insert (sprig-review--face
+               (if (equal (plist-get block :kind) "exit_plan_mode")
+                   "    a a to approve or reject · a r to approve"
+                 "    a a to answer · a r to take the recommended")
+               'sprig-review-meta-key)
               "\n"))))
 
 (defun sprig-review--meta-line (key value)
@@ -615,12 +656,9 @@ read, and a dialog is a question put to you, which wants the same air."
     (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
    (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
    ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
-   ((plist-get model :done)
-    (list "✓" (concat "turn over"
-                      (if-let ((cost (plist-get model :cost)))
-                          (format "  ·  $%.4f" cost)
-                        ""))
-          'sprig-review-done))
+   ;; What it cost is in the header, and is not what you were waiting to
+   ;; hear; the line says the one thing it is for.
+   ((plist-get model :done) (list "✓" "turn over" 'sprig-review-done))
    ;; Replayed history, or a session not yet sent to: nothing is running,
    ;; but no turn of ours ended either, so claim neither.
    (t (list "●" "idle" 'sprig-review-idle))))
@@ -1291,14 +1329,31 @@ interrupted and restarted.  With no turn running, this just sends."
        (sprig-review-build (reverse sprig-review--events)))
       (user-error "No question is waiting")))
 
+(defun sprig-review--answer-plan (dialog answers)
+  "Approve or reject DIALOG's plan, per ANSWERS.
+Rejecting reads the feedback the agent plans again against.  Reading it
+here is safe where reading it in the filter was not: this runs from a
+command of yours, not from the middle of the CLI's output."
+  (let ((id (plist-get dialog :id)))
+    (if (equal (cdar answers) "Approve")
+        (progn (sprig--review-approve-plan id)
+               (message "sprig: plan approved; the agent starts work"))
+      (let ((feedback (read-string "Reject plan; what should change? ")))
+        (sprig--review-reject-plan id feedback)
+        (message "sprig: plan rejected; the agent plans again")))))
+
 (defun sprig-review--answer-dialog (dialog answers)
-  "Answer DIALOG with ANSWERS, and say so."
-  (sprig--review-answer-dialog (plist-get dialog :id)
-                               (plist-get dialog :input)
-                               answers)
-  (message "sprig: %s" (if answers
-                           (format "answered (%d)" (length answers))
-                         "skipped; the agent goes on unanswered")))
+  "Answer DIALOG with ANSWERS, and say so.
+A plan is not answered with a map of answers but by approving or
+rejecting it, so it goes its own way from here."
+  (if (equal (plist-get dialog :kind) "exit_plan_mode")
+      (sprig-review--answer-plan dialog answers)
+    (sprig--review-answer-dialog (plist-get dialog :id)
+                                 (plist-get dialog :input)
+                                 answers)
+    (message "sprig: %s" (if answers
+                             (format "answered (%d)" (length answers))
+                           "skipped; the agent goes on unanswered"))))
 
 ;;;###autoload
 (defun sprig-review-answer ()
@@ -1327,8 +1382,7 @@ recommending nothing takes its first option (see
          (answers (mapcar (lambda (question)
                             (cons (intern (alist-get 'question question))
                                   (sprig-review--recommended-option question)))
-                          (sprig-review--question-list
-                           (plist-get dialog :input)))))
+                          (sprig-review--dialog-questions dialog))))
     (sprig-review--answer-dialog dialog (delq nil answers))))
 
 (defun sprig-review-answer-skip ()
@@ -1375,8 +1429,7 @@ recommending nothing takes its first option (see
 
 (defun sprig-answer--question ()
   "Return the question on screen."
-  (nth sprig-answer--index
-       (sprig-review--question-list (plist-get sprig-answer--dialog :input))))
+  (nth sprig-answer--index (sprig-review--dialog-questions sprig-answer--dialog)))
 
 (defun sprig-answer--options ()
   "Return the options of the question on screen, as a list."
@@ -1385,8 +1438,7 @@ recommending nothing takes its first option (see
 (defun sprig-answer--render ()
   "Draw the question on screen, and what has been picked of it."
   (let* ((question (sprig-answer--question))
-         (questions (sprig-review--question-list
-                     (plist-get sprig-answer--dialog :input)))
+         (questions (sprig-review--dialog-questions sprig-answer--dialog))
          (multi (sprig-review--multi-select-p question))
          (inhibit-read-only t))
     (erase-buffer)
@@ -1428,8 +1480,7 @@ recommending nothing takes its first option (see
       (push (cons (intern text) label) sprig-answer--answers)))
   (setq sprig-answer--picked nil)
   (if (< (1+ sprig-answer--index)
-         (length (sprig-review--question-list
-                  (plist-get sprig-answer--dialog :input))))
+         (length (sprig-review--dialog-questions sprig-answer--dialog)))
       (progn (setq sprig-answer--index (1+ sprig-answer--index))
              (sprig-answer--render))
     (sprig-answer--send)))
@@ -1491,9 +1542,8 @@ recommending nothing takes its first option (see
   "Skip the rest of the questions; the agent goes on without an answer."
   (interactive)
   (setq sprig-answer--picked nil)
-  (let ((questions (sprig-review--question-list
-                    (plist-get sprig-answer--dialog :input))))
-    (setq sprig-answer--index (length questions)))
+  (setq sprig-answer--index
+        (length (sprig-review--dialog-questions sprig-answer--dialog)))
   (sprig-answer--send))
 
 ;;;; The c transient

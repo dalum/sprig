@@ -120,7 +120,7 @@ Turns carry no role labels. Your own turns are tinted (`sprig-review-user`) and 
 
 Every block is dated in the left margin, the way `magit-log` dates a commit, so the stamp costs the prose no width and can never be mistaken for something the agent said. Replayed history is dated from the session log's own record timestamps, and a live turn is dated when it reaches the buffer; both show in local time. `sprig-review-timestamp-format` sets the format (a wider format like `"%m-%d %H:%M"` dates a conversation spanning days, `nil` drops the timestamps, and the margin sizes itself to fit).
 
-Below the last message is the **state line**, which says outright whether anything is still going on: `▶ working…` while a turn is in flight, `✓ turn over · $0.0312` once it lands, `✗ turn failed` when it did not, and `● idle` for replayed history (which carries no turn of its own). It sits at the bottom because that is where you are reading when a turn is coming in, and the side bar carries a rule in the same colour, so the gutter ends the turn as plainly as the line does. A turn being over is the thing you wait on, so the buffer states it rather than leaving you to notice that nothing has moved.
+Below the last message is the **state line**, which says outright whether anything is still going on: `▶ working…` while a turn is in flight, `✓ turn over` once it lands (what it cost is in the header), `✗ turn failed` when it did not, and `● idle` for replayed history (which carries no turn of its own). It sits at the bottom because that is where you are reading when a turn is coming in, and the side bar carries a rule in the same colour, so the gutter ends the turn as plainly as the line does. A turn being over is the thing you wait on, so the buffer states it rather than leaving you to notice that nothing has moved.
 
 It is also the steering surface. Marking is the one selection primitive; a verb acts on the marked sections, or the section at point when nothing is marked. Every change-touching verb is an instruction sent to the agent (Sprig itself never runs git):
 
@@ -145,11 +145,13 @@ When the agent calls `AskUserQuestion` mid-turn, the question renders **in the b
 
 | Key | Does |
 |---|---|
-| `a a` | Answer, one question at a time, in `*sprig-answer*` (`RET` or `1`-`9` picks, `C-c C-c` skips one, `C-c C-k` skips the rest) |
-| `a r` | Take the option each question recommends, without opening anything |
+| `a a` | Answer, one question at a time, in `*sprig-answer*` (`RET` or `1`-`9` picks, `C-c C-c` skips one, `C-c C-k` skips the rest); on a plan, approve or reject |
+| `a r` | Take the option each question recommends, without opening anything; on a plan, approve |
 | `a s` | Skip; the agent goes on unanswered |
 
-The choice rides back to the agent and the question settles in place, showing what was said. Nothing is read in the minibuffer, and nothing blocks: the CLI's request is handled inside the process filter, so a prompt there would hold Emacs itself for as long as the question went unanswered. A tool that needs approval still prompts in the minibuffer, as does `ExitPlanMode`. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
+The choice rides back to the agent and the question settles in place, showing what was said. Nothing blocks: the CLI's request is handled inside the process filter, so a prompt there would hold Emacs itself for as long as the question went unanswered.
+
+**A plan** (`ExitPlanMode`) comes the same way, and renders in full, fontified: `a a` approves or rejects it (a rejection reads the feedback the agent plans again against), `a r` approves. Approving used to be a `y-or-n-p` naming the plan's first line, over a buffer that rendered the plan nowhere at all. A tool that needs mere permission still prompts in the minibuffer. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
 
 ## Options
 
@@ -179,7 +181,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.10.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.11.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

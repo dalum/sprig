@@ -678,9 +678,10 @@ dialog, and answered from there.  Returns the reply string."
         (should (equal (alist-get 'behavior decision) "allow"))
         (should-not (alist-get 'updatedInput decision))))))
 
-(defun sprig-tests--answer-plan (yn feedback)
-  "Run the ExitPlanMode approval path; YN is the y-or-n-p answer, FEEDBACK
-the reject text.  Returns the reply string."
+(defun sprig-tests--offer-plan ()
+  "Run an ExitPlanMode request through the wire; return the `dialog' event.
+Nothing is answered: the plan is only handed to the buffer, which is the
+whole of what the filter should do with it."
   (let ((event (car (sprig--claude-parse-line
                      (json-serialize
                       (list :type "control_request" :request_id "req-p"
@@ -688,15 +689,27 @@ the reject text.  Returns the reply string."
                                            :tool_name "ExitPlanMode"
                                            :input (list :plan "# Do the thing\n\nSteps"
                                                         :planFilePath "/tmp/p.md")))))))
-        sent)
-    (cl-letf (((symbol-function 'process-send-string) (lambda (_proc s) (setq sent s)))
-              ((symbol-function 'sprig-review-flush) #'ignore)
-              ((symbol-function 'redisplay) #'ignore)
-              ((symbol-function 'y-or-n-p) (lambda (&rest _) yn))
-              ((symbol-function 'read-string) (lambda (&rest _) feedback)))
-      (setq sprig--process 'dummy)
+        dialog)
+    (cl-letf (((symbol-function 'sprig-review-consume)
+               (lambda (e) (when (eq (car e) 'dialog) (setq dialog e))))
+              ;; Any prompt from the filter is the bug this replaced.
+              ((symbol-function 'y-or-n-p)
+               (lambda (&rest _) (error "prompted in the filter")))
+              ((symbol-function 'read-string)
+               (lambda (&rest _) (error "prompted in the filter"))))
       (pcase event
         (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+    dialog))
+
+(defun sprig-tests--answer-plan (approve feedback)
+  "Approve or reject the offered plan; return the reply string."
+  (let ((dialog (sprig-tests--offer-plan)) sent)
+    (cl-letf (((symbol-function 'process-send-string) (lambda (_proc s) (setq sent s)))
+              ((symbol-function 'sprig-review-consume) #'ignore))
+      (setq sprig--process 'dummy)
+      (if approve
+          (sprig--review-approve-plan (nth 1 dialog))
+        (sprig--review-reject-plan (nth 1 dialog) feedback)))
     sent))
 
 (defun sprig-tests--decision (sent)
@@ -704,6 +717,18 @@ the reject text.  Returns the reply string."
   (alist-get 'response (alist-get 'response
                                   (json-parse-string (string-trim sent)
                                                      :object-type 'alist))))
+
+(ert-deftest sprig-test-plan-is-offered-not-prompted ()
+  ;; The plan is handed to the buffer to be read and approved there.  It used
+  ;; to be a y-or-n-p naming its first line, from inside the process filter,
+  ;; over a buffer that rendered the plan nowhere at all.
+  (with-temp-buffer
+    (let ((dialog (sprig-tests--offer-plan)))
+      (should (equal (nth 0 dialog) 'dialog))
+      (should (equal (nth 1 dialog) "req-p"))
+      (should (equal (nth 2 dialog) "exit_plan_mode"))
+      ;; The whole plan rides along, to be rendered.
+      (should (equal (alist-get 'plan (nth 3 dialog)) "# Do the thing\n\nSteps")))))
 
 (ert-deftest sprig-test-answer-plan-approve ()
   ;; Approving replies with a bare allow; the CLI itself exits plan mode.
@@ -718,7 +743,12 @@ the reject text.  Returns the reply string."
   (with-temp-buffer
     (let ((decision (sprig-tests--decision (sprig-tests--answer-plan nil "add French"))))
       (should (equal (alist-get 'behavior decision) "deny"))
-      (should (equal (alist-get 'message decision) "add French")))))
+      (should (equal (alist-get 'message decision) "add French"))))
+  ;; Rejecting with nothing to say still says something.
+  (with-temp-buffer
+    (let ((decision (sprig-tests--decision (sprig-tests--answer-plan nil ""))))
+      (should (equal (alist-get 'behavior decision) "deny"))
+      (should (equal (alist-get 'message decision) "Plan rejected.")))))
 
 (ert-deftest sprig-test-safe-quit-response ()
   ;; A quit never approves: a plan or permission denies, a question skips.

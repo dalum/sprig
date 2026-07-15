@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.10.0
+;; Version: 0.11.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 

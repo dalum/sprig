@@ -294,7 +294,7 @@ timestamp, or the state line's rule."
     (sprig-review-flush)
     (should-not sprig-review--streaming)
     (should (equal (sprig-review-tests--state-line)
-                   '("✓  turn over  ·  $0.0312" . sprig-review-done)))
+                   '("✓  turn over" . sprig-review-done)))
     ;; A new turn takes the line back.
     (sprig-review-consume '(text "more"))
     (sprig-review-flush)
@@ -464,7 +464,7 @@ timestamp, or the state line's rule."
       ;; Settled: what was said, and no longer how to say it.
       (should (string-match-p "Patch it" s))
       (should-not (string-match-p "a a to answer" s)))
-    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over  ·  $0.0100"))))
+    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))))
 
 (ert-deftest sprig-review-mode-test-answer-recommended ()
   ;; `a r' takes the option the tool marked, without opening anything.

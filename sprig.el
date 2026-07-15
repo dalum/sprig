@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.10.0
+;; Version: 0.11.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -617,7 +617,7 @@ session never hangs on an unanswered request."
           (sprig--offer-user-question request-id .input))
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "ExitPlanMode"))
-          (sprig--answer-plan request-id .input))
+          (sprig--offer-plan request-id .input))
          ((equal .subtype "can_use_tool")
           (sprig--send-control-response
            request-id
@@ -641,27 +641,25 @@ allows with no answer (the tool's own skip), a dialog cancels."
       (list :behavior "deny" :message "Cancelled in sprig"))
      (t (list :behavior "cancelled")))))
 
-(defun sprig--answer-plan (request-id input)
-  "Approve or reject the ExitPlanMode plan in INPUT, replying to REQUEST-ID.
-Approval (\\`y') lets the CLI exit plan mode and the agent start work; a
-rejection reads feedback the agent revises against and re-presents.  The
-pending render is flushed first so the plan (the ExitPlanMode tool call)
-is on screen before the prompt blocks."
-  (sprig-review-flush)
-  (redisplay)
-  (let* ((plan (or (alist-get 'plan input) ""))
-         (title (car (split-string plan "\n" t))))
-    (if (y-or-n-p (format "Approve plan%s? "
-                          (if title
-                              (format " \"%s\""
-                                      (truncate-string-to-width title 50 nil nil "…"))
-                            "")))
-        (sprig--send-control-response request-id (list :behavior "allow"))
-      (let ((feedback (read-string "Reject plan; feedback for revision: ")))
-        (sprig--send-control-response
-         request-id
-         (list :behavior "deny"
-               :message (if (string-empty-p feedback) "Plan rejected." feedback)))))))
+(defun sprig--offer-plan (request-id input)
+  "Put the ExitPlanMode plan in INPUT into the buffer, to be approved there.
+Nothing is sent back yet, for the reasons in `sprig--offer-user-question',
+and for one more: the plan was never on screen.  The prompt named its
+first line and the buffer showed a bare `ExitPlanMode' row, the plan text
+rendering nowhere, so approval was a yes to something unread.  As a dialog
+it renders in full, and is approved once it has been."
+  (sprig-review-consume (list 'dialog request-id "exit_plan_mode" input)))
+
+(defun sprig--review-approve-plan (id)
+  "Approve the plan of dialog ID: the agent leaves plan mode and starts work."
+  (sprig--send-control-response id (list :behavior "allow"))
+  (sprig-review-consume (list 'dialog-answer id "approved")))
+
+(defun sprig--review-reject-plan (id feedback)
+  "Reject the plan of dialog ID with FEEDBACK, which the agent re-plans against."
+  (let ((message (if (string-empty-p feedback) "Plan rejected." feedback)))
+    (sprig--send-control-response id (list :behavior "deny" :message message))
+    (sprig-review-consume (list 'dialog-answer id (concat "rejected: " message)))))
 
 (defun sprig--offer-user-question (request-id input)
   "Put the AskUserQuestion INPUT into the buffer, to be answered there.
