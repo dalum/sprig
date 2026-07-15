@@ -750,6 +750,85 @@ whole of what the filter should do with it."
       (should (equal (alist-get 'behavior decision) "deny"))
       (should (equal (alist-get 'message decision) "Plan rejected.")))))
 
+(defun sprig-tests--permission-request ()
+  "Return the `control-request' event for a Bash call wanting permission."
+  (car (sprig--claude-parse-line
+        (json-serialize
+         (list :type "control_request" :request_id "req-b"
+               :request (list :subtype "can_use_tool"
+                              :tool_name "Bash"
+                              :input (list :command "rm -rf /tmp/scratch")))))))
+
+(ert-deftest sprig-test-permission-does-not-block-the-filter ()
+  ;; The third and last thing that prompted from inside the process filter.
+  ;; It must hand the call to the buffer and return.
+  (with-temp-buffer
+    (let ((sprig-permission-function nil)
+          consumed responded)
+      (cl-letf (((symbol-function 'sprig-review-consume)
+                 (lambda (event) (push event consumed)))
+                ((symbol-function 'sprig--send-control-response)
+                 (lambda (&rest _) (setq responded t)))
+                ((symbol-function 'y-or-n-p)
+                 (lambda (&rest _) (error "prompted in the filter"))))
+        (pcase (sprig-tests--permission-request)
+          (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+      (pcase (car consumed)
+        (`(dialog ,id ,kind ,req)
+         (should (equal id "req-b"))
+         (should (equal kind "can_use_tool"))
+         ;; The whole request rides along: the rendering wants the tool's name.
+         (should (equal (alist-get 'tool_name req) "Bash"))
+         (should (equal (alist-get 'command (alist-get 'input req))
+                        "rm -rf /tmp/scratch")))
+        (other (ert-fail (format "expected a dialog, got %S" other))))
+      ;; Nothing said back: the agent waits on you.
+      (should-not responded))))
+
+(ert-deftest sprig-test-permission-function-still-decides ()
+  ;; A non-nil `sprig-permission-function' keeps its contract, so `always'
+  ;; goes on auto-approving and never renders a dialog.
+  (with-temp-buffer
+    (let ((sprig-permission-function #'always)
+          sent dialog)
+      (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
+                ((symbol-function 'sprig-review-consume)
+                 (lambda (e) (when (eq (car e) 'dialog) (setq dialog e)))))
+        (setq sprig--process 'dummy)
+        (pcase (sprig-tests--permission-request)
+          (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+      (should-not dialog)
+      (should (equal (alist-get 'behavior (sprig-tests--decision sent)) "allow"))))
+  ;; And one that denies still denies.
+  (with-temp-buffer
+    (let ((sprig-permission-function #'ignore)
+          sent)
+      (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
+                ((symbol-function 'sprig-review-consume) #'ignore))
+        (setq sprig--process 'dummy)
+        (pcase (sprig-tests--permission-request)
+          (`(control-request ,id ,req) (sprig--answer-control-request id req))))
+      (should (equal (alist-get 'behavior (sprig-tests--decision sent)) "deny")))))
+
+(ert-deftest sprig-test-allow-and-deny-tool ()
+  (with-temp-buffer
+    (let (sent consumed)
+      (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
+                ((symbol-function 'sprig-review-consume)
+                 (lambda (e) (setq consumed e))))
+        (setq sprig--process 'dummy)
+        (sprig--review-allow-tool "req-b")
+        (let ((decision (sprig-tests--decision sent)))
+          (should (equal (alist-get 'behavior decision) "allow"))
+          ;; No `updatedInput': the call runs unchanged.
+          (should-not (alist-get 'updatedInput decision)))
+        (should (equal consumed '(dialog-answer "req-b" "allowed")))
+        (sprig--review-deny-tool "req-b")
+        (let ((decision (sprig-tests--decision sent)))
+          (should (equal (alist-get 'behavior decision) "deny"))
+          (should (equal (alist-get 'message decision) "Denied in sprig")))
+        (should (equal consumed '(dialog-answer "req-b" "denied")))))))
+
 (ert-deftest sprig-test-safe-quit-response ()
   ;; A quit never approves: a plan or permission denies, a question skips.
   (should (equal (plist-get (sprig--safe-quit-response

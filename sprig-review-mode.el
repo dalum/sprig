@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.11.0
+;; Version: 0.12.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -40,6 +40,8 @@
 (declare-function sprig--review-answer-dialog "sprig" (id input answers))
 (declare-function sprig--review-approve-plan "sprig" (id))
 (declare-function sprig--review-reject-plan "sprig" (id feedback))
+(declare-function sprig--review-allow-tool "sprig" (id))
+(declare-function sprig--review-deny-tool "sprig" (id))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
@@ -65,6 +67,16 @@
 
 (defface sprig-review-removed '((t :inherit diff-removed))
   "Face for a removed line in a reconstructed hunk."
+  :group 'sprig)
+
+(defface sprig-review-stat-added '((t :inherit success :weight normal))
+  "Face for the added-line count in a tool heading.
+Foreground only, unlike `sprig-review-added': a count sits in a heading,
+where the diff faces' backgrounds would be a stripe across it."
+  :group 'sprig)
+
+(defface sprig-review-stat-removed '((t :inherit error :weight normal))
+  "Face for the removed-line count in a tool heading."
   :group 'sprig)
 
 (defface sprig-review-user
@@ -308,9 +320,17 @@ The extra column is the gap holding the stamp off the text."
 ;;;; Heading helpers
 
 (defun sprig-review--stat-string (change)
-  "Return a \"(+A -B)\" line-count summary for CHANGE."
-  (let ((s (sprig-review-change-stat change)))
-    (format "(+%d -%d)" (car s) (cdr s))))
+  "Return a \"(+A -B)\" line-count summary for CHANGE, added green, removed red.
+The numbers are the whole of what a folded edit tells you about its size,
+so they are worth reading at a glance rather than parsing."
+  (let ((stat (sprig-review-change-stat change)))
+    (concat "("
+            (sprig-review--face (format "+%d" (car stat))
+                                'sprig-review-stat-added)
+            " "
+            (sprig-review--face (format "-%d" (cdr stat))
+                                'sprig-review-stat-removed)
+            ")")))
 
 (defun sprig-review--truncate (s width)
   "Return S truncated to WIDTH columns, ending in an ellipsis when shortened."
@@ -507,11 +527,23 @@ and `options' arrive as vectors and `multiSelect' as `:false'."
 ExitPlanMode does not put it as a question, so it is put as one here, and
 a plan is then answered by everything that answers a question.")
 
+(defconst sprig-review--permission-question
+  '((question . "Allow this call?")
+    (multiSelect . :false)
+    (options . [((label . "Allow")
+                 (description . "run it, this once"))
+                ((label . "Deny")
+                 (description . "the agent is told no, and goes on"))]))
+  "The one thing a tool wanting permission asks.
+Put as a question here, as a plan's is, so a permission is answered by
+everything that answers a question.")
+
 (defun sprig-review--dialog-questions (block)
   "Return the questions dialog BLOCK asks."
-  (if (equal (plist-get block :kind) "exit_plan_mode")
-      (list sprig-review--plan-question)
-    (sprig-review--question-list (plist-get block :input))))
+  (pcase (plist-get block :kind)
+    ("exit_plan_mode" (list sprig-review--plan-question))
+    ("can_use_tool" (list sprig-review--permission-question))
+    (_ (sprig-review--question-list (plist-get block :input)))))
 
 (defun sprig-review--option-label (option)
   "Return OPTION's label."
@@ -587,22 +619,54 @@ whole of what you are approving is here to read."
                                     'sprig-review-dialog-picked)
                 "\n")))))
 
+(defun sprig-review--insert-permission (block)
+  "Insert the tool call BLOCK wants permission for, and what was said of it."
+  (let* ((request (plist-get block :input))
+         (tool (or (alist-get 'tool_name request) "a tool"))
+         (summary (sprig-review--input-summary tool (alist-get 'input request))))
+    (magit-insert-section (sprig-permission block)
+      (magit-insert-heading
+        (sprig-review--face (format "? Allow %s?" tool) 'sprig-review-dialog))
+      (when summary
+        (insert "    "
+                (sprig-review--face
+                 (sprig-review--truncate summary sprig-review-heading-max-width)
+                 'default)
+                "\n"))
+      (when (plist-get block :answered)
+        (insert "    "
+                (sprig-review--face (format "%s" (plist-get block :answers))
+                                    'sprig-review-dialog-picked)
+                "\n")))))
+
+(defun sprig-review--dialog-hint (kind)
+  "Return the line saying how to answer a dialog of KIND."
+  (pcase kind
+    ("exit_plan_mode" "    a a to approve or reject · a r to approve")
+    ("can_use_tool" "    a a to allow or deny · a s to deny")
+    (_ "    a a to answer · a r to take the recommended")))
+
 (defun sprig-review--insert-dialog (block)
-  "Insert dialog BLOCK: what the agent asked, and what there is to answer."
-  (magit-insert-section (sprig-dialog block)
-    (if (equal (plist-get block :kind) "exit_plan_mode")
-        (sprig-review--insert-plan block)
-      (seq-do-indexed
-       (lambda (question index)
-         (sprig-review--insert-question block question index))
-       (sprig-review--question-list (plist-get block :input))))
-    (unless (plist-get block :answered)
-      (insert (sprig-review--face
-               (if (equal (plist-get block :kind) "exit_plan_mode")
-                   "    a a to approve or reject · a r to approve"
-                 "    a a to answer · a r to take the recommended")
-               'sprig-review-meta-key)
-              "\n"))))
+  "Insert dialog BLOCK: what the agent asked, and what there is to answer.
+The questions are the sections; no section of its own wraps them.  A
+section that starts where its first child starts traps
+`magit-section-backward': at that position it is the child that is
+current, so `p' walks up to the parent and goes to the parent's start,
+which is the very position it came from, and point never moves again.
+Magit's own sections never meet this, always heading a section before
+opening a child, and a wrapper here earns nothing to pay for it."
+  (pcase (plist-get block :kind)
+    ("exit_plan_mode" (sprig-review--insert-plan block))
+    ("can_use_tool" (sprig-review--insert-permission block))
+    (_ (seq-do-indexed
+        (lambda (question index)
+          (sprig-review--insert-question block question index))
+        (sprig-review--question-list (plist-get block :input)))))
+  (unless (plist-get block :answered)
+    (insert (sprig-review--face (sprig-review--dialog-hint
+                                 (plist-get block :kind))
+                                'sprig-review-meta-key)
+            "\n")))
 
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
@@ -1331,29 +1395,46 @@ interrupted and restarted.  With no turn running, this just sends."
 
 (defun sprig-review--answer-plan (dialog answers)
   "Approve or reject DIALOG's plan, per ANSWERS.
-Rejecting reads the feedback the agent plans again against.  Reading it
-here is safe where reading it in the filter was not: this runs from a
-command of yours, not from the middle of the CLI's output."
+Rejecting outright reads the feedback the agent plans again against;
+reading it here is safe where reading it in the filter was not, this
+being a command of yours rather than the middle of the CLI's output.
+Skipping (no ANSWERS at all) rejects without asking for any."
   (let ((id (plist-get dialog :id)))
-    (if (equal (cdar answers) "Approve")
-        (progn (sprig--review-approve-plan id)
-               (message "sprig: plan approved; the agent starts work"))
+    (cond
+     ((equal (cdar answers) "Approve")
+      (sprig--review-approve-plan id)
+      (message "sprig: plan approved; the agent starts work"))
+     (answers
       (let ((feedback (read-string "Reject plan; what should change? ")))
         (sprig--review-reject-plan id feedback)
-        (message "sprig: plan rejected; the agent plans again")))))
+        (message "sprig: plan rejected; the agent plans again")))
+     (t (sprig--review-reject-plan id "")
+        (message "sprig: plan rejected")))))
+
+(defun sprig-review--answer-permission (dialog answers)
+  "Allow or deny DIALOG's tool call, per ANSWERS.
+Anything but an outright allow denies, skipping included: the call has to
+be answered, and no is the answer that cannot do damage."
+  (let ((id (plist-get dialog :id)))
+    (if (equal (cdar answers) "Allow")
+        (progn (sprig--review-allow-tool id)
+               (message "sprig: allowed"))
+      (sprig--review-deny-tool id)
+      (message "sprig: denied; the agent is told no and goes on"))))
 
 (defun sprig-review--answer-dialog (dialog answers)
   "Answer DIALOG with ANSWERS, and say so.
-A plan is not answered with a map of answers but by approving or
-rejecting it, so it goes its own way from here."
-  (if (equal (plist-get dialog :kind) "exit_plan_mode")
-      (sprig-review--answer-plan dialog answers)
-    (sprig--review-answer-dialog (plist-get dialog :id)
-                                 (plist-get dialog :input)
-                                 answers)
-    (message "sprig: %s" (if answers
-                             (format "answered (%d)" (length answers))
-                           "skipped; the agent goes on unanswered"))))
+A plan and a permission are not answered with a map of answers, but by
+approving or allowing, so each goes its own way from here."
+  (pcase (plist-get dialog :kind)
+    ("exit_plan_mode" (sprig-review--answer-plan dialog answers))
+    ("can_use_tool" (sprig-review--answer-permission dialog answers))
+    (_ (sprig--review-answer-dialog (plist-get dialog :id)
+                                    (plist-get dialog :input)
+                                    answers)
+       (message "sprig: %s" (if answers
+                                (format "answered (%d)" (length answers))
+                              "skipped; the agent goes on unanswered")))))
 
 ;;;###autoload
 (defun sprig-review-answer ()
@@ -1376,9 +1457,13 @@ rejecting it, so it goes its own way from here."
   "Answer every waiting question with the option it recommends.
 The tool marks its recommended option and puts it first, so a question
 recommending nothing takes its first option (see
-`sprig-review--recommended-option')."
+`sprig-review--recommended-option').  A permission recommends nothing, and
+will not be talked into it: one keypress allowing an unread call is the
+wrong thing to make easy."
   (interactive)
   (let* ((dialog (sprig-review--pending-dialog))
+         (_ (when (equal (plist-get dialog :kind) "can_use_tool")
+              (user-error "Nothing is recommended here: a permission is yours to give")))
          (answers (mapcar (lambda (question)
                             (cons (intern (alist-get 'question question))
                                   (sprig-review--recommended-option question)))

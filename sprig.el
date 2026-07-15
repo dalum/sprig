@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.11.0
+;; Version: 0.12.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -103,17 +103,23 @@ about.  nil disables the handshake, matching the classic behaviour where
 neither tool is offered."
   :type '(repeat string))
 
-(defcustom sprig-permission-function #'sprig-permission-prompt
-  "Function consulted when the CLI asks to run a tool (`can_use_tool').
-Called with the tool name (a string) and its input (an alist); returns
-non-nil to allow the call, nil to deny it.  The default prompts in the
-minibuffer.  Set it to `always' to auto-approve everything the CLI would
-otherwise gate.
+(defcustom sprig-permission-function nil
+  "Function consulted when the CLI asks to run a tool (`can_use_tool'), or nil.
+nil, the default, asks in the review buffer: the call renders as a dialog
+you answer with `a a', and nothing is held up meanwhile.
 
-This function only runs for tools the CLI's own permission configuration
+Non-nil is called with the tool name (a string) and its input (an alist),
+and returns non-nil to allow the call, nil to deny it.  Set it to `always'
+to auto-approve everything the CLI would otherwise gate.  Such a function
+runs inside the process filter, so it must not prompt: a prompt there
+holds the filter, and Emacs with it, until it is answered.
+`sprig-permission-prompt' is exactly that prompt, kept for anyone who
+wants it deliberately.
+
+This is consulted only for tools the CLI's own permission configuration
 does not already allow; adding `--permission-prompt-tool stdio' routes
 those escalations to sprig instead of the headless auto-deny."
-  :type 'function)
+  :type '(choice (const :tag "Ask in the review buffer" nil) function))
 
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
@@ -619,13 +625,15 @@ session never hangs on an unanswered request."
                (equal .tool_name "ExitPlanMode"))
           (sprig--offer-plan request-id .input))
          ((equal .subtype "can_use_tool")
-          (sprig--send-control-response
-           request-id
-           (if (funcall sprig-permission-function .tool_name .input)
-               ;; Omit `updatedInput': absent means "run the call
-               ;; unchanged", avoiding a lossy JSON round-trip of the input.
-               (list :behavior "allow")
-             (list :behavior "deny" :message "Denied in sprig"))))
+          (if sprig-permission-function
+              (sprig--send-control-response
+               request-id
+               (if (funcall sprig-permission-function .tool_name .input)
+                   ;; Omit `updatedInput': absent means "run the call
+                   ;; unchanged", avoiding a lossy JSON round-trip of the input.
+                   (list :behavior "allow")
+                 (list :behavior "deny" :message "Denied in sprig")))
+            (sprig--offer-permission request-id req)))
          (t (sprig--send-control-response request-id (list :behavior "cancelled"))))
       (quit (sprig--send-control-response
              request-id (sprig--safe-quit-response req))))))
@@ -640,6 +648,27 @@ allows with no answer (the tool's own skip), a dialog cancels."
      ((equal .subtype "can_use_tool")
       (list :behavior "deny" :message "Cancelled in sprig"))
      (t (list :behavior "cancelled")))))
+
+(defun sprig--offer-permission (request-id req)
+  "Put the tool call REQ wants to make into the buffer, to be allowed there.
+Nothing is sent back yet, for the reason in `sprig--offer-user-question':
+a prompt from inside the process filter holds the filter, and Emacs with
+it, so every other session's output would stall behind you deciding
+whether one call may run.  The whole REQ rides along, not just its input,
+the rendering wanting the tool's name too."
+  (sprig-review-consume (list 'dialog request-id "can_use_tool" req)))
+
+(defun sprig--review-allow-tool (id)
+  "Allow the tool call of dialog ID, this once."
+  ;; Omit `updatedInput': absent means "run the call unchanged".
+  (sprig--send-control-response id (list :behavior "allow"))
+  (sprig-review-consume (list 'dialog-answer id "allowed")))
+
+(defun sprig--review-deny-tool (id)
+  "Deny the tool call of dialog ID; the agent is told no and goes on."
+  (sprig--send-control-response id (list :behavior "deny"
+                                         :message "Denied in sprig"))
+  (sprig-review-consume (list 'dialog-answer id "denied")))
 
 (defun sprig--offer-plan (request-id input)
   "Put the ExitPlanMode plan in INPUT into the buffer, to be approved there.

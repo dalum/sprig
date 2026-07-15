@@ -6,7 +6,7 @@ Sprig is an Emacs interface for **reviewing and steering** an LLM agent's work, 
 
 **The store is the CLI's own log.** A conversation *is* a `claude` session. The CLI already persists each session as a JSONL log under `~/.claude/projects/<cwd>/<id>.jsonl` on the host where it runs, so Sprig keeps no store of its own: history is replayed from that log, and it survives an Emacs restart because the session id names the file. The transport is a persistent **Claude Code session**, local or over **SSH**, via the `claude` CLI's stream-json protocol, so it uses whatever the CLI is logged in as (a Claude **Pro/Max subscription** works, no API key needed).
 
-The agent runs with its normal tools. Sprig answers the CLI's interactive control requests over the same stream: when a tool needs approval that the CLI's own permission configuration does not already grant, Sprig prompts you (rather than the headless auto-deny), and it enables the interactive tools that stay dark otherwise, so `AskUserQuestion` renders as a choice and plan-mode approval works. Set `sprig-permission-function` to `always` to approve every escalation automatically and keep to pure after-the-fact review.
+The agent runs with its normal tools. Sprig answers the CLI's interactive control requests over the same stream: when a tool needs approval that the CLI's own permission configuration does not already grant, Sprig asks you (rather than the headless auto-deny), and it enables the interactive tools that stay dark otherwise, so `AskUserQuestion` renders as a choice and plan-mode approval works. Every one of those questions is asked **in the review buffer**, never the minibuffer, and answering none of them blocks. Set `sprig-permission-function` to `always` to approve every escalation automatically and keep to pure after-the-fact review.
 
 ## How it works
 
@@ -151,7 +151,9 @@ When the agent calls `AskUserQuestion` mid-turn, the question renders **in the b
 
 The choice rides back to the agent and the question settles in place, showing what was said. Nothing blocks: the CLI's request is handled inside the process filter, so a prompt there would hold Emacs itself for as long as the question went unanswered.
 
-**A plan** (`ExitPlanMode`) comes the same way, and renders in full, fontified: `a a` approves or rejects it (a rejection reads the feedback the agent plans again against), `a r` approves. Approving used to be a `y-or-n-p` naming the plan's first line, over a buffer that rendered the plan nowhere at all. A tool that needs mere permission still prompts in the minibuffer. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
+**A plan** (`ExitPlanMode`) comes the same way, and renders in full, fontified: `a a` approves or rejects it (a rejection reads the feedback the agent plans again against), `a r` approves. Approving used to be a `y-or-n-p` naming the plan's first line, over a buffer that rendered the plan nowhere at all.
+
+**A tool wanting permission** comes the same way too, showing what it wants to run: `a a` allows or denies it, `a s` denies. `a r` refuses to touch it, one keypress allowing an unread call being the wrong thing to make easy. Set `sprig-permission-function` to `always` to skip the asking, or to `sprig-permission-prompt` for the old minibuffer prompt, which blocks. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
 
 ## Options
 
@@ -166,7 +168,7 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
 | `sprig-extra-args` | `nil` | Extra `claude` args |
 | `sprig-supported-dialog-kinds` | `("ask_user_question" "exit_plan_mode")` | Dialog kinds Sprig tells the CLI it can answer; declaring a kind is what enables the tool behind it (nil disables both) |
-| `sprig-permission-function` | `sprig-permission-prompt` | Called with a tool name and input when the CLI asks to run a tool; non-nil allows, nil denies. Set to `always` to auto-approve |
+| `sprig-permission-function` | `nil` | `nil` asks in the review buffer, as a dialog. A function is called with a tool name and input (non-nil allows, nil denies); set it to `always` to auto-approve. Such a function runs in the process filter and must not prompt |
 | `sprig-error-buffer` | `"*sprig-errors*"` | Buffer where a failed session's command and stderr are logged |
 | `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `L` lifts it live) |
 | `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
@@ -181,7 +183,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 ## Status / caveats
 
-- v0.11.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.12.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.

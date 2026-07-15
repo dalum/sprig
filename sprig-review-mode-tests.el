@@ -547,6 +547,136 @@ timestamp, or the state line's rule."
     (should (equal (cdar answered) "Rewrite it (Recommended), Patch it")))
   (kill-buffer "*sprig-answer*"))
 
+(defun sprig-review-tests--permission-input ()
+  "The request a Bash call wanting permission arrives as."
+  '((subtype . "can_use_tool")
+    (tool_name . "Bash")
+    (input . ((command . "rm -rf /tmp/scratch")))))
+
+(ert-deftest sprig-review-mode-test-permission-renders-and-waits ()
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
+                                (sprig-review-tests--permission-input)))
+    (sprig-review-flush)
+    (let ((s (buffer-string)))
+      (should (string-match-p "? Allow Bash?" s))
+      ;; What you are being asked to allow, not just that you are.
+      (should (string-match-p "rm -rf /tmp/scratch" s))
+      (should (string-match-p "a a to allow or deny" s)))
+    (should (equal (car (sprig-review-tests--state-line))
+                   "?  waiting on you  ·  a a to answer"))))
+
+(ert-deftest sprig-review-mode-test-permission-allow-and-deny ()
+  (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+            ((symbol-function 'quit-window) #'ignore))
+    ;; Allow: picked in the answer buffer.
+    (let (allowed)
+      (cl-letf (((symbol-function 'sprig--review-allow-tool)
+                 (lambda (id) (setq allowed id)))
+                ((symbol-function 'sprig--review-deny-tool)
+                 (lambda (_id) (ert-fail "denied when allowed"))))
+        (with-temp-buffer
+          (sprig-review-mode)
+          (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
+                                      (sprig-review-tests--permission-input)))
+          (sprig-review-flush)
+          (sprig-review-answer)
+          (with-current-buffer "*sprig-answer*"
+            (should (string-match-p "Allow this call?" (buffer-string)))
+            (setq last-command-event ?1)
+            (sprig-answer-pick-number))))
+      (should (equal allowed "req-b")))
+    ;; Deny: the other option.
+    (let (denied)
+      (cl-letf (((symbol-function 'sprig--review-deny-tool)
+                 (lambda (id) (setq denied id))))
+        (with-temp-buffer
+          (sprig-review-mode)
+          (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
+                                      (sprig-review-tests--permission-input)))
+          (sprig-review-flush)
+          (sprig-review-answer)
+          (with-current-buffer "*sprig-answer*"
+            (setq last-command-event ?2)
+            (sprig-answer-pick-number))))
+      (should (equal denied "req-b"))))
+  (kill-buffer "*sprig-answer*"))
+
+(ert-deftest sprig-review-mode-test-permission-guards-the-shortcuts ()
+  ;; `a r' would be one keypress allowing an unread call, so it refuses; `a s'
+  ;; denies, no being the answer that cannot do damage.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
+                                (sprig-review-tests--permission-input)))
+    (sprig-review-flush)
+    (should-error (sprig-review-answer-recommended) :type 'user-error)
+    (let (denied)
+      (cl-letf (((symbol-function 'sprig--review-deny-tool)
+                 (lambda (id) (setq denied id))))
+        (sprig-review-answer-skip))
+      (should (equal denied "req-b")))))
+
+(ert-deftest sprig-review-mode-test-plan-skip-does-not-ask-for-feedback ()
+  ;; Skipping is not rejecting-with-something-to-say: it must not stop to ask.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-p" "exit_plan_mode"
+                                '((plan . "# A plan"))))
+    (sprig-review-flush)
+    (let (rejected)
+      (cl-letf (((symbol-function 'sprig--review-reject-plan)
+                 (lambda (id feedback) (setq rejected (list id feedback))))
+                ((symbol-function 'read-string)
+                 (lambda (&rest _) (ert-fail "asked for feedback on a skip"))))
+        (sprig-review-answer-skip))
+      (should (equal rejected '("req-p" ""))))))
+
+(ert-deftest sprig-review-mode-test-navigation-passes-a-dialog ()
+  ;; A section starting where its first child starts traps
+  ;; `magit-section-backward': `p' walks up to the parent, goes to the
+  ;; parent's start, and lands on the position it came from, forever.
+  (dolist (dialog (list (list 'dialog "req-p" "exit_plan_mode"
+                              '((plan . "# A plan\n\nStep one.")))
+                        (list 'dialog "req-b" "can_use_tool"
+                              (sprig-review-tests--permission-input))
+                        (list 'dialog "req-1" "ask_user_question"
+                              (sprig-review-tests--dialog-input))))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "before"))
+      (sprig-review-consume dialog)
+      (sprig-review-consume '(text "after"))
+      (sprig-review-flush)
+      ;; Forward, from the top, reaches the text below the dialog.
+      (goto-char (point-min))
+      (let ((seen nil))
+        (dotimes (_ 6)
+          (ignore-errors (magit-section-forward))
+          (push (oref (magit-current-section) type) seen))
+        (should (memq 'sprig-state seen)))
+      ;; Backward, from the bottom, gets past the dialog to the text above it.
+      (goto-char (point-max))
+      (let ((seen nil))
+        (dotimes (_ 6)
+          (ignore-errors (magit-section-backward))
+          (push (oref (magit-current-section) type) seen))
+        (should (memq 'sprig-headers seen))))))
+
+(ert-deftest sprig-review-mode-test-diffstat-is-coloured ()
+  ;; The counts are what a folded edit tells you about its size.
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (font-lock-mode 1)
+    (font-lock-fontify-region (point-min) (point-max))
+    (goto-char (point-min))
+    (re-search-forward "\\+1")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'sprig-review-stat-added))
+    (re-search-forward "-2")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'sprig-review-stat-removed))))
+
 (ert-deftest sprig-review-mode-test-verbs-are-bound ()
   ;; Every verb the README documents as a key has to actually be on that key.
   ;; `C' was documented and unbound, reachable only through the transient.
