@@ -1001,6 +1001,51 @@ Return the log directory."
             (should (equal (plist-get (car rows) :session) "keep-1"))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-review-steer-writes-into-the-live-turn ()
+  ;; Steering writes the message to the session's stdin and echoes it, without
+  ;; opening a turn of its own: the CLI hands it to the agent at its next
+  ;; tool-call boundary, and the turn in flight still ends on its own `done'.
+  (with-temp-buffer
+    (setq-local sprig--busy t)
+    (let (wrote consumed delivered)
+      (cl-letf (((symbol-function 'sprig--send-user)
+                 (lambda (text) (setq wrote text)))
+                ((symbol-function 'sprig-review-consume)
+                 (lambda (event) (setq consumed event)))
+                ((symbol-function 'sprig--review-deliver)
+                 (lambda (&rest _) (setq delivered t))))
+        (sprig--review-steer "actually, do X"))
+      (should (equal wrote "actually, do X"))
+      ;; Echoed locally, so the steer shows in the transcript where it landed.
+      (should (equal consumed '(user "actually, do X")))
+      ;; Not delivered as a turn of its own, and the turn stays in flight.
+      (should-not delivered)
+      (should sprig--busy))))
+
+(ert-deftest sprig-test-review-steer-falls-back-when-the-turn-ended ()
+  ;; A turn can finish while its steering message is still being composed.
+  ;; The message is then sent as a turn of its own rather than lost.
+  (with-temp-buffer
+    (setq-local sprig--busy nil)
+    (let (wrote delivered)
+      (cl-letf (((symbol-function 'sprig--send-user)
+                 (lambda (text) (setq wrote text)))
+                ((symbol-function 'sprig--review-deliver)
+                 (lambda (text &optional _mode) (setq delivered text))))
+        (sprig--review-steer "actually, do X"))
+      (should (equal delivered "actually, do X"))
+      (should-not wrote))))
+
+(ert-deftest sprig-test-review-deliver-refuses-mid-turn ()
+  ;; An ordinary send still will not open a second turn; it points at `c s'.
+  (with-temp-buffer
+    (setq-local sprig--busy t)
+    (cl-letf (((symbol-function 'sprig--ensure) #'ignore)
+              ((symbol-function 'sprig--send-user)
+               (lambda (_) (error "should not have sent"))))
+      (let ((err (should-error (sprig--review-deliver "hi") :type 'user-error)))
+        (should (string-match-p "c s" (cadr err)))))))
+
 (ert-deftest sprig-test-undefine-faces-lets-a-reload-restyle ()
   ;; `defface' is a no-op on an already-defined face, so `sprig-reload' has
   ;; to undefine sprig's faces first or an edited spec keeps its stale

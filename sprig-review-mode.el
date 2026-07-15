@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.6.1
+;; Version: 0.7.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -36,6 +36,7 @@
 (require 'seq)
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
+(declare-function sprig--review-steer "sprig" (text))
 (declare-function sprig--review-interrupt-owned "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
@@ -818,6 +819,12 @@ Starts or resumes the session if it is not already live."
   (sprig--review-deliver text mode)
   (message "sprig: sent%s" (if mode (format " (%s mode)" mode) "")))
 
+(defun sprig-review--steer (text)
+  "Send TEXT into the turn already in flight (see `sprig--review-steer').
+Falls back to a plain send when the turn has since finished, so a message
+does not go down with the turn it was composed against."
+  (sprig--review-steer text))
+
 ;;;; Verbs
 
 (defun sprig-review--reject-pairs (sections)
@@ -930,6 +937,8 @@ On a diff hunk, best-effort move point to the first changed line."
   "Marked-section context prepended to the composed message, or nil.")
 (defvar-local sprig-review--compose-mode nil
   "Permission mode for the composed message (e.g. \"plan\"), or nil.")
+(defvar-local sprig-review--compose-steer nil
+  "Non-nil when the composed message steers the turn already in flight.")
 
 (defvar sprig-review-compose-mode-map
   (let ((map (make-sparse-keymap)))
@@ -953,10 +962,11 @@ Uses only real marks, not the section-at-point fallback."
                                  (oref s start) (oref s end))))
                  secs "\n\n"))))
 
-(defun sprig-review-message (&optional plan)
+(defun sprig-review-message (&optional plan steer)
   "Compose a message and send it to this review's session.
 Any marked sections are attached as context (see DESIGN.md's `c c').
-With PLAN non-nil, send the turn in plan mode (`c p')."
+With PLAN non-nil, send the turn in plan mode (`c p').  With STEER
+non-nil, send it into the turn already in flight (`c s')."
   (interactive)
   (let ((review (current-buffer))
         (context (sprig-review--marked-context))
@@ -966,10 +976,12 @@ With PLAN non-nil, send the turn in plan mode (`c p')."
       (erase-buffer)
       (setq sprig-review--compose-target review
             sprig-review--compose-context context
-            sprig-review--compose-mode (and plan "plan")))
+            sprig-review--compose-mode (and plan "plan")
+            sprig-review--compose-steer steer))
     (pop-to-buffer buf)
-    (message "%s%sC-c C-c to send, C-c C-k to cancel"
+    (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
+             (if steer "STEER: goes into the running turn at its next step.  " "")
              (if context (format "%d section(s) attached.  "
                                  (length (sprig-review--marked-sections)))
                ""))))
@@ -979,21 +991,32 @@ With PLAN non-nil, send the turn in plan mode (`c p')."
   (interactive)
   (sprig-review-message t))
 
+(defun sprig-review-steer ()
+  "Compose a message and send it into the turn already in flight (`c s').
+The agent takes it at its next tool-call boundary and carries on in the
+same turn, so a turn heading the wrong way can be corrected without being
+interrupted and restarted.  With no turn running, this just sends."
+  (interactive)
+  (sprig-review-message nil t))
+
 (defun sprig-review-compose-send ()
   "Send the composed message (with any attached context) to the conversation."
   (interactive)
-  (let ((text (string-trim (buffer-substring-no-properties
-                            (point-min) (point-max))))
-        (review sprig-review--compose-target)
-        (context sprig-review--compose-context)
-        (mode sprig-review--compose-mode))
+  (let* ((text (string-trim (buffer-substring-no-properties
+                             (point-min) (point-max))))
+         (review sprig-review--compose-target)
+         (context sprig-review--compose-context)
+         (mode sprig-review--compose-mode)
+         (steer sprig-review--compose-steer))
     (when (string-empty-p text) (user-error "Empty message"))
     (unless (buffer-live-p review) (user-error "The review buffer is gone"))
     (quit-window t)
     (with-current-buffer review
-      (sprig-review--send
-       (if context (format "Regarding:\n\n%s\n\n%s" context text) text)
-       mode))))
+      (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
+                       text)))
+        (if steer
+            (sprig-review--steer message)
+          (sprig-review--send message mode))))))
 
 (defun sprig-review-compose-abort ()
   "Cancel the message compose."
@@ -1008,6 +1031,7 @@ With PLAN non-nil, send the turn in plan mode (`c p')."
   [["Message"
     ("c" "compose & send" sprig-review-message)
     ("p" "compose in plan mode" sprig-review-message-plan)
+    ("s" "steer the running turn" sprig-review-steer)
     ("r" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn" sprig-review-interrupt)]
    ["Changes (agent instructions)"

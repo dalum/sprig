@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.6.1
+;; Version: 0.7.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -814,6 +814,24 @@ unless NO-PROMPT."
            (if sprig--working-dir (concat " in " sprig--working-dir) ""))
   (sprig--status-refresh))
 
+(defun sprig--review-steer (text)
+  "Send TEXT into the turn already in flight, to steer it.
+The CLI's stdin stays open for the length of a turn, and a user message
+written to it mid-turn is queued and handed to the agent at its next
+tool-call boundary, inside the same turn: the agent reads it and changes
+course, and one `done' still ends the turn.  So this neither interrupts
+nor opens a turn of its own; it only writes and echoes.
+
+`sprig--busy' is cleared on `done', on teardown, and by the sentinel on
+any process death, so it standing means the process is live to write to.
+When it is not, the turn ended while the message was being composed, and
+the message is delivered as a turn of its own rather than lost."
+  (if (not sprig--busy)
+      (sprig--review-deliver text)
+    (sprig--send-user text)
+    (sprig-review-consume (list 'user text))
+    (message "sprig: steering (the agent takes it at its next step)")))
+
 (defun sprig--review-deliver (text &optional mode)
   "Send TEXT as this review buffer's own next user turn, echoing it locally.
 Used when the review buffer owns the session.  MODE, when given, sets the
@@ -821,7 +839,7 @@ permission mode first (e.g. \"plan\"); with none, a session left in plan
 mode is returned to \"auto\"."
   (sprig--ensure)
   (when sprig--busy
-    (user-error "A turn is already in flight"))
+    (user-error "A turn is already in flight (steer it with `c s')"))
   (cond ((and mode (not (equal mode sprig--permission-mode)))
          (sprig--set-permission-mode mode))
         ((and (null mode) (equal sprig--permission-mode "plan"))

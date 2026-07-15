@@ -727,6 +727,49 @@ text, so they have to be read back off the overlays."
           (should (equal sent-text "make a plan"))
           (should (equal sent-mode "plan")))))))
 
+(ert-deftest sprig-review-mode-test-compose-steer ()
+  ;; `c s' routes to the steer path, not the ordinary send, and carries any
+  ;; marked context with it just the same.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((review (current-buffer)))
+      (with-temp-buffer
+        (sprig-review-compose-mode)
+        (insert "actually, stop and do X")
+        (setq sprig-review--compose-target review
+              sprig-review--compose-context "Regarding this hunk"
+              sprig-review--compose-mode nil
+              sprig-review--compose-steer t)
+        (let (steered sent)
+          (cl-letf (((symbol-function 'sprig-review--steer)
+                     (lambda (text) (setq steered text)))
+                    ((symbol-function 'sprig-review--send)
+                     (lambda (text &optional _mode) (setq sent text)))
+                    ((symbol-function 'quit-window) #'ignore))
+            (sprig-review-compose-send))
+          (should-not sent)
+          (should (equal steered
+                         "Regarding:\n\nRegarding this hunk\n\nactually, stop and do X")))))))
+
+(ert-deftest sprig-review-mode-test-steer-composes-with-the-flag ()
+  ;; `sprig-review-steer' opens the compose buffer marked to steer, and in no
+  ;; permission mode of its own: a turn in flight has already picked one.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+      (sprig-review-steer))
+    (with-current-buffer "*sprig-message*"
+      (should sprig-review--compose-steer)
+      (should-not sprig-review--compose-mode))
+    ;; Whereas a plain `c c' compose does not steer.
+    (with-temp-buffer
+      (sprig-review-mode)
+      (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+        (sprig-review-message))
+      (with-current-buffer "*sprig-message*"
+        (should-not sprig-review--compose-steer)))
+    (kill-buffer "*sprig-message*")))
+
 ;;;; A review buffer that owns its session
 
 (ert-deftest sprig-review-mode-test-owned-sink-tracks-and-consumes ()

@@ -47,6 +47,7 @@ There is no input area. Sending mirrors Magit's commit gesture. `c` opens a tran
 
 - `c c` compose and send. Pops a dedicated `SPRIG_MSG` buffer: your prose on top, a commented preamble below showing exactly what context is attached and what the agent last said, the way `COMMIT_EDITMSG` shows the diff. `C-c C-c` fires, `C-c C-k` aborts. You never guess what you sent.
 - `c p` send in plan mode (the agent must return a plan, not act).
+- `c s` steer the turn already in flight. The CLI's stdin stays open across a turn, so the message is queued and handed to the agent at its next tool-call boundary: it changes course inside the same turn, with no interrupt and no restart. This is what makes watching a turn worthwhile rather than merely tense; the choice on a turn going wrong stops being "let it finish" or "kill it".
 - `c r` retry or re-send.
 - `c i` interrupt the streaming turn.
 
