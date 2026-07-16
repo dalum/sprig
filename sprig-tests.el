@@ -297,12 +297,30 @@ claude"
       (should (equal (sprig--projects-directory)
                      "~/.config/sprig/claude/projects")))))
 
-(ert-deftest sprig-test-ssh-tty-args ()
-  ;; The interactive login forces a TTY: `-t' replaces `-T', `-A' stays.
-  (let ((sprig-ssh-args '("-T" "-A")))
-    (should (equal (sprig--ssh-tty-args) '("-t" "-A"))))
-  (let ((sprig-ssh-args '("-A")))
-    (should (equal (sprig--ssh-tty-args) '("-t" "-A")))))
+(ert-deftest sprig-test-login-command ()
+  ;; Local: a plain `claude auth login --claudeai' vector.
+  (let ((sprig-remote nil) (sprig-program "claude") (sprig-config-directory nil))
+    (should (equal (sprig--login-command)
+                   '("claude" "auth" "login" "--claudeai"))))
+  ;; Remote with a config dir: an SSH payload carrying the `env' prefix,
+  ;; the tilde kept live for the login shell to expand.
+  (let ((sprig-remote "me@host") (sprig-program "claude")
+        (sprig-ssh-program "ssh") (sprig-ssh-args '("-T" "-A"))
+        (sprig-config-directory "~/.config/sprig/claude"))
+    (let ((payload (car (last (sprig--login-command)))))
+      (should (equal payload
+                     "env CLAUDE_CONFIG_DIR=~/.config/sprig/claude \
+claude auth login --claudeai")))))
+
+(ert-deftest sprig-test-login-url ()
+  ;; The authorize URL is picked out of the CLI's output and stops at
+  ;; whitespace, so the trailing prompt text is not swept in.
+  (let ((out "Opening browser to sign in…\n\
+If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
+?code=true&state=abc\nPaste code here if prompted > "))
+    (should (equal (sprig--login-url out)
+                   "https://claude.com/cai/oauth/authorize?code=true&state=abc")))
+  (should-not (sprig--login-url "no url here")))
 
 (ert-deftest sprig-test-remote-dir-arg ()
   (should (equal (sprig--remote-dir-arg "~") "~"))
