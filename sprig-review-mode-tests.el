@@ -309,6 +309,29 @@ timestamp, or the state line's rule."
     (should (equal (sprig-review-tests--state-line)
                    '("✗  turn failed" . sprig-review-failed)))))
 
+(ert-deftest sprig-review-mode-test-state-line-awaiting-after-send ()
+  ;; After a turn lands and a new message is sent, the transport is busy while
+  ;; it waits on the agent's first token; the line must say so, not fall back
+  ;; to the previous turn's stale `✓ turn over'.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "done that"))
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))
+    ;; Send: the transport sets busy before the user event is consumed, and
+    ;; nothing has streamed back yet.
+    (setq-local sprig--busy t)
+    (sprig-review-consume '(user "and now this"))
+    (sprig-review-flush)
+    (should-not sprig-review--streaming)
+    (should (equal (sprig-review-tests--state-line)
+                   '("▷  sent, awaiting reply" . sprig-review-pending)))
+    ;; The agent's first token flips it to working.
+    (sprig-review-consume '(text "starting"))
+    (sprig-review-flush)
+    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
+
 (ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
   ;; A conversation read from disk carries no `done', but nothing is running
   ;; in it either; it must not claim to be working, nor to have just landed.

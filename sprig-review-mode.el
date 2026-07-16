@@ -117,6 +117,13 @@ point still reads as yours instead of losing its tint to the cursor."
   "Face for the state line while a turn is in flight."
   :group 'sprig)
 
+(defface sprig-review-pending
+  '((t :inherit warning :weight bold :extend t))
+  "Face for the state line after a message is sent, before the agent replies.
+Softer than `sprig-review-working' (no inverse video): the turn is on its
+way but nothing has come back yet."
+  :group 'sprig)
+
 (defface sprig-review-done
   '((t :inherit success :inverse-video t :weight bold :extend t))
   "Face for the state line once a turn has landed."
@@ -719,6 +726,11 @@ read, and a dialog is a question put to you, which wants the same air."
    ((sprig-review-pending-dialog model)
     (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
    (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
+   ;; Sent, but nothing back yet: the transport is busy while it waits on the
+   ;; agent's first token, so this window would otherwise read as the previous
+   ;; turn's stale `✓ turn over'.
+   ((and (boundp 'sprig--busy) sprig--busy)
+    (list "▷" "sent, awaiting reply" 'sprig-review-pending))
    ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
    ;; What it cost is in the header, and is not what you were waiting to
    ;; hear; the line says the one thing it is for.
