@@ -1072,6 +1072,19 @@ timestamp, or the state line's rule."
       (should (string-match-p "/tmp/x\\.el" sent))
       (should (string-match-p "\\+new" sent)))))
 
+(ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
+  ;; Two fresh sessions in one directory must not share a buffer: reusing it
+  ;; would stomp the first session and stream its output into the second.
+  (let ((sprig-remote nil) buffers)
+    (unwind-protect
+        (progn
+          (push (sprig-review-session "/tmp/sprig-newsess-probe/") buffers)
+          (push (sprig-review-session "/tmp/sprig-newsess-probe/") buffers)
+          (should (= 2 (length buffers)))
+          (should (not (eq (nth 0 buffers) (nth 1 buffers))))
+          (should (= 2 (length (seq-uniq (mapcar #'buffer-name buffers))))))
+      (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))
+
 (ert-deftest sprig-review-mode-test-run-verb ()
   (let ((model (sprig-review-build
                 `((tool-call "b1" "Bash"

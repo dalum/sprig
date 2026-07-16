@@ -912,11 +912,18 @@ surface."
    (let ((local current-prefix-arg))
      (list (sprig--read-review-dir local) nil local)))
   (require 'sprig-review-mode)
-  (let* ((name (format "*sprig-review: %s*"
-                       (or session-id
-                           (and dir (file-name-nondirectory
-                                     (directory-file-name dir)))
-                           "new")))
+  (let* ((label (format "*sprig-review: %s*"
+                        (or session-id
+                            (and dir (file-name-nondirectory
+                                      (directory-file-name dir)))
+                            "new")))
+         ;; A resumed session is named by its id, and reusing that buffer is
+         ;; right: opening one session twice should land in one buffer.  A
+         ;; fresh session has no id yet, so its label is only the directory;
+         ;; that must be made unique, or a second new session in the same
+         ;; directory would reuse — and stomp — the first one's buffer while
+         ;; its process keeps streaming into it.
+         (name (if session-id label (generate-new-buffer-name label)))
          (buffer (sprig-review-buffer name)))
     (with-current-buffer buffer
       (setq sprig--session-id session-id
