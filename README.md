@@ -133,8 +133,8 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
 | `x` | Run: ask the agent to run the marked tool call's command |
-| `C` | Commit: ask the agent to commit the current changes |
-| `a` | Transient for the agent's questions: `a a` answer, `a r` take the recommended, `a s` skip (`a k` accepts, i.e. clears the marks) |
+| `C` | Commit: ask the agent to commit the current changes, keeping the marks (accept, `c a`, commits and clears them) |
+| `a` | Transient for the agent's questions: `a a` answer, `a r` take the recommended, `a s` skip (`a k` accepts, i.e. commits the changes and clears the marks) |
 | `c` | Transient, listing every verb: `c c` compose & send, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, and `c k` / `c a` / `c C` / `c x` for the four above |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).

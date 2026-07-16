@@ -1071,6 +1071,18 @@ timestamp, or the state line's rule."
         (sprig-review-commit))
       (should (string-match-p "commit" sent)))))
 
+(ert-deftest sprig-review-mode-test-accept-commits-and-clears-marks ()
+  ;; Accept is the whole gesture: it commits in the same turn (no separate
+  ;; commit verb needed) and clears any marks.
+  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--send)
+                 (lambda (text) (setq sent text))))
+        (setq sprig-review--marks (list "x"))
+        (sprig-review-accept))
+      (should (string-match-p "commit" sent))
+      (should (null sprig-review--marks)))))
+
 (ert-deftest sprig-review-mode-test-retry-verb ()
   (let ((model (sprig-review-build '((user "first ask") (text "reply")))))
     (sprig-review-tests--rendered model nil

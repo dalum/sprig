@@ -1220,10 +1220,14 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
       (sprig-review--send (sprig-review-run-instruction cmd)))))
 
 (defun sprig-review-accept ()
-  "Accept the changes under review: clear the marks, send nothing, commit nothing."
+  "Accept the changes under review: commit them and clear the marks.
+Accepting is the whole gesture, so it sends the commit instruction
+(`sprig-review-commit-instruction') and clears any marks in one turn,
+rather than committing through a separate verb afterwards."
   (interactive)
+  (sprig-review--send sprig-review-commit-instruction)
   (sprig-review-unmark-all)
-  (message "sprig: accepted (marks cleared; commit is a separate verb)"))
+  (message "sprig: accepted (committing; marks cleared)"))
 
 (defun sprig-review-set-title (title)
   "Set this review's display TITLE in the header.
@@ -1482,7 +1486,7 @@ wrong thing to make easy."
     ("r" "take every recommended option" sprig-review-answer-recommended)
     ("s" "skip; go on unanswered" sprig-review-answer-skip)]
    ["Marks"
-    ("k" "accept (clear marks)" sprig-review-accept)]])
+    ("k" "accept & commit" sprig-review-accept)]])
 
 ;;;; Answering: the a transient, and its buffer
 ;;
@@ -1643,8 +1647,8 @@ wrong thing to make easy."
     ("i" "interrupt turn" sprig-review-interrupt)]
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)
-    ("a" "accept (clear marks)" sprig-review-accept)
-    ("C" "commit" sprig-review-commit)
+    ("a" "accept & commit" sprig-review-accept)
+    ("C" "commit (keep marks)" sprig-review-commit)
     ("x" "run command" sprig-review-run)]])
 
 ;;;; Verb keybindings
@@ -1654,8 +1658,8 @@ wrong thing to make easy."
 (define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
-;; `a' answers, rather than accepting.  Accept is `sprig-review-unmark-all'
-;; with a message, which `U' already does and `c a' already reaches, so the
+;; `a' answers, rather than accepting.  Accept commits and clears the marks
+;; (`c a' or `a k'), and a plain commit that keeps the marks is `C'; the top
 ;; key was worth more to the question the agent is waiting on.
 (define-key sprig-review-mode-map (kbd "a")   #'sprig-review-answer-dispatch)
 (define-key sprig-review-mode-map (kbd "C")   #'sprig-review-commit)
