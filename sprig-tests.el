@@ -98,6 +98,16 @@
                     (sprig-tests--message-start 5 190000 2000))
                    '((context 192005))))))
 
+(ert-deftest sprig-test-parse-compact-boundary-context ()
+  ;; A compaction reports its post-compact size, so the readout drops at once.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize
+                     (list :type "system" :subtype "compact_boundary"
+                           :compactMetadata (list :preTokens 398861
+                                                  :postTokens 5457))))
+                   '((context 5457))))))
+
 (ert-deftest sprig-test-parse-text-block-start ()
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line (sprig-tests--text-block-start))
@@ -449,6 +459,16 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                                          :output_tokens 50)))))
          (model (sprig-review-build (sprig-review-parse-session-line line))))
     (should (equal (plist-get model :context) (+ 3 199000 1000)))))
+
+(ert-deftest sprig-review-test-compact-boundary-becomes-context ()
+  ;; A replayed compaction boundary reports its post-compact size, so a
+  ;; refreshed log shows the shrunk context without waiting for a new turn.
+  (let* ((line (json-serialize
+                (list :type "system" :subtype "compact_boundary"
+                      :compactMetadata (list :preTokens 398861
+                                             :postTokens 5457))))
+         (model (sprig-review-build (sprig-review-parse-session-line line))))
+    (should (equal (plist-get model :context) 5457))))
 
 (ert-deftest sprig-review-test-build-text-block-splits ()
   (let ((blocks (plist-get

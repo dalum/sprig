@@ -364,6 +364,13 @@ conversation content.  A conversation record is stamped with its own
     (cond
      ((equal type "ai-title")
       (when-let ((tt (alist-get 'aiTitle record))) (list (list 'title tt))))
+     ;; A compaction landed: its boundary carries the post-compact token
+     ;; count, so a replayed or refreshed log shows the shrunk context.
+     ((and (equal type "system")
+           (equal (alist-get 'subtype record) "compact_boundary"))
+      (when-let ((pt (alist-get 'postTokens
+                                (alist-get 'compactMetadata record))))
+        (list (list 'context pt))))
      ;; Only the main thread; sidechains are subagent transcripts.
      ((eq (alist-get 'isSidechain record) t) nil)
      ((equal type "assistant")

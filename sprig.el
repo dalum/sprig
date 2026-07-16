@@ -388,6 +388,12 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; a `set_permission_mode' control request switches to plan.
          ((and (equal .type "system") (equal .subtype "status") .permissionMode)
           (list (list 'mode .permissionMode)))
+         ;; A compaction landed: the boundary carries the post-compact token
+         ;; count, the context now in use.  Report it so the readout drops
+         ;; from the pre-compact size at once, not on the next turn.
+         ((and (equal .type "system") (equal .subtype "compact_boundary")
+               .compactMetadata.postTokens)
+          (list (list 'context .compactMetadata.postTokens)))
          ;; Streaming assistant content (text and tool-use blocks).
          ((equal .type "stream_event")
           (cond
