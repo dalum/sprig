@@ -280,6 +280,7 @@ A local session's working directory is set by `sprig--spawn' binding
 ;;   (tool-call ID NAME INPUT) a completed tool-use call (INPUT is JSON)
 ;;   (tool-result ID ERR TEXT) a tool result (ERR non-nil means error)
 ;;   (done COST ERR)           the turn finished
+;;   (context TOKENS)          the turn's prompt size, i.e. context in use
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (error MESSAGE)           a backend error to surface inline
@@ -345,6 +346,14 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; Streaming assistant content (text and tool-use blocks).
          ((equal .type "stream_event")
           (cond
+           ;; The turn opens: its message carries the prompt's token usage,
+           ;; which is the context-window size in use for this turn.
+           ((equal .event.type "message_start")
+            (when .event.message.usage
+              (list (list 'context
+                          (+ (or .event.message.usage.input_tokens 0)
+                             (or .event.message.usage.cache_read_input_tokens 0)
+                             (or .event.message.usage.cache_creation_input_tokens 0))))))
            ;; A new text block after earlier text (e.g. prose resuming after
            ;; a tool use): the sink separates them with a paragraph break.
            ((and (equal .event.type "content_block_start")

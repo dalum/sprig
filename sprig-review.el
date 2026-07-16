@@ -122,8 +122,8 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;;; Review model
 ;;
 ;; `sprig-review-build' folds a list of transport events into a turn
-;; model, a plist (:session ID :cost N :error BOOL :done BOOL :blocks
-;; BLOCKS).  Every block carries the `:time' of the most recent `time'
+;; model, a plist (:session ID :cost N :error BOOL :done BOOL :context N
+;; :blocks BLOCKS).  Every block carries the `:time' of the most recent `time'
 ;; event before it, and is one of:
 ;;
 ;;   (:type user     :text STR :time ISO)
@@ -187,6 +187,7 @@ hears back."
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes."
   (let ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
+        (context nil)       ; the freshest turn's context-window token count
         (time nil)          ; the stamp the next block opened takes
         (blocks '())        ; built in reverse
         (open nil))         ; the open text/thinking block being coalesced
@@ -239,11 +240,12 @@ See the section commentary for the event vocabulary and block shapes."
            (plist-put blk :answered t)
            (plist-put blk :answers answers)))
         (`(done ,c ,e) (setq done t cost c error e))
+        (`(context ,n) (setq context n))
         (`(error ,m)
          (setq open nil)
          (push (list :type 'error :text m :time time) blocks))))
     (list :session session :title title :mode mode
-          :cost cost :error error :done done
+          :cost cost :error error :done done :context context
           :blocks (nreverse blocks))))
 
 (defun sprig-review-events-title (events)
@@ -304,6 +306,17 @@ over SSH.  CWD is encoded the way the CLI names its project directory."
                (_ nil)))
            content))))
 
+(defun sprig-review--usage-context-event (usage)
+  "Return a one-element ((context N)) list for a message's USAGE, or nil.
+N is the whole prompt the model was given for the turn: new input plus
+cache-read plus cache-creation tokens, which is the context-window size in
+use.  Output tokens are the reply, not context, so they are left out."
+  (when (listp usage)
+    (let ((n (+ (or (alist-get 'input_tokens usage) 0)
+                (or (alist-get 'cache_read_input_tokens usage) 0)
+                (or (alist-get 'cache_creation_input_tokens usage) 0))))
+      (when (> n 0) (list (list 'context n))))))
+
 (defun sprig-review--user-block-event (b)
   "Map one block B of a user message to an event, or nil.
 A `tool_result' block carries a tool call's output back; a `text' block is
@@ -356,8 +369,11 @@ conversation content.  A conversation record is stamped with its own
      ((equal type "assistant")
       (sprig-review--stamp-events
        record
-       (sprig-review--assistant-events
-        (alist-get 'content (alist-get 'message record)))))
+       (append
+        (sprig-review--assistant-events
+         (alist-get 'content (alist-get 'message record)))
+        (sprig-review--usage-context-event
+         (alist-get 'usage (alist-get 'message record))))))
      ((equal type "user")
       (let ((mode (alist-get 'permissionMode record))
             (events (sprig-review--user-events

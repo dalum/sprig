@@ -1072,6 +1072,23 @@ timestamp, or the state line's rule."
       (should (string-match-p "/tmp/x\\.el" sent))
       (should (string-match-p "\\+new" sent)))))
 
+(ert-deftest sprig-review-mode-test-format-context ()
+  (let ((sprig-context-window-tokens 200000))
+    (should (equal (sprig-review--format-context 100000) "100.0k / 200k  (50%)"))
+    (should-not (sprig-review--format-context 0))
+    (should-not (sprig-review--format-context nil)))
+  ;; With no window set, the raw count still shows, no percentage.
+  (let ((sprig-context-window-tokens 0))
+    (should (equal (sprig-review--format-context 50000) "50.0k"))))
+
+(ert-deftest sprig-review-mode-test-header-shows-context ()
+  (let ((sprig-context-window-tokens 200000)
+        (model (sprig-review-build
+                '((context 100000) (text "hi") (done 0.01 nil)))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (should (re-search-forward "Context:.*100\\.0k / 200k.*50%" nil t)))))
+
 (ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it
   ;; would stomp the first session and stream its output into the second.

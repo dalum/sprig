@@ -70,6 +70,15 @@
                         :total_cost_usd (or cost 0.0)
                         :is_error (if error t :false))))
 
+(defun sprig-tests--message-start (input cache-read cache-create)
+  (json-serialize
+   (list :type "stream_event"
+         :event (list :type "message_start"
+                      :message (list :usage
+                                     (list :input_tokens input
+                                           :cache_read_input_tokens cache-read
+                                           :cache_creation_input_tokens cache-create))))))
+
 ;;;; Transport: claude stream-json -> events
 
 (ert-deftest sprig-test-parse-session ()
@@ -81,6 +90,13 @@
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line (sprig-tests--text "hi"))
                    '((text "hi"))))))
+
+(ert-deftest sprig-test-parse-message-start-context ()
+  ;; A turn opens with its prompt's token usage; the sum is the context in use.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (sprig-tests--message-start 5 190000 2000))
+                   '((context 192005))))))
 
 (ert-deftest sprig-test-parse-text-block-start ()
   (with-temp-buffer
@@ -300,6 +316,27 @@
     ;; The two text events coalesce into one block.
     (should (= (length blocks) 1))
     (should (equal (plist-get (car blocks) :text) "Hello, world"))))
+
+(ert-deftest sprig-review-test-build-context-latest-wins ()
+  ;; The model tracks the freshest turn's context size, so the header shows
+  ;; what the window holds now, not what it held at the first turn.
+  (let ((model (sprig-review-build
+                '((context 1000) (text "a") (context 5000) (done 0.01 nil)))))
+    (should (equal (plist-get model :context) 5000))))
+
+(ert-deftest sprig-review-test-record-usage-becomes-context ()
+  ;; A replayed assistant record carries its token usage; the whole prompt
+  ;; (input + cache read + cache creation) is the context in use.
+  (let* ((line (json-serialize
+                (list :type "assistant"
+                      :message
+                      (list :content (vector (list :type "text" :text "hi"))
+                            :usage (list :input_tokens 3
+                                         :cache_read_input_tokens 199000
+                                         :cache_creation_input_tokens 1000
+                                         :output_tokens 50)))))
+         (model (sprig-review-build (sprig-review-parse-session-line line))))
+    (should (equal (plist-get model :context) (+ 3 199000 1000)))))
 
 (ert-deftest sprig-review-test-build-text-block-splits ()
   (let ((blocks (plist-get

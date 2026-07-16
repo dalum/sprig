@@ -230,6 +230,15 @@ Markup characters (`*', `#', ...) are hidden.  Has no effect when
   :type 'boolean
   :group 'sprig)
 
+(defcustom sprig-context-window-tokens 200000
+  "Size of the model's context window, in tokens, for the header's Context %.
+The standard Claude window is 200000; raise it for a long-context (1M)
+session, or the reported percentage will run past 100.  The context size
+itself is read from each turn's own token usage, so only the window it is
+measured against is configured here."
+  :type 'integer
+  :group 'sprig)
+
 ;;;; Face helpers
 ;;
 ;; Everything rendered here carries its colours as `font-lock-face', not
@@ -675,6 +684,18 @@ opening a child, and a wrapper here earns nothing to pay for it."
                                 'sprig-review-meta-key)
             "\n")))
 
+(defun sprig-review--format-context (tokens)
+  "Return a header string for TOKENS of context in use, or nil.
+Shows the count in thousands and, when `sprig-context-window-tokens' is
+set, its share of that window as a percentage."
+  (when (and (numberp tokens) (> tokens 0))
+    (let ((win sprig-context-window-tokens))
+      (if (and (numberp win) (> win 0))
+          (format "%.1fk / %dk  (%d%%)"
+                  (/ tokens 1000.0) (round (/ win 1000.0))
+                  (round (* 100.0 (/ (float tokens) win))))
+        (format "%.1fk" (/ tokens 1000.0))))))
+
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
   (when (and value (not (string-empty-p (format "%s" value))))
@@ -698,7 +719,10 @@ META may carry :title, :project, :model, and :status."
                    (sprig-review--meta-line "Session" (plist-get model :session))
                    (sprig-review--meta-line
                     "Cost" (when (plist-get model :cost)
-                             (format "$%.4f" (plist-get model :cost))))))
+                             (format "$%.4f" (plist-get model :cost))))
+                   (sprig-review--meta-line
+                    "Context" (sprig-review--format-context
+                               (plist-get model :context)))))
       (when line (insert line)))
     (insert "\n")))
 
