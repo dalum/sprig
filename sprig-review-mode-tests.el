@@ -1072,29 +1072,37 @@ timestamp, or the state line's rule."
       (should (string-match-p "/tmp/x\\.el" sent))
       (should (string-match-p "\\+new" sent)))))
 
-(ert-deftest sprig-review-mode-test-format-context ()
-  (let ((sprig-context-window-tokens 200000)
-        (sprig-context-window-tiers '(200000 1000000)))
-    (should (equal (sprig-review--format-context 100000) "100.0k / 200.0k (50%)"))
-    ;; Over the baseline auto-widens to the next tier, never past 100%.
-    (should (equal (sprig-review--format-context 250000) "250.0k / 1.0M (25%)"))
-    (should-not (sprig-review--format-context 0))
-    (should-not (sprig-review--format-context nil)))
-  ;; With no window and no tiers configured, the raw count shows, no percentage.
-  (let ((sprig-context-window-tokens 0) (sprig-context-window-tiers nil))
-    (should (equal (sprig-review--format-context 50000) "50.0k"))))
+(ert-deftest sprig-review-mode-test-context-indicator ()
+  (let ((sprig-context-large-tokens 150000)
+        (sprig-context-huge-tokens 200000))
+    ;; Below the first threshold: bare count, no escalation face.
+    (should (equal (sprig-review--context-indicator 90000) '("90.0k ctx" . nil)))
+    ;; Large and very large: a word and an escalating face.
+    (should (equal (sprig-review--context-indicator 160000)
+                   '("160.0k ctx (large)" . sprig-review-context-large)))
+    (should (equal (sprig-review--context-indicator 250000)
+                   '("250.0k ctx (very large)" . sprig-review-context-huge)))
+    (should-not (sprig-review--context-indicator 0))
+    (should-not (sprig-review--context-indicator nil))))
 
-(ert-deftest sprig-review-mode-test-state-line-shows-context ()
+(ert-deftest sprig-review-mode-test-state-line-flags-large-context ()
   ;; The context in use rides on the state line, where the reader is watching
-  ;; the turn, not up in the header.
-  (let ((sprig-context-window-tokens 200000)
-        (sprig-context-window-tiers '(200000 1000000))
+  ;; the turn, and its face escalates once it grows large.
+  (let ((sprig-context-large-tokens 150000)
+        (sprig-context-huge-tokens 200000)
         (model (sprig-review-build
-                '((context 100000) (text "hi") (done 0.01 nil)))))
+                '((context 160000) (text "hi") (done 0.01 nil)))))
     (sprig-review-tests--rendered model nil
-      (let ((line (car (sprig-review-tests--state-line))))
+      (goto-char (point-max)) (forward-line -1)
+      (let ((line (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position))))
         (should (string-match-p "turn over" line))
-        (should (string-match-p "100\\.0k / 200\\.0k (50%)" line))))))
+        (should (string-match-p "160\\.0k ctx (large)" line)))
+      ;; The large segment carries its own escalation face, not the state face.
+      (goto-char (point-min))
+      (should (re-search-forward "large" nil t))
+      (should (eq (get-text-property (1- (point)) 'font-lock-face)
+                  'sprig-review-context-large)))))
 
 (ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it
