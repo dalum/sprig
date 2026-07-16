@@ -126,15 +126,17 @@ point still reads as yours instead of losing its tint to the cursor."
   :group 'sprig)
 
 (defface sprig-review-working
-  '((t :inherit warning :inverse-video t :weight bold :extend t))
-  "Face for the state line while a turn is in flight."
+  '((t :inherit warning :weight bold))
+  "Face for the state line while a turn is in flight.
+Coloured text, not an inverse-video block, so it sits evenly beside the
+context readout at the end of the line."
   :group 'sprig)
 
 (defface sprig-review-pending
-  '((t :inherit warning :weight bold :extend t))
+  '((t :inherit warning))
   "Face for the state line after a message is sent, before the agent replies.
-Softer than `sprig-review-working' (no inverse video): the turn is on its
-way but nothing has come back yet."
+Softer than `sprig-review-working' (not bold): the turn is on its way but
+nothing has come back yet."
   :group 'sprig)
 
 (defface sprig-review-context-large
@@ -150,12 +152,12 @@ Applied to the token readout once it crosses `sprig-context-huge-tokens'."
   :group 'sprig)
 
 (defface sprig-review-done
-  '((t :inherit success :inverse-video t :weight bold :extend t))
+  '((t :inherit success :weight bold))
   "Face for the state line once a turn has landed."
   :group 'sprig)
 
 (defface sprig-review-failed
-  '((t :inherit error :inverse-video t :weight bold :extend t))
+  '((t :inherit error :weight bold))
   "Face for the state line when a turn ended badly."
   :group 'sprig)
 
@@ -164,7 +166,7 @@ Applied to the token readout once it crosses `sprig-context-huge-tokens'."
   :group 'sprig)
 
 (defface sprig-review-waiting
-  '((t :inherit warning :inverse-video t :weight bold :extend t))
+  '((t :inherit warning :weight bold))
   "Face for the state line while a question waits on you."
   :group 'sprig)
 
