@@ -1174,6 +1174,46 @@ CHANGES is a list of (FILE . HUNK-PLIST)."
   "Return an instruction asking the agent to run COMMAND."
   (format "Please run:\n```\n%s\n```" command))
 
+(defconst sprig-review--non-shell-langs
+  '("diff" "elisp" "emacs-lisp" "lisp" "json" "python" "py" "js" "jsx"
+    "javascript" "ts" "tsx" "typescript" "c" "cpp" "c++" "rust" "rs" "go"
+    "java" "ruby" "rb" "php" "html" "css" "scss" "xml" "yaml" "yml" "toml"
+    "ini" "sql" "markdown" "md" "text" "org")
+  "Fence info-string languages the run verb treats as non-commands.
+A fenced block tagged with one of these is code or data, not a shell
+command, so `sprig-review-run' skips it; an untagged block or a shell tag
+\(sh, bash, ...) is runnable.")
+
+(defun sprig-review--fenced-blocks (text)
+  "Return the triple-backtick fenced code blocks in TEXT.
+Each element is a plist (:lang LANG :body BODY :beg BEG :end END): LANG is
+the first word of the opening fence's info string (nil when absent), BODY
+the block's contents, and BEG/END the character offsets in TEXT spanning
+the whole block, fences included.  Only fences that open at column zero are
+recognised."
+  (let ((blocks '())
+        (pos 0))
+    (while (string-match
+            "^\\(```+\\)[ \t]*\\([^\n]*\\)\n\\(\\(?:.\\|\n\\)*?\\)\n\\1[ \t]*$"
+            text pos)
+      (let ((info (string-trim (match-string 2 text))))
+        (push (list :lang (and (not (string-empty-p info))
+                               (downcase (car (split-string info))))
+                    :body (match-string 3 text)
+                    :beg (match-beginning 0)
+                    :end (match-end 0))
+              blocks))
+      (setq pos (match-end 0)))
+    (nreverse blocks)))
+
+(defun sprig-review--runnable-blocks (text)
+  "Return the fenced blocks in TEXT that read as shell commands.
+Filters `sprig-review--fenced-blocks' down to untagged or shell-tagged
+fences, dropping code/data blocks named by `sprig-review--non-shell-langs'."
+  (seq-remove (lambda (b)
+                (member (plist-get b :lang) sprig-review--non-shell-langs))
+              (sprig-review--fenced-blocks text)))
+
 ;;;; Steering: send through the owned session
 
 (defun sprig-review-set-remote (remote)
@@ -1226,17 +1266,52 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
   (interactive)
   (sprig-review--send sprig-review-commit-instruction))
 
+(defun sprig-review--tool-command (section)
+  "Return the shell command a `sprig-tool' SECTION ran, or nil."
+  (alist-get 'command
+             (sprig-review--parse-input
+              (plist-get (oref section value) :input))))
+
+(defun sprig-review--prose-command (section)
+  "Return the fenced shell command to run from prose SECTION.
+SECTION is a `sprig-text'/`sprig-user' block; the command is the runnable
+fenced block point is in, or the sole runnable block when point sits
+outside one.  This reaches a command the agent proposed but did not run.
+Signals a `user-error' when there is no runnable block, or several and
+point is in none."
+  (let* ((text (plist-get (oref section value) :text))
+         (blocks (sprig-review--runnable-blocks text)))
+    (unless blocks
+      (user-error "No runnable command block in this prose"))
+    (let* ((base (or (oref section content) (oref section start)))
+           (off (- (point) base))
+           (here (seq-find (lambda (b) (and (>= off (plist-get b :beg))
+                                            (<= off (plist-get b :end))))
+                           blocks)))
+      (cond (here (plist-get here :body))
+            ((null (cdr blocks)) (plist-get (car blocks) :body))
+            (t (user-error
+                "Point is in no command block (%d in this prose); move onto one"
+                (length blocks)))))))
+
 (defun sprig-review-run ()
-  "Ask the agent to run the command of the tool call marked or at point."
+  "Ask the agent to run a command.
+On a tool-call section, the command that tool ran; on a prose section, the
+shell command in the fenced code block point is in (or its sole one), which
+lets you run a command the agent proposed but did not execute.  Acts on the
+marked section, or the one at point when nothing is marked."
   (interactive)
   (let* ((sections (sprig-review--marked-sections))
-         (tool (seq-find (lambda (s) (eq (oref s type) 'sprig-tool)) sections)))
-    (unless tool (user-error "No tool call marked or at point"))
-    (let ((cmd (alist-get 'command
-                          (sprig-review--parse-input
-                           (plist-get (oref tool value) :input)))))
-      (unless cmd (user-error "That tool call has no command to run"))
-      (sprig-review--send (sprig-review-run-instruction cmd)))))
+         (tool (seq-find (lambda (s) (eq (oref s type) 'sprig-tool)) sections))
+         (prose (seq-find (lambda (s) (memq (oref s type)
+                                            '(sprig-text sprig-user)))
+                          sections))
+         (cmd (cond (tool (or (sprig-review--tool-command tool)
+                              (user-error "That tool call has no command to run")))
+                    (prose (sprig-review--prose-command prose))
+                    (t (user-error
+                        "No tool call or command block marked or at point")))))
+    (sprig-review--send (sprig-review-run-instruction cmd))))
 
 (defun sprig-review-accept ()
   "Yes: affirm the agent's last question, the affirmative of what it asked.
@@ -1675,7 +1750,7 @@ wrong thing to make easy."
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)
     ("C" "commit" sprig-review-commit)
-    ("x" "run command" sprig-review-run)]])
+    ("x" "run command / fenced block" sprig-review-run)]])
 
 ;;;; Verb keybindings
 

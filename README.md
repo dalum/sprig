@@ -132,7 +132,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
-| `x` | Run: ask the agent to run the marked tool call's command |
+| `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute) |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
 | `c` | Transient, listing every verb: `c c` compose & send, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, and `c k` / `c C` / `c x` for reject / commit / run |

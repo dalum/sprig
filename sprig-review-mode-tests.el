@@ -1063,6 +1063,45 @@ timestamp, or the state line's rule."
           (sprig-review-run))
         (should (string-match-p "make test" sent))))))
 
+(ert-deftest sprig-review-mode-test-fenced-blocks-parse ()
+  ;; The parser pulls each triple-backtick block with its language tag, and
+  ;; the runnable filter keeps untagged/shell fences, dropping code and data.
+  (let ((bs (sprig-review--fenced-blocks
+             "intro\n```sh\nmake test\n```\nmid\n```diff\n- a\n+ b\n```\nend")))
+    (should (equal (mapcar (lambda (b) (plist-get b :lang)) bs) '("sh" "diff")))
+    (should (equal (plist-get (car bs) :body) "make test"))
+    (should (equal (plist-get (cadr bs) :body) "- a\n+ b")))
+  (should (equal (mapcar (lambda (b) (plist-get b :lang))
+                         (sprig-review--runnable-blocks
+                          "```sh\na\n```\n```diff\n-x\n```\n```\nb\n```"))
+                 '("sh" nil))))
+
+(ert-deftest sprig-review-mode-test-run-verb-prose-fence ()
+  ;; `x' on a prose block runs the fenced command point is in, reaching a
+  ;; command the agent proposed but did not execute.
+  (let ((model (sprig-review-build
+                '((text "First:\n\n```sh\nmake test\n```\n\nOr:\n\n```bash\n./deploy.sh\n```\n\nWhich?")))))
+    (sprig-review-tests--rendered model nil
+      (let (sent)
+        (cl-letf (((symbol-function 'sprig-review--send)
+                   (lambda (text) (setq sent text))))
+          (goto-char (point-min)) (search-forward "make test")
+          (sprig-review-run)
+          (should (string-match-p "make test" sent))
+          (goto-char (point-min)) (search-forward "deploy.sh")
+          (sprig-review-run)
+          (should (string-match-p "deploy\\.sh" sent))
+          ;; Point in prose between two blocks is ambiguous; it refuses.
+          (goto-char (point-min)) (search-forward "Which?")
+          (should-error (sprig-review-run) :type 'user-error))))))
+
+(ert-deftest sprig-review-mode-test-run-verb-skips-non-shell-fence ()
+  ;; A diff (or other code/data) block is not a command, so `x' refuses it.
+  (let ((model (sprig-review-build '((text "Change:\n\n```diff\n- old\n+ new\n```")))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min)) (search-forward "old")
+      (should-error (sprig-review-run) :type 'user-error))))
+
 (ert-deftest sprig-review-mode-test-commit-verb ()
   (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
     (let (sent)
