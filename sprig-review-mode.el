@@ -1400,6 +1400,21 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
   (interactive)
   (sprig-review--send sprig-review-commit-instruction))
 
+(defun sprig-review-compact (&optional instructions)
+  "Compact this session's context, replacing its history with a summary.
+Sends the CLI's `/compact' command as a turn: the session id is unchanged
+and the conversation continues from the summary, so a context grown large
+\(see the state line) is reclaimed without starting over.  With a prefix
+argument, prompt for INSTRUCTIONS steering what the summary keeps."
+  (interactive
+   (list (and current-prefix-arg
+              (read-string "Compact instructions (blank = default): "))))
+  (let ((inst (and instructions (string-trim instructions))))
+    (sprig-review--send
+     (if (and inst (not (string-empty-p inst)))
+         (concat "/compact " inst)
+       "/compact"))))
+
 (defun sprig-review--tool-command (section)
   "Return the shell command a `sprig-tool' SECTION ran, or nil."
   (alist-get 'command
@@ -1883,7 +1898,8 @@ wrong thing to make easy."
     ("p" "compose in plan mode" sprig-review-message-plan)
     ("s" "steer the running turn" sprig-review-steer)
     ("r" "resend last turn" sprig-review-retry)
-    ("i" "interrupt turn" sprig-review-interrupt)]
+    ("i" "interrupt turn" sprig-review-interrupt)
+    ("z" "compact context" sprig-review-compact)]
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)
     ("C" "commit" sprig-review-commit)

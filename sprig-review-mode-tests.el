@@ -1227,6 +1227,20 @@ timestamp, or the state line's rule."
         (sprig-review-commit))
       (should (string-match-p "commit" sent)))))
 
+(ert-deftest sprig-review-mode-test-compact-verb ()
+  ;; Compact sends the CLI's own /compact command as a turn; a prefix arg's
+  ;; instructions ride along to steer the summary.
+  (let (sent)
+    (cl-letf (((symbol-function 'sprig-review--send)
+               (lambda (text &optional _mode) (setq sent text))))
+      (sprig-review-compact)
+      (should (equal sent "/compact"))
+      (sprig-review-compact "keep the design decisions")
+      (should (equal sent "/compact keep the design decisions"))
+      ;; A blank instruction falls back to the bare command.
+      (sprig-review-compact "   ")
+      (should (equal sent "/compact")))))
+
 (ert-deftest sprig-review-mode-test-yes-and-no-verbs ()
   ;; Yes/no affirm and decline the agent's last prose question: each sends its
   ;; configured instruction, and neither commits (that stays the `C' verb).

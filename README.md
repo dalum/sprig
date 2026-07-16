@@ -136,7 +136,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute) |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
-| `c` | Transient, listing every verb: `c c` compose & send, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, and `c k` / `c C` / `c x` for reject / commit / run |
+| `c` | Transient, listing every verb: `c c` compose & send, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, `c z` compact the context (`C-u c z` steers the summary), and `c k` / `c C` / `c x` for reject / commit / run |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
