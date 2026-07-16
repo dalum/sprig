@@ -1197,6 +1197,41 @@ Return the log directory."
     (should (sprig--entry-matches-filter e "NAVIGATOR"))
     (should-not (sprig--entry-matches-filter e "unrelated"))))
 
+(ert-deftest sprig-test-session-status-waiting-wins-over-streaming ()
+  ;; A live session stopped on an unanswered dialog is `waiting', not
+  ;; `streaming', even though its turn is still in flight (busy).
+  (with-temp-buffer
+    (setq-local sprig--sink #'sprig--review-sink
+                sprig--process 'dummy
+                sprig--busy t
+                sprig-review--events '((dialog "d1" "ask_user_question" nil)))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+      (should (eq (sprig--session-status (current-buffer)) 'waiting)))))
+
+(ert-deftest sprig-test-session-status-answered-dialog-not-waiting ()
+  ;; Once the dialog is answered, the session is back to plain `streaming'.
+  (with-temp-buffer
+    (setq-local sprig--sink #'sprig--review-sink
+                sprig--process 'dummy
+                sprig--busy t
+                sprig-review--events '((dialog-answer "d1" "yes")
+                                       (dialog "d1" "ask_user_question" nil)))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+      (should (eq (sprig--session-status (current-buffer)) 'streaming)))))
+
+(ert-deftest sprig-test-session-status-dead-process-not-waiting ()
+  ;; A dead session never shows `waiting', even if its last replayed dialog
+  ;; was never answered: nothing is blocked on you, the session is gone.
+  (with-temp-buffer
+    (setq-local sprig--sink #'sprig--review-sink
+                sprig--process nil
+                sprig--busy nil
+                sprig-review--events '((dialog "d1" "ask_user_question" nil)))
+    (should (eq (sprig--session-status (current-buffer)) 'disconnected))))
+
+(ert-deftest sprig-test-status-glyph-has-waiting ()
+  (should (equal (alist-get 'waiting sprig--status-glyphs) "?")))
+
 (ert-deftest sprig-test-status-collect-owning-buffer-wins ()
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect

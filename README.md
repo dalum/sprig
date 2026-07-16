@@ -95,7 +95,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 ### Navigator
 
-`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session on the host, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), and a short session id. It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply. `/` narrows the list to sessions whose project or title match a substring, and `L` lifts the cap to show every session.
+`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session on the host, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), and a short session id. It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply. `/` narrows the list to sessions whose project or title match a substring, and `L` lifts the cap to show every session.
 
 | Key | Does |
 |---|---|

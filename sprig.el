@@ -1196,6 +1196,7 @@ amount, and either read is bounded however large the session grows.")
 
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
+    (waiting      . "?")
     (idle         . "●")
     (interrupted  . "◼")
     (disconnected . "○"))
@@ -1245,11 +1246,28 @@ It lifts the `sprig-status-max-sessions' cap for its buffer.")
           (eq (buffer-local-value 'sprig--sink b) #'sprig--review-sink)))
    (buffer-list)))
 
+(declare-function sprig-review-build "sprig-review" (events))
+(declare-function sprig-review-pending-dialog "sprig-review" (model))
+
+(defun sprig--buffer-awaiting-answer-p (buf)
+  "Non-nil when owning review BUF has a dialog still waiting on the user.
+A pending `AskUserQuestion', plan approval, or permission prompt each
+count: the CLI is stopped until it hears back, which is what the `waiting'
+status flags in the navigator."
+  (sprig-review-pending-dialog
+   (sprig-review-build
+    (reverse (buffer-local-value 'sprig-review--events buf)))))
+
 (defun sprig--session-status (buf)
   "Return the session status for its owning review BUF (nil = not open).
-One of `streaming', `idle', or `disconnected'."
+One of `waiting', `streaming', `idle', or `disconnected'.  `waiting' wins
+over `streaming': a session stopped on a question of yours is not working,
+it is on you, so the navigator says so rather than showing it as busy."
   (cond
    ((not (buffer-live-p buf)) 'disconnected)
+   ((and (process-live-p (buffer-local-value 'sprig--process buf))
+         (sprig--buffer-awaiting-answer-p buf))
+    'waiting)
    ((buffer-local-value 'sprig--busy buf) 'streaming)
    ((process-live-p (buffer-local-value 'sprig--process buf)) 'idle)
    (t 'disconnected)))
@@ -1564,6 +1582,7 @@ Matching is case-insensitive."
   "Return the face used for STATUS."
   (pcase status
     ('streaming 'warning)
+    ('waiting 'sprig-review-waiting)
     ('idle 'success)
     ('interrupted 'font-lock-comment-face)
     (_ 'shadow)))

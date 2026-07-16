@@ -43,6 +43,7 @@
 (declare-function sprig--review-allow-tool "sprig" (id))
 (declare-function sprig--review-deny-tool "sprig" (id))
 (declare-function sprig--review-interrupt-owned "sprig" ())
+(declare-function sprig--status-refresh "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
@@ -1018,6 +1019,9 @@ first `text' of a run, clears the tail and schedules a coalesced render
   (pcase (car event)
     ((or 'text 'thinking 'tool-call) (setq sprig-review--streaming t))
     ((or 'done 'error) (setq sprig-review--streaming nil))
+    ;; A dialog opening or settling flips the session's `waiting' status, so
+    ;; the navigator's `?' glyph appears and clears in step with it.
+    ((or 'dialog 'dialog-answer) (sprig--status-refresh))
     (_ nil))
   (if (and (eq (car event) 'text)
            sprig-review--tail (marker-position sprig-review--tail))
