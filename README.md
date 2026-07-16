@@ -91,6 +91,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `sprig-review-session` | `M-x` | Open a review buffer for a session (start fresh, or resume an id) |
 | `sprig-review-connect` | `M-x` | Start or resume the session owned by the current review buffer |
 | `sprig-review-open-file` | `M-x` | Review a session-log `.jsonl` file directly (offline, read-only) |
+| `sprig-login` | `M-x` | Open a terminal to log the CLI in for `sprig-config-directory` (once per host) |
 
 ### Navigator
 
@@ -162,6 +163,7 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-remote` | `nil` | SSH destination, or nil for local |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
+| `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
 | `sprig-system-prompt` | short hint | Appended system prompt, or nil |
 | `sprig-ssh-program` | `"ssh"` | SSH client program |
@@ -180,7 +182,18 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |
 | `sprig-context-window-tokens` | `200000` | Context-window size the header's `Context` line takes its percentage against; raise it for a long-context (1M) session |
 
-The navigator scans every session log under `~/.claude/projects/` on the session host, newest first, and reads each session's own `cwd` and `ai-title` records for its project and title. For a remote session those logs live on the SSH host and are scanned over the same SSH the transport uses, in two round trips (a mtime-sorted listing, then one batched slurp of the capped set's tails), so a host with hundreds of sessions still lists quickly.
+The navigator scans every session log under `~/.claude/projects/` on the session host (or under `sprig-config-directory`'s `projects/` when that is set), newest first, and reads each session's own `cwd` and `ai-title` records for its project and title. For a remote session those logs live on the SSH host and are scanned over the same SSH the transport uses, in two round trips (a mtime-sorted listing, then one batched slurp of the capped set's tails), so a host with hundreds of sessions still lists quickly.
+
+### A separate config directory
+
+By default sprig shares the CLI's `~/.claude`, so its sessions sit alongside any you start from a plain `claude` shell. Set `sprig-config-directory` to give sprig its own `CLAUDE_CONFIG_DIR`: its session logs, settings, and login then live there instead, and the navigator lists only sessions started under it. An XDG-friendly value:
+
+```elisp
+(require 'xdg)
+(setq sprig-config-directory (expand-file-name "sprig/claude" (xdg-config-home)))
+```
+
+A fresh config dir starts logged out. Because a session runs headless (over the stream-json protocol), it cannot drive the interactive `/login` flow itself, so run `M-x sprig-login` once per host: it opens the interactive CLI in a `term` buffer with the config dir set (over `ssh -t` when `sprig-remote` is set), where you type `/login` and finish the browser auth. Every headless sprig session on that host then reuses the stored credentials. Settings and `CLAUDE.md` under that dir are also separate from your main `~/.claude`.
 
 ## Status / caveats
 

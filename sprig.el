@@ -79,9 +79,38 @@ a `working_dir:' line in its YAML frontmatter.  The value may use `~' and,
 for a remote session, is interpreted on the SSH host."
   :type '(choice (const :tag "Default" nil) (directory :tag "Directory")))
 
+(defcustom sprig-config-directory nil
+  "Directory for the CLI's config, credentials, and session logs, or nil.
+When non-nil, sprig runs the `claude' CLI with the CLAUDE_CONFIG_DIR
+environment variable set to this path, so its sessions, their logs, and
+its login are kept separate from the default ~/.claude.  The navigator
+then lists only the sessions started under it.  nil uses the CLI's own
+default (~/.claude), sharing everything with the plain CLI.
+
+The value is interpreted on the session host (the SSH host for a remote
+session) and may use `~'.  An XDG-friendly choice, needing `(require
+\\='xdg)':
+
+  (setq sprig-config-directory
+        (expand-file-name \"sprig/claude\" (xdg-config-home)))
+
+A fresh config dir starts logged out; set it up once per host with
+\\[sprig-login]."
+  :type '(choice (const :tag "CLI default (~/.claude)" nil)
+                 (directory :tag "Config directory")))
+
 (defcustom sprig-model "claude-opus-4-8"
   "Model id, or nil to let the CLI choose its default."
   :type '(choice (const :tag "CLI default" nil) (string :tag "Model id")))
+
+(defcustom sprig-interrupt-timeout 5
+  "Seconds to wait for a graceful interrupt before killing the turn.
+`c i' interrupts by sending an `interrupt' control request, which lets the
+CLI end the turn cleanly and keep the session live (no resume on the next
+send).  Should the CLI not honour it within this many seconds, sprig falls
+back to killing the process, the old hard interrupt.  A number, or nil to
+wait indefinitely and never fall back."
+  :type '(choice (const :tag "Never fall back" nil) (number :tag "Seconds")))
 
 (defcustom sprig-system-prompt
   "You are chatting inside a Markdown buffer. Answer concisely in Markdown."
@@ -174,6 +203,12 @@ Example, hiding /tmp and everything under it:
   "Session id captured from the CLI, used for --resume.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
+(defvar-local sprig--interrupt-timer nil
+  "Fallback timer armed while a graceful interrupt is outstanding, or nil.
+Set by `sprig--interrupt-turn' after it sends the `interrupt' control
+request; cancelled when the turn's `done' lands (the interrupt worked) or
+when the process is torn down.  If it fires first, the CLI never ended the
+turn, so it falls back to killing the process (`sprig--interrupt-timeout').")
 (defvar-local sprig--blocks nil
   "Alist of in-flight streaming tool-use blocks, keyed by block index.
 Each entry is (INDEX :id ID :name NAME :json ACC), where ACC accumulates
@@ -256,6 +291,10 @@ A local session's working directory is set by `sprig--spawn' binding
         (remote-host (sprig--remote)))
     (if remote-host
         (let ((remote (mapconcat #'shell-quote-argument args " ")))
+          (when sprig-config-directory
+            (setq remote (concat "env CLAUDE_CONFIG_DIR="
+                                 (sprig--remote-dir-arg sprig-config-directory)
+                                 " " remote)))
           (when dir
             (setq remote (concat "cd " (sprig--remote-dir-arg dir)
                                  " && exec " remote)))
@@ -263,6 +302,13 @@ A local session's working directory is set by `sprig--spawn' binding
                   sprig-ssh-args
                   (list remote-host remote)))
       args)))
+
+(defun sprig--ssh-tty-args ()
+  "Like `sprig-ssh-args', but forcing a TTY for an interactive remote run.
+The stream-json transport wants no TTY (`-T'); the interactive login
+\(\\[sprig-login]) needs one, so swap `-T' for `-t' and keep the rest
+\(e.g. `-A')."
+  (cons "-t" (remove "-T" sprig-ssh-args)))
 
 ;;;; Transport and sink
 ;;
@@ -487,6 +533,7 @@ fresh session rather than fail.")
           (with-current-buffer buf
             (setq sprig--process nil
                   sprig--busy nil)
+            (sprig--cancel-interrupt-timer)
             (sprig--status-refresh)
             (cond
              ;; A clean, expected teardown: interrupt, disconnect, or exit 0.
@@ -541,6 +588,15 @@ Markdown transcript and a session-owning review buffer share it."
                   (user-error "sprig: no such directory: %s" expanded))
                 expanded)
             default-directory))
+         ;; A local session's CLAUDE_CONFIG_DIR rides the process env (no
+         ;; shell to expand `~', so expand it here); a remote one is set in
+         ;; the `env' prefix of `sprig--command'.
+         (process-environment
+          (if (and sprig-config-directory (not (sprig--remote)))
+              (cons (concat "CLAUDE_CONFIG_DIR="
+                            (expand-file-name sprig-config-directory))
+                    process-environment)
+            process-environment))
          (stderr (sprig--make-stderr))
          (proc (make-process
                 :name "sprig"
@@ -572,6 +628,7 @@ it reports a clean teardown rather than logging a failure."
   (when (process-live-p sprig--process)
     (process-put sprig--process :deliberate t)
     (delete-process sprig--process))
+  (sprig--cancel-interrupt-timer)
   (setq sprig--process nil sprig--busy nil))
 
 (defun sprig--send-user (text)
@@ -598,6 +655,13 @@ The stream-json input channel accepts these beside user messages; a
   "Ask the session to switch to permission MODE (e.g. \"plan\", \"auto\")."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
+
+(defun sprig--send-interrupt ()
+  "Ask the session to interrupt the turn in flight.
+The CLI aborts the current turn and ends it with a `result', so the turn
+closes through the normal `done' path and the process stays live: unlike
+killing it, the next send needs no `--resume'."
+  (sprig--send-control (list :subtype "interrupt")))
 
 (defun sprig--send-initialize ()
   "Announce sprig's client capabilities to the freshly spawned session.
@@ -786,16 +850,17 @@ of its recorded cwd.  Signals if SSH exits non-zero."
 
 (defun sprig--session-log-lines ()
   "Return the stored session-log lines for this buffer's session.
-Locates the log by session id under ~/.claude/projects on the session
-host (local or over SSH), so the working-directory encoding never has to
-be reproduced.  Signals a `user-error' when there is no id or no log."
+Locates the log by session id under the session host's projects directory
+\(local or over SSH), so the working-directory encoding never has to be
+reproduced.  Signals a `user-error' when there is no id or no log."
   (let ((id (or sprig--session-id
                 (user-error "sprig: no session id yet; connect first"))))
     (if (sprig--remote)
         (let* ((name (shell-quote-argument (concat id ".jsonl")))
                (path (string-trim
                       (sprig--remote-sh
-                       (format "find ~/.claude/projects -name %s -print -quit"
+                       (format "find %s -name %s -print -quit"
+                               (sprig--remote-dir-arg (sprig--projects-directory))
                                name)))))
           (when (string-empty-p path)
             (user-error "sprig: no session log for %s on %s" id (sprig--remote)))
@@ -803,7 +868,7 @@ be reproduced.  Signals a `user-error' when there is no id or no log."
                          (format "cat %s" (shell-quote-argument path)))
                         "\n" t))
       (let ((file (car (directory-files-recursively
-                        (expand-file-name "~/.claude/projects")
+                        (expand-file-name (sprig--projects-directory))
                         (concat "\\`" (regexp-quote id) "\\.jsonl\\'")))))
         (unless file
           (user-error "sprig: no session log for %s" id))
@@ -825,7 +890,9 @@ model via `sprig-review-consume'."
                       (setq sprig--session-id id)))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
-    (`(done ,_ ,_) (setq sprig--busy nil) (sprig--status-refresh)))
+    (`(done ,_ ,_) (setq sprig--busy nil)
+     (sprig--cancel-interrupt-timer)
+     (sprig--status-refresh)))
   ;; A control-request is transport, not conversation: it carries no
   ;; renderable content, so it is answered above and not consumed.
   (unless (eq (car-safe event) 'control-request)
@@ -899,11 +966,46 @@ mode is returned to \"auto\"."
 
 (defun sprig--review-interrupt-owned ()
   "Interrupt the in-flight turn on a review buffer that owns its session."
-  (if sprig--busy
-      (progn (sprig--teardown-process)
-             (sprig--status-refresh)
-             (message "sprig: interrupted (session resumes on next send)"))
-    (message "sprig: nothing to interrupt")))
+  (cond
+   ((not sprig--busy) (message "sprig: nothing to interrupt"))
+   (sprig--interrupt-timer
+    (message "sprig: already interrupting…"))
+   (t (sprig--interrupt-turn))))
+
+(defun sprig--interrupt-turn ()
+  "Gracefully interrupt the in-flight turn, keeping the session live.
+Sends an `interrupt' control request; the CLI aborts the turn and ends it
+with a `result', so `sprig--busy' clears through the normal `done' path
+\(which also cancels the fallback timer) and the process stays up, needing
+no resume on the next send.  If no `done' arrives within
+`sprig-interrupt-timeout' seconds, `sprig--interrupt-timeout' kills the
+process instead, the old hard interrupt."
+  (sprig--send-interrupt)
+  (sprig--cancel-interrupt-timer)
+  (when sprig-interrupt-timeout
+    (setq sprig--interrupt-timer
+          (run-at-time sprig-interrupt-timeout nil
+                       #'sprig--interrupt-timeout (current-buffer))))
+  (sprig--status-refresh)
+  (message "sprig: interrupting the turn…"))
+
+(defun sprig--cancel-interrupt-timer ()
+  "Cancel this buffer's outstanding interrupt fallback timer, if any."
+  (when sprig--interrupt-timer
+    (cancel-timer sprig--interrupt-timer)
+    (setq sprig--interrupt-timer nil)))
+
+(defun sprig--interrupt-timeout (buffer)
+  "Kill BUFFER's turn after a graceful interrupt went unanswered.
+The CLI never ended the turn within `sprig-interrupt-timeout', so fall
+back to killing the process; the session resumes on the next send."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq sprig--interrupt-timer nil)
+      (when sprig--busy
+        (sprig--teardown-process)
+        (sprig--status-refresh)
+        (message "sprig: interrupt timed out; killed the turn (resumes on next send)")))))
 
 ;;;###autoload
 (defun sprig-review-session (dir &optional session-id local)
@@ -946,6 +1048,53 @@ surface."
       (sprig-review-set-remote (sprig--remote)))
     (pop-to-buffer buffer)))
 
+(declare-function term-mode "term" ())
+(declare-function term-char-mode "term" ())
+
+;;;###autoload
+(defun sprig-login ()
+  "Log the `claude' CLI in for sprig's config dir, in a terminal.
+The stream-json transport a session runs on is headless, so it cannot
+drive the interactive `/login' OAuth flow.  This opens the interactive CLI
+in a `term' buffer instead, on the session host (over SSH with a TTY when
+`sprig-remote' is set, else locally) and with CLAUDE_CONFIG_DIR bound to
+`sprig-config-directory' when it is set.  Type `/login' there and complete
+the browser auth once; every headless sprig session on that host then
+reuses the stored credentials.
+
+Run it once per host, and again whenever `sprig-config-directory' points
+at a config dir that is not yet logged in."
+  (interactive)
+  (require 'term)
+  (let* ((remote (sprig--remote))
+         ;; A local run passes CLAUDE_CONFIG_DIR through the process env
+         ;; (no shell to expand `~', so expand here); a remote run sets it
+         ;; in the `env' prefix the remote login shell expands.
+         (process-environment
+          (if (and sprig-config-directory (not remote))
+              (cons (concat "CLAUDE_CONFIG_DIR="
+                            (expand-file-name sprig-config-directory))
+                    process-environment)
+            process-environment))
+         (buffer
+          (if remote
+              (let ((inner (shell-quote-argument sprig-program)))
+                (when sprig-config-directory
+                  (setq inner (concat "env CLAUDE_CONFIG_DIR="
+                                      (sprig--remote-dir-arg sprig-config-directory)
+                                      " " inner)))
+                (apply #'make-term "sprig-login" sprig-ssh-program nil
+                       (append (sprig--ssh-tty-args) (list remote inner))))
+            (make-term "sprig-login" sprig-program))))
+    (set-buffer buffer)
+    (term-mode)
+    (term-char-mode)
+    (switch-to-buffer buffer)
+    (message "sprig-login: type /login to authenticate%s"
+             (if sprig-config-directory
+                 (format " (CLAUDE_CONFIG_DIR=%s)" sprig-config-directory)
+               ""))))
+
 ;;;; Folding commands
 
 ;;;; Status navigator
@@ -970,8 +1119,19 @@ amount, and either read is bounded however large the session grows.")
 
 (defvar sprig-claude-projects-directory "~/.claude/projects"
   "Root under which the `claude' CLI stores per-project session logs.
-Local sessions read it here; remote sessions read the same path on the
-SSH host.  A variable, not a defcustom, so tests can redirect it.")
+This is the CLI's default location, used when `sprig-config-directory' is
+nil.  Local sessions read it here; remote sessions read the same path on
+the SSH host.  A variable, not a defcustom, so tests can redirect it; the
+supported user knob is `sprig-config-directory'.")
+
+(defun sprig--projects-directory ()
+  "Root under which the session host stores per-project session logs.
+When `sprig-config-directory' is set, that is its `projects/'
+subdirectory; otherwise `sprig-claude-projects-directory'.  Interpreted on
+the session host, so it may carry a leading `~'."
+  (if sprig-config-directory
+      (file-name-concat (directory-file-name sprig-config-directory) "projects")
+    sprig-claude-projects-directory))
 
 (defvar-local sprig--status-filter nil
   "Case-insensitive substring the navigator narrows rows to, or nil for all.
@@ -1119,8 +1279,8 @@ sessions still paints fast."
     (sprig--scan-session-logs-local (sprig--status-limit))))
 
 (defun sprig--scan-session-logs-local (limit)
-  "Scan the LIMIT newest local logs under `sprig-claude-projects-directory'."
-  (let* ((root (expand-file-name sprig-claude-projects-directory))
+  "Scan the LIMIT newest local logs under the session host's projects dir."
+  (let* ((root (expand-file-name (sprig--projects-directory)))
          (files (seq-remove
                  #'sprig--log-ignored-p
                  (and (file-directory-p root)
@@ -1147,7 +1307,7 @@ the title, grepped whole-file since it can sit anywhere).  With an ignore
 list the listing is uncapped so the drop happens before the cap; otherwise
 the cap is applied server-side to keep the listing small."
   (let* ((root (sprig--remote-dir-arg
-                (directory-file-name sprig-claude-projects-directory)))
+                (directory-file-name (sprig--projects-directory))))
          (server-cap (and limit (not sprig-status-ignore-directories) limit))
          (listing (ignore-errors
                     (sprig--remote-sh

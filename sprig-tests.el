@@ -210,6 +210,41 @@
         (let ((payload (car (last cmd))))
           (should (string-prefix-p "cd ~/proj && exec claude" payload)))))))
 
+(ert-deftest sprig-test-command-remote-config-dir ()
+  ;; A set `sprig-config-directory' rides an `env CLAUDE_CONFIG_DIR=...'
+  ;; prefix, after the `cd' and `exec', with the tilde kept live.
+  (with-temp-buffer
+    (let ((sprig-remote "me@host") (sprig-program "claude")
+          (sprig-ssh-program "ssh") (sprig-ssh-args '("-T" "-A"))
+          (sprig-directory "~/proj")
+          (sprig-config-directory "~/.config/sprig/claude"))
+      (let ((payload (car (last (sprig--command)))))
+        (should (string-prefix-p
+                 "cd ~/proj && exec env CLAUDE_CONFIG_DIR=~/.config/sprig/claude \
+claude"
+                 payload))))))
+
+(ert-deftest sprig-test-projects-directory ()
+  ;; nil config dir falls back to the CLI default; a set one uses its
+  ;; `projects/' subdir, keeping a leading tilde for the session host.
+  (let ((sprig-claude-projects-directory "~/.claude/projects"))
+    (let ((sprig-config-directory nil))
+      (should (equal (sprig--projects-directory) "~/.claude/projects")))
+    (let ((sprig-config-directory "~/.config/sprig/claude"))
+      (should (equal (sprig--projects-directory)
+                     "~/.config/sprig/claude/projects")))
+    ;; A trailing slash on the config dir does not double up.
+    (let ((sprig-config-directory "~/.config/sprig/claude/"))
+      (should (equal (sprig--projects-directory)
+                     "~/.config/sprig/claude/projects")))))
+
+(ert-deftest sprig-test-ssh-tty-args ()
+  ;; The interactive login forces a TTY: `-t' replaces `-T', `-A' stays.
+  (let ((sprig-ssh-args '("-T" "-A")))
+    (should (equal (sprig--ssh-tty-args) '("-t" "-A"))))
+  (let ((sprig-ssh-args '("-A")))
+    (should (equal (sprig--ssh-tty-args) '("-t" "-A")))))
+
 (ert-deftest sprig-test-remote-dir-arg ()
   (should (equal (sprig--remote-dir-arg "~") "~"))
   (should (string-prefix-p "~/" (sprig--remote-dir-arg "~/plain")))
