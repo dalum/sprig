@@ -261,6 +261,67 @@ timestamp, or the state line's rule."
            "☐ " (substring-no-properties
                  (sprig-review--todo-line '((content . "c") (status . "pending")))))))
 
+(defun sprig-review-tests--task-events (&rest tail)
+  "Build events for a run of task ops: two creates and a start, then TAIL.
+Each create's result carries its assigned id, the way the CLI answers, so
+the fold learns the id from the result rather than from the call."
+  (append
+   `((tool-call "c1" "TaskCreate" ,(json-serialize '(:subject "First" :description "d")))
+     (tool-result "c1" nil "Task #1 created successfully: First")
+     (tool-call "c2" "TaskCreate" ,(json-serialize '(:subject "Second" :description "d")))
+     (tool-result "c2" nil "Task #2 created successfully: Second")
+     (tool-call "u1" "TaskUpdate" ,(json-serialize '(:taskId "1" :status "in_progress")))
+     (tool-result "u1" nil "Updated task #1 status"))
+   tail))
+
+(ert-deftest sprig-review-mode-test-task-fold-into-checklist ()
+  ;; The granular Task tools fold into one running checklist with heading
+  ;; progress, the same shape a TodoWrite renders; no raw TaskCreate rows.
+  (let ((model (sprig-review-build (sprig-review-tests--task-events))))
+    (sprig-review-tests--rendered model nil
+      (let ((s (buffer-string)))
+        (should (string-match-p "^Tasks  0/2 done" s))
+        (should-not (string-match-p "TaskCreate" s))
+        (should-not (string-match-p "TaskUpdate" s)))
+      (goto-char (point-min))
+      (re-search-forward "^Tasks")
+      (magit-section-show (magit-current-section))
+      (let ((s (buffer-string)))
+        (should (string-match-p "▶ First" s))
+        (should (string-match-p "☐ Second" s))))))
+
+(ert-deftest sprig-review-mode-test-task-run-coalesces-then-splits ()
+  ;; A run of task ops is one snapshot; a non-task block between runs opens a
+  ;; fresh one, so the second checklist shows the moved-on state.
+  (let* ((model (sprig-review-build
+                 (sprig-review-tests--task-events
+                  '(text "Working on it.")
+                  `(tool-call "u2" "TaskUpdate"
+                              ,(json-serialize '(:taskId "1" :status "completed")))
+                  '(tool-result "u2" nil "Updated task #1 status"))))
+         (tasks (seq-filter (lambda (b) (eq (plist-get b :type) 'tasks))
+                            (plist-get model :blocks))))
+    ;; Two runs, so two snapshots, not one merged block and not one per op.
+    (should (= (length tasks) 2))
+    (should (equal (alist-get 'status (car (plist-get (car tasks) :items)))
+                   "in_progress"))
+    (should (equal (alist-get 'status (car (plist-get (cadr tasks) :items)))
+                   "completed"))))
+
+(ert-deftest sprig-review-mode-test-task-delete-drops-it ()
+  ;; A deleted task leaves the checklist; the survivors keep their order.
+  (let* ((model (sprig-review-build
+                 (sprig-review-tests--task-events
+                  `(tool-call "u3" "TaskUpdate"
+                              ,(json-serialize '(:taskId "1" :status "deleted")))
+                  '(tool-result "u3" nil "Updated task #1 deleted"))))
+         (last (car (last (seq-filter
+                           (lambda (b) (eq (plist-get b :type) 'tasks))
+                           (plist-get model :blocks)))))
+         (items (plist-get last :items)))
+    (should (= (length items) 1))
+    (should (equal (alist-get 'content (car items)) "Second"))))
+
 (defmacro sprig-review-tests--with-tz (tz &rest body)
   "Run BODY with the local timezone set to TZ, restoring it after."
   (declare (indent 1) (debug (form body)))

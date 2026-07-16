@@ -131,9 +131,19 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;   (:type thinking :text STR :time ISO)
 ;;   (:type tool     :id ID :name NAME :input JSON :changes CHANGES
 ;;                   :result (:error BOOL :text STR) | nil :time ISO)
+;;   (:type tasks    :items ITEMS :time ISO)
 ;;   (:type dialog   :id ID :kind KIND :input INPUT
 ;;                   :answered BOOL :answers ANSWERS :time ISO)
 ;;   (:type error    :text STR :time ISO)
+;;
+;; A `tasks' block is the CLI's granular task tools folded into one running
+;; checklist.  Where a `TodoWrite' resends its whole list each call, this
+;; CLI variant emits one `TaskCreate'/`TaskUpdate' per task, so the fold
+;; keeps the current task state and snapshots it: ITEMS is a list of todo
+;; alists ((content . STR) (status . STR)), the same shape a `TodoWrite'
+;; carries, so both render through one checklist.  A run of adjacent task
+;; ops coalesces into a single snapshot; a non-task block between ops opens
+;; a fresh one, so the checklist reappears wherever the plan next moved.
 ;;
 ;; Consecutive `text' (or `thinking') events coalesce into one block; a
 ;; `text-block' event, a differing block kind, or any structural event
@@ -183,14 +193,54 @@ hears back."
                    (not (plist-get b :answered))))
             (plist-get model :blocks)))
 
+(defun sprig-review--task-created-id (text)
+  "Return the id string in a TaskCreate result TEXT, or nil.
+The task tool answers a create with \"Task #N created ...\", so a new
+task's id is only in the result, never in the call's own input."
+  (when (and (stringp text) (string-match "Task #\\([0-9]+\\)" text))
+    (match-string 1 text)))
+
+(defun sprig-review--task-apply-update (tasks input)
+  "Return TASKS folded with one TaskUpdate INPUT alist.
+A `deleted' status drops the task; any other status, or a new subject, is
+written in place onto the task the INPUT's `taskId' names.  Each task is a
+plist (:id ID :content SUBJECT :status STATUS)."
+  (let ((tid (alist-get 'taskId input))
+        (status (alist-get 'status input))
+        (subject (alist-get 'subject input)))
+    (if (equal status "deleted")
+        (seq-remove (lambda (tk) (equal (plist-get tk :id) tid)) tasks)
+      (dolist (tk tasks tasks)
+        (when (equal (plist-get tk :id) tid)
+          (when status (plist-put tk :status status))
+          (when subject (plist-put tk :content subject)))))))
+
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes."
-  (let ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
-        (context nil)       ; the freshest turn's context-window token count
-        (time nil)          ; the stamp the next block opened takes
-        (blocks '())        ; built in reverse
-        (open nil))         ; the open text/thinking block being coalesced
+  (let* ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
+         (context nil)       ; the freshest turn's context-window token count
+         (time nil)          ; the stamp the next block opened takes
+         (blocks '())        ; built in reverse
+         (open nil)          ; the open text/thinking block being coalesced
+         (tasks '())         ; current Task* state, oldest-first (see fold below)
+         (pending-creates '()) ; TaskCreate tool-id -> subject, awaiting its id
+         (task-ids '())      ; tool-ids of Task* calls, so their results fold too
+         (tasks-block nil)   ; the running task snapshot, coalesced across a run
+         (snapshot
+          (lambda ()
+            ;; Push a fresh task checklist, or update the running one, to the
+            ;; current `tasks'.  ITEMS mirror a `TodoWrite' alist so both
+            ;; render through one checklist; each is copied so a later fold
+            ;; does not bleed back into an earlier snapshot.
+            (let ((items (mapcar (lambda (tk)
+                                   (list (cons 'content (plist-get tk :content))
+                                         (cons 'status (plist-get tk :status))))
+                                 tasks)))
+              (if tasks-block
+                  (plist-put tasks-block :items items)
+                (setq tasks-block (list :type 'tasks :items items :time time))
+                (push tasks-block blocks))))))
     (dolist (ev events)
       (pcase ev
         (`(session ,id) (setq session id))
@@ -213,22 +263,51 @@ See the section commentary for the event vocabulary and block shapes."
          (push (list :type 'user :text text :time time) blocks))
         (`(tool-call ,id ,name ,input)
          (setq open nil)
-         (push (list :type 'tool :id id :name name :input input
-                     :changes (sprig-review-tool-changes name input)
-                     :result nil :time time)
-               blocks))
+         (cond
+          ;; The granular task tools fold into the running checklist rather
+          ;; than render as their own rows; a create waits on its result for
+          ;; the id, an update applies at once, a list changes nothing.
+          ((member name '("TaskCreate" "TaskUpdate" "TaskList"))
+           (push id task-ids)
+           (pcase name
+             ("TaskCreate"
+              (let ((obj (sprig-review--parse-input input)))
+                (push (cons id (or (alist-get 'subject obj) "task"))
+                      pending-creates)))
+             ("TaskUpdate"
+              (setq tasks (sprig-review--task-apply-update
+                           tasks (sprig-review--parse-input input)))
+              (funcall snapshot))))
+          (t
+           (push (list :type 'tool :id id :name name :input input
+                       :changes (sprig-review-tool-changes name input)
+                       :result nil :time time)
+                 blocks))))
         (`(tool-result ,id ,is-error ,rtext)
          (setq open nil)
-         (let ((blk (sprig-review--find-open-tool blocks id)))
-           (if blk
-               (plist-put blk :result (list :error is-error :text rtext))
-             ;; A result with no matching call: keep it as a loose block
-             ;; rather than drop it, so nothing is silently lost.
-             (push (list :type 'tool :id id :name nil :input nil
-                         :changes nil
-                         :result (list :error is-error :text rtext)
-                         :time time)
-                   blocks))))
+         (cond
+          ;; A task op's result. A create's result is the only place the new
+          ;; task's id appears, so fold it in here; every other task result
+          ;; is bookkeeping and is swallowed rather than shown.
+          ((member id task-ids)
+           (when-let ((subject (cdr (assoc id pending-creates))))
+             (setq pending-creates (assoc-delete-all id pending-creates))
+             (let ((tid (or (sprig-review--task-created-id rtext)
+                            (number-to-string (1+ (length tasks))))))
+               (setq tasks (append tasks (list (list :id tid :content subject
+                                                     :status "pending"))))
+               (funcall snapshot))))
+          (t
+           (let ((blk (sprig-review--find-open-tool blocks id)))
+             (if blk
+                 (plist-put blk :result (list :error is-error :text rtext))
+               ;; A result with no matching call: keep it as a loose block
+               ;; rather than drop it, so nothing is silently lost.
+               (push (list :type 'tool :id id :name nil :input nil
+                           :changes nil
+                           :result (list :error is-error :text rtext)
+                           :time time)
+                     blocks))))))
         (`(dialog ,id ,kind ,input)
          (setq open nil)
          (push (list :type 'dialog :id id :kind kind :input input
@@ -243,7 +322,12 @@ See the section commentary for the event vocabulary and block shapes."
         (`(context ,n) (setq context n))
         (`(error ,m)
          (setq open nil)
-         (push (list :type 'error :text m :time time) blocks))))
+         (push (list :type 'error :text m :time time) blocks)))
+      ;; A run of task ops coalesces into one snapshot; the moment any other
+      ;; block reaches the head, that run has ended, so the next task op opens
+      ;; a fresh checklist rather than reopening the stale one.
+      (when (and tasks-block (not (eq (car blocks) tasks-block)))
+        (setq tasks-block nil)))
     (list :session session :title title :mode mode
           :cost cost :error error :done done :context context
           :blocks (nreverse blocks))))

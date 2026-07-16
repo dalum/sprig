@@ -516,6 +516,21 @@ diff-bearing tools open instead."
           (when-let ((result (plist-get block :result)))
             (sprig-review--insert-result result))))))))
 
+(defun sprig-review--insert-tasks (block)
+  "Insert a folded task-list BLOCK as a checklist, progress in its heading.
+This CLI emits one `TaskCreate'/`TaskUpdate' per task rather than a whole
+`TodoWrite' list; the model folds those into a running checklist, and this
+renders it the same way a `TodoWrite' renders, so the plan-of-work reads as
+a list either way.  Folds to its heading; TAB opens the checklist."
+  (let ((items (plist-get block :items)))
+    (magit-insert-section (sprig-tasks block t)
+      (magit-insert-heading
+        (concat (sprig-review--face "Tasks" 'sprig-review-tool)
+                (when items
+                  (concat "  " (sprig-review--todo-progress items)))))
+      (magit-insert-section-body
+        (sprig-review--insert-todos items)))))
+
 (defvar markdown-hide-markup)
 (declare-function markdown-mode "markdown-mode" ())
 (declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
@@ -920,6 +935,7 @@ META is an optional plist of display metadata (see
                         block (and sprig-review--streaming (eq block last))))
             ('thinking (sprig-review--insert-thinking block))
             ('tool     (sprig-review--insert-tool block))
+            ('tasks    (sprig-review--insert-tasks block))
             ('dialog   (sprig-review--insert-dialog block))
             ('error    (sprig-review--insert-error block)))
           (sprig-review--insert-margin start (plist-get block :time))))
