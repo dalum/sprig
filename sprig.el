@@ -196,6 +196,22 @@ Lets the transport reconnect a stale session without knowing the owner.")
   "Working directory for a session not backed by a Markdown file.
 A review buffer owns its session directly and has no frontmatter, so it
 records the session's directory here for `sprig--directory'.")
+(defvar-local sprig--remote-override 'inherit
+  "Per-session SSH-destination override for this buffer's session.
+The symbol `inherit' (the default) follows the global `sprig-remote';
+any other value overrides it for this buffer alone, including nil for a
+session forced to run locally while `sprig-remote' is set.  The transport
+reads it through `sprig--remote'.  The navigator scans one host and stays
+on the global `sprig-remote' throughout.")
+
+(defun sprig--remote ()
+  "Effective SSH destination for this buffer's session, or nil for local.
+Returns the buffer-local `sprig--remote-override' unless it is `inherit',
+in which case it falls back to the global `sprig-remote'.  Transport paths
+that run in a session-owning buffer call this instead of reading the
+global directly, so a session can run local or remote independent of the
+configured default."
+  (if (eq sprig--remote-override 'inherit) sprig-remote sprig--remote-override))
 
 ;;;; Command construction
 
@@ -236,15 +252,16 @@ shell's home expansion, so quote only the part after any `~' prefix."
 A local session's working directory is set by `sprig--spawn' binding
 `default-directory'; a remote session's is set here by prefixing a `cd'."
   (let ((args (cons sprig-program (sprig--base-args)))
-        (dir (sprig--directory)))
-    (if sprig-remote
+        (dir (sprig--directory))
+        (remote-host (sprig--remote)))
+    (if remote-host
         (let ((remote (mapconcat #'shell-quote-argument args " ")))
           (when dir
             (setq remote (concat "cd " (sprig--remote-dir-arg dir)
                                  " && exec " remote)))
           (append (list sprig-ssh-program)
                   sprig-ssh-args
-                  (list sprig-remote remote)))
+                  (list remote-host remote)))
       args)))
 
 ;;;; Transport and sink
@@ -509,7 +526,7 @@ Markdown transcript and a session-owning review buffer share it."
          ;; Local sessions inherit `default-directory'; a configured dir
          ;; overrides it.  Remote sessions get their `cd' in `sprig--command'.
          (default-directory
-          (if (and dir (not sprig-remote))
+          (if (and dir (not (sprig--remote)))
               (let ((expanded (file-name-as-directory (expand-file-name dir))))
                 (unless (file-directory-p expanded)
                   (user-error "sprig: no such directory: %s" expanded))
@@ -750,7 +767,7 @@ of its recorded cwd.  Signals if SSH exits non-zero."
   (with-temp-buffer
     (let ((status (apply #'call-process sprig-ssh-program nil t nil
                          (append sprig-ssh-args
-                                 (list sprig-remote
+                                 (list (sprig--remote)
                                        (concat "sh -c "
                                                (shell-quote-argument command)))))))
       (unless (eq status 0)
@@ -765,14 +782,14 @@ host (local or over SSH), so the working-directory encoding never has to
 be reproduced.  Signals a `user-error' when there is no id or no log."
   (let ((id (or sprig--session-id
                 (user-error "sprig: no session id yet; connect first"))))
-    (if sprig-remote
+    (if (sprig--remote)
         (let* ((name (shell-quote-argument (concat id ".jsonl")))
                (path (string-trim
                       (sprig--remote-sh
                        (format "find ~/.claude/projects -name %s -print -quit"
                                name)))))
           (when (string-empty-p path)
-            (user-error "sprig: no session log for %s on %s" id sprig-remote))
+            (user-error "sprig: no session log for %s on %s" id (sprig--remote)))
           (split-string (sprig--remote-sh
                          (format "cat %s" (shell-quote-argument path)))
                         "\n" t))
@@ -805,12 +822,14 @@ model via `sprig-review-consume'."
   (unless (eq (car-safe event) 'control-request)
     (sprig-review-consume event)))
 
-(defun sprig--read-review-dir ()
+(defun sprig--read-review-dir (&optional local)
   "Prompt for a session working directory, returning the string.
 Unlike `sprig--read-working-directory' this records nothing in
 frontmatter; a session-owning review buffer keeps its directory in the
-buffer-local `sprig--working-dir' instead."
-  (if sprig-remote
+buffer-local `sprig--working-dir' instead.  With a remote default the
+prompt is a free string (the path lives on the host); LOCAL non-nil, or
+no configured `sprig-remote', prompts against the local filesystem."
+  (if (and sprig-remote (not local))
       (read-string "Working directory (remote, blank = login dir): ")
     (read-directory-name "Working directory: ")))
 
@@ -826,11 +845,11 @@ unless NO-PROMPT."
   (setq sprig--sink #'sprig--review-sink
         sprig--connect-fn #'sprig-review-connect)
   (unless (or no-prompt sprig--session-id sprig--working-dir)
-    (setq sprig--working-dir (sprig--read-review-dir)))
+    (setq sprig--working-dir (sprig--read-review-dir (null (sprig--remote)))))
   (sprig--spawn)
   (message "sprig: %s (%s%s)"
            (if sprig--session-id "resuming session" "new session")
-           (if sprig-remote (concat "ssh " sprig-remote) "local")
+           (if (sprig--remote) (concat "ssh " (sprig--remote)) "local")
            (if sprig--working-dir (concat " in " sprig--working-dir) ""))
   (sprig--status-refresh))
 
@@ -878,14 +897,20 @@ mode is returned to \"auto\"."
     (message "sprig: nothing to interrupt")))
 
 ;;;###autoload
-(defun sprig-review-session (dir &optional session-id)
+(defun sprig-review-session (dir &optional session-id local)
   "Open a review buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
 SESSION-ID, replay that stored session's log and resume it on the next
 send; without, the buffer starts empty and a send opens a fresh session.
-The review buffer is the only conversation surface."
-  (interactive (list (sprig--read-review-dir)))
+LOCAL non-nil (interactively, a prefix argument) forces the session to
+run on the local machine even when `sprig-remote' is set; its log then
+lives locally and it is driven from its own review buffer rather than the
+remote navigator's list.  The review buffer is the only conversation
+surface."
+  (interactive
+   (let ((local current-prefix-arg))
+     (list (sprig--read-review-dir local) nil local)))
   (require 'sprig-review-mode)
   (let* ((name (format "*sprig-review: %s*"
                        (or session-id
@@ -896,12 +921,13 @@ The review buffer is the only conversation surface."
     (with-current-buffer buffer
       (setq sprig--session-id session-id
             sprig--working-dir dir
+            sprig--remote-override (if local nil 'inherit)
             sprig--sink #'sprig--review-sink
             sprig--connect-fn #'sprig-review-connect)
       (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
              (events (and lines (sprig-review-session-events lines))))
         (sprig-review-seed events (list :project dir)))
-      (sprig-review-set-remote sprig-remote))
+      (sprig-review-set-remote (sprig--remote)))
     (pop-to-buffer buffer)))
 
 ;;;; Folding commands
@@ -1538,12 +1564,14 @@ Shows the tail of that session's last reply, filled to
     (sprig--status-toggle-id id)
     (sprig--status-render)))
 
-(defun sprig-status-new ()
+(defun sprig-status-new (&optional local)
   "Start a fresh session, prompting for its working directory.
 Opens a review buffer that owns the new session; it appears in the
-navigator and streams like any other."
-  (interactive)
-  (sprig-review-session (sprig--read-review-dir))
+navigator and streams like any other.  With a prefix argument, LOCAL
+forces the session onto the local machine even when `sprig-remote' is
+set (its log then lives locally, off the remote navigator's list)."
+  (interactive "P")
+  (sprig-review-session (sprig--read-review-dir local) nil local)
   (sprig--status-refresh))
 
 (defun sprig--status-project-candidates ()

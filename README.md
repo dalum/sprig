@@ -76,7 +76,7 @@ With `use-package` and a local checkout:
 ## Usage
 
 1. `M-x sprig-status` opens the navigator, listing every stored session on the host, newest first; `/` narrows it to a project or title.
-2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history. `s` starts a fresh session, prompting for its working directory. `M-x sprig-review-session` does the same directly.
+2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history. `s` starts a fresh session, prompting for its working directory; a prefix argument (`C-u s`, or `C-u M-x sprig-review-session`) forces that one session onto the local machine even when `sprig-remote` is set, prompting against the local filesystem. `M-x sprig-review-session` does the same directly.
 3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
 5. `c i` (or `k` in the navigator) interrupts a streaming turn; the session resumes on the next send.
@@ -100,7 +100,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 |---|---|
 | `n` / `p` | Move to the next / previous session, skipping preview lines |
 | `RET` / `o` | Open the session's review buffer (replaying its log) |
-| `s` | Start a fresh session, prompting for its working directory |
+| `s` | Start a fresh session, prompting for its working directory (`C-u s` forces it local when `sprig-remote` is set) |
 | `TAB` | Toggle an inline preview of the session's last reply |
 | `c` | Open the session and start or resume it |
 | `k` | Interrupt the streaming session |
@@ -185,7 +185,7 @@ The navigator scans every session log under `~/.claude/projects/` on the session
 
 - v0.12.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
-- Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
+- The host is per-session: `sprig-remote` is the default, and `C-u s` forces a single session local. Its log then lives on the local machine, so once its review buffer is closed it drops off the remote navigator's list (it shows there while the buffer is live). Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
 - Diffs are reconstructed from tool-call payloads (`Edit` / `MultiEdit` / `Write`), so a `Bash`-driven edit is not yet attributed; git ground truth is a later slice.
 - The `sprig-status` navigator ships as a flat session list; the fork forest it will grow into is not built yet.
