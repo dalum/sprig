@@ -79,7 +79,7 @@ With `use-package` and a local checkout:
 2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history. `s` starts a fresh session, prompting for its working directory; a prefix argument (`C-u s`, or `C-u M-x sprig-review-session`) forces that one session onto the local machine even when `sprig-remote` is set, prompting against the local filesystem. `M-x sprig-review-session` does the same directly.
 3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
-5. `c i` (or `k` in the navigator) interrupts a streaming turn; the session resumes on the next send.
+5. `c i` (or `k` in the navigator) interrupts a streaming turn. The CLI ends the turn cleanly and the session stays live, so the next send continues it with no resume; if the CLI does not honour the request within `sprig-interrupt-timeout`, Sprig falls back to killing the turn and the session resumes on the next send.
 
 The session lives on past the buffer: reopen it any time from the navigator, or resume it with `c` there. Nothing is saved by you, because the CLI's log already is the record.
 
@@ -165,6 +165,7 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
 | `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
+| `sprig-interrupt-timeout` | `5` | Seconds to wait for a graceful `c i` interrupt before killing the turn (nil = wait forever) |
 | `sprig-system-prompt` | short hint | Appended system prompt, or nil |
 | `sprig-ssh-program` | `"ssh"` | SSH client program |
 | `sprig-ssh-args` | `("-T" "-A")` | Extra SSH args (`-A` forwards your agent to the host) |
@@ -201,7 +202,7 @@ A fresh config dir starts logged out. Because a session runs headless (over the 
 - v0.12.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - The host is per-session: `sprig-remote` is the default, and `C-u s` forces a single session local. Its log then lives on the local machine, so once its review buffer is closed it drops off the remote navigator's list (it shows there while the buffer is live). Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
-- Interrupt currently kills the turn's process; the session resumes on the next send. Graceful interrupt (the CLI advertises `interrupt_receipt_v1`) is future work.
+- Interrupt is graceful: `c i` asks the CLI to end the turn cleanly (an `interrupt` control request) and keeps the session live, so the next send continues it with no resume. If the CLI refuses the request (an error receipt) or does not honour it within `sprig-interrupt-timeout` seconds, Sprig falls back to killing the process, and the session resumes on the next send.
 - Diffs are reconstructed from tool-call payloads (`Edit` / `MultiEdit` / `Write`), so a `Bash`-driven edit is not yet attributed; git ground truth is a later slice.
 - The `sprig-status` navigator ships as a flat session list; the fork forest it will grow into is not built yet.
 

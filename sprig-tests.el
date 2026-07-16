@@ -110,6 +110,65 @@
     (should (equal (sprig--claude-parse-line (sprig-tests--done 0.5 t))
                    '((done 0.5 t))))))
 
+(ert-deftest sprig-test-parse-control-response ()
+  ;; The CLI's receipt for a control request we sent: request_id rides
+  ;; inside `response', and the subtype ("success"/"error") tells the sink
+  ;; whether the request landed.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize
+                     (list :type "control_response"
+                           :response (list :subtype "success"
+                                           :request_id "sprig-3"))))
+                   '((control-response "sprig-3" "success"))))
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize
+                     (list :type "control_response"
+                           :response (list :subtype "error"
+                                           :request_id "sprig-4"
+                                           :error "nope"))))
+                   '((control-response "sprig-4" "error"))))))
+
+(ert-deftest sprig-test-interrupt-error-receipt-falls-back ()
+  ;; An error receipt for our interrupt means the CLI refused it: kill the
+  ;; turn at once instead of waiting out the timeout.
+  (with-temp-buffer
+    (let (torn)
+      (setq sprig--busy t sprig--interrupt-request-id "sprig-7"
+            sprig--interrupt-timer nil)
+      (cl-letf (((symbol-function 'sprig--teardown-process)
+                 (lambda () (setq torn t sprig--busy nil)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--interrupt-receipt "sprig-7" "error"))
+      (should torn)
+      (should-not sprig--interrupt-request-id))))
+
+(ert-deftest sprig-test-interrupt-success-receipt-waits ()
+  ;; A success receipt only confirms the interrupt landed; the turn still
+  ;; ends through `done', so the process is left alone here.
+  (with-temp-buffer
+    (let (torn)
+      (setq sprig--busy t sprig--interrupt-request-id "sprig-7")
+      (cl-letf (((symbol-function 'sprig--teardown-process)
+                 (lambda () (setq torn t)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--interrupt-receipt "sprig-7" "success"))
+      (should-not torn)
+      (should sprig--busy))))
+
+(ert-deftest sprig-test-interrupt-receipt-ignores-other-ids ()
+  ;; A receipt for some other control request (e.g. set_permission_mode)
+  ;; must not touch an outstanding interrupt.
+  (with-temp-buffer
+    (let (torn)
+      (setq sprig--busy t sprig--interrupt-request-id "sprig-7")
+      (cl-letf (((symbol-function 'sprig--teardown-process)
+                 (lambda () (setq torn t)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--interrupt-receipt "sprig-2" "error"))
+      (should-not torn)
+      (should (equal sprig--interrupt-request-id "sprig-7")))))
+
 (ert-deftest sprig-test-parse-error ()
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line
@@ -613,6 +672,74 @@ claude"
         (should (equal (alist-get 'subtype request) "set_permission_mode"))
         (should (equal (alist-get 'mode request) "plan")))
       (should (equal sprig--permission-mode "plan")))))
+
+(ert-deftest sprig-test-interrupt-wire-format ()
+  ;; `c i' sends a bare `interrupt' control_request; the CLI ends the turn
+  ;; with a result rather than the process being killed.
+  (with-temp-buffer
+    (let (sent)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s))))
+        (setq sprig--process 'dummy)
+        (sprig--send-interrupt))
+      (let* ((obj (json-parse-string (string-trim sent) :object-type 'alist))
+             (request (alist-get 'request obj)))
+        (should (equal (alist-get 'type obj) "control_request"))
+        (should (equal (alist-get 'subtype request) "interrupt"))))))
+
+(ert-deftest sprig-test-interrupt-idle-does-nothing ()
+  ;; Nothing in flight: no request goes out and no timer is armed.
+  (with-temp-buffer
+    (let (sent)
+      (setq sprig--busy nil sprig--interrupt-timer nil)
+      (cl-letf (((symbol-function 'process-send-string)
+                 (lambda (_proc s) (setq sent s)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--review-interrupt-owned))
+      (should-not sent)
+      (should-not sprig--interrupt-timer))))
+
+(ert-deftest sprig-test-interrupt-graceful-keeps-process ()
+  ;; A graceful interrupt sends the request, arms the fallback timer, and
+  ;; leaves the process alone; the turn's `done' then clears busy and the
+  ;; timer, so the session stays live for the next send.
+  (with-temp-buffer
+    (let ((sprig-interrupt-timeout 60) sent)
+      (setq sprig--process 'dummy sprig--busy t sprig--interrupt-timer nil
+            sprig--sink #'sprig--review-sink)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'process-send-string)
+                       (lambda (_proc s) (setq sent s)))
+                      ((symbol-function 'sprig--status-refresh) #'ignore))
+              (sprig--review-interrupt-owned))
+            (should (string-match-p "interrupt"
+                                    (alist-get 'subtype
+                                               (alist-get 'request
+                                                          (json-parse-string
+                                                           (string-trim sent)
+                                                           :object-type 'alist)))))
+            (should (timerp sprig--interrupt-timer))
+            (should sprig--process)       ; process not torn down
+            ;; The turn ends normally; done clears busy and the timer.
+            (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore)
+                      ((symbol-function 'sprig-review-consume) #'ignore))
+              (sprig--review-sink '(done nil nil)))
+            (should-not sprig--busy)
+            (should-not sprig--interrupt-timer))
+        (sprig--clear-interrupt)))))
+
+(ert-deftest sprig-test-interrupt-timeout-falls-back ()
+  ;; The CLI never ended the turn: the fallback timer kills the process.
+  (with-temp-buffer
+    (let (torn)
+      (setq sprig--busy t sprig--interrupt-timer 'dummy-timer)
+      (cl-letf (((symbol-function 'sprig--teardown-process)
+                 (lambda () (setq torn t sprig--busy nil)))
+                ((symbol-function 'sprig--status-refresh) #'ignore))
+        (sprig--interrupt-timeout (current-buffer)))
+      (should torn)
+      (should-not sprig--interrupt-timer))))
 
 (ert-deftest sprig-test-initialize-wire-format ()
   ;; The initialize handshake declares the dialog kinds as a JSON array,

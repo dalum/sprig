@@ -1418,7 +1418,10 @@ this affects only what the navigator and header show for the open buffer."
     (sprig-review--send (plist-get last-user :text))))
 
 (defun sprig-review-interrupt ()
-  "Interrupt the in-flight turn on this review's session."
+  "Interrupt the in-flight turn on this review's session.
+Asks the CLI to end the turn cleanly and keeps the session live, so the
+next send continues it rather than resuming; falls back to killing the
+turn if the CLI does not honour the request (see `sprig-interrupt-timeout')."
   (interactive)
   (sprig--review-interrupt-owned))
 

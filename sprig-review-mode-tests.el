@@ -1358,16 +1358,27 @@ buffer receives streamed transport events without a Markdown transcript."
       (should (member '(user "do it") sprig-review--events)))))
 
 (ert-deftest sprig-review-mode-test-owned-interrupt ()
-  "An owned interrupt tears the session down when a turn is in flight."
+  "An owned interrupt asks the CLI to end the turn and keeps the session live.
+It sends an `interrupt' request and arms the fallback timer without
+tearing the process down; the turn's `done' does the clearing later."
   (with-temp-buffer
     (sprig-review-mode)
     (setq sprig--sink #'sprig--review-sink
-          sprig--busy t)
-    (cl-letf (((symbol-function 'sprig--teardown-process)
-               (lambda () (setq sprig--busy nil)))
-              ((symbol-function 'sprig--status-refresh) #'ignore))
-      (sprig-review-interrupt))
-    (should-not sprig--busy)))
+          sprig--busy t sprig--interrupt-timer nil)
+    (let (interrupted torn)
+      (unwind-protect
+          (progn
+            (cl-letf (((symbol-function 'sprig--send-interrupt)
+                       (lambda () (setq interrupted t)))
+                      ((symbol-function 'sprig--teardown-process)
+                       (lambda () (setq torn t)))
+                      ((symbol-function 'sprig--status-refresh) #'ignore))
+              (sprig-review-interrupt))
+            (should interrupted)
+            (should-not torn)
+            (should sprig--busy)
+            (should (timerp sprig--interrupt-timer)))
+        (sprig--clear-interrupt)))))
 
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here

@@ -209,6 +209,11 @@ Set by `sprig--interrupt-turn' after it sends the `interrupt' control
 request; cancelled when the turn's `done' lands (the interrupt worked) or
 when the process is torn down.  If it fires first, the CLI never ended the
 turn, so it falls back to killing the process (`sprig--interrupt-timeout').")
+(defvar-local sprig--interrupt-request-id nil
+  "Request id of the outstanding `interrupt' control request, or nil.
+Lets the sink match the CLI's `control_response' receipt to our own
+interrupt: an error receipt means the CLI refused it, so we fall back to
+the hard kill at once rather than waiting out `sprig-interrupt-timeout'.")
 (defvar-local sprig--blocks nil
   "Alist of in-flight streaming tool-use blocks, keyed by block index.
 Each entry is (INDEX :id ID :name NAME :json ACC), where ACC accumulates
@@ -303,13 +308,6 @@ A local session's working directory is set by `sprig--spawn' binding
                   (list remote-host remote)))
       args)))
 
-(defun sprig--ssh-tty-args ()
-  "Like `sprig-ssh-args', but forcing a TTY for an interactive remote run.
-The stream-json transport wants no TTY (`-T'); the interactive login
-\(\\[sprig-login]) needs one, so swap `-T' for `-t' and keep the rest
-\(e.g. `-A')."
-  (cons "-t" (remove "-T" sprig-ssh-args)))
-
 ;;;; Transport and sink
 ;;
 ;; The transport turns the backend's raw output lines into a small,
@@ -329,6 +327,7 @@ The stream-json transport wants no TTY (`-T'); the interactive login
 ;;   (context TOKENS)          the turn's prompt size, i.e. context in use
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
+;;   (control-response ID SUB) the CLI's receipt for a request we sent
 ;;   (error MESSAGE)           a backend error to surface inline
 
 (defun sprig--filter (proc chunk)
@@ -463,6 +462,13 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
                                  (json-parse-string
                                   line :object-type 'alist :array-type 'array
                                   :null-object :null :false-object :false)))))
+         ;; The CLI's receipt for a control request we sent (e.g. our
+         ;; interrupt).  A `success' subtype confirms it landed; an `error'
+         ;; means it was refused.  `request_id' rides inside `response', so
+         ;; the sink can match it to the request it acks.
+         ((equal .type "control_response")
+          (list (list 'control-response
+                      .response.request_id .response.subtype)))
          ;; Turn complete.
          ((equal .type "result")
           (list (list 'done .total_cost_usd .is_error)))
@@ -533,7 +539,7 @@ fresh session rather than fail.")
           (with-current-buffer buf
             (setq sprig--process nil
                   sprig--busy nil)
-            (sprig--cancel-interrupt-timer)
+            (sprig--clear-interrupt)
             (sprig--status-refresh)
             (cond
              ;; A clean, expected teardown: interrupt, disconnect, or exit 0.
@@ -628,7 +634,7 @@ it reports a clean teardown rather than logging a failure."
   (when (process-live-p sprig--process)
     (process-put sprig--process :deliberate t)
     (delete-process sprig--process))
-  (sprig--cancel-interrupt-timer)
+  (sprig--clear-interrupt)
   (setq sprig--process nil sprig--busy nil))
 
 (defun sprig--send-user (text)
@@ -642,14 +648,18 @@ it reports a clean teardown rather than logging a failure."
 (defun sprig--send-control (request)
   "Send a control_request carrying REQUEST (a plist) to the session.
 The stream-json input channel accepts these beside user messages; a
-`set_permission_mode' request is how a turn is put into plan mode."
-  (let ((json (json-serialize
-               (list :type "control_request"
-                     :request_id (format "sprig-%d"
-                                          (setq sprig--control-counter
-                                                (1+ sprig--control-counter)))
-                     :request request))))
-    (process-send-string sprig--process (concat json "\n"))))
+`set_permission_mode' request is how a turn is put into plan mode.
+Returns the request id, so a caller that cares about the CLI's ack (the
+matching `control_response') can correlate it, as `sprig--interrupt-turn'
+does with the interrupt receipt."
+  (let* ((id (format "sprig-%d"
+                     (setq sprig--control-counter (1+ sprig--control-counter))))
+         (json (json-serialize
+                (list :type "control_request"
+                      :request_id id
+                      :request request))))
+    (process-send-string sprig--process (concat json "\n"))
+    id))
 
 (defun sprig--set-permission-mode (mode)
   "Ask the session to switch to permission MODE (e.g. \"plan\", \"auto\")."
@@ -657,10 +667,11 @@ The stream-json input channel accepts these beside user messages; a
   (setq sprig--permission-mode mode))
 
 (defun sprig--send-interrupt ()
-  "Ask the session to interrupt the turn in flight.
+  "Ask the session to interrupt the turn in flight, returning the request id.
 The CLI aborts the current turn and ends it with a `result', so the turn
 closes through the normal `done' path and the process stays live: unlike
-killing it, the next send needs no `--resume'."
+killing it, the next send needs no `--resume'.  The returned id matches
+the CLI's `control_response' receipt (see `sprig--interrupt-turn')."
   (sprig--send-control (list :subtype "interrupt")))
 
 (defun sprig--send-initialize ()
@@ -890,8 +901,9 @@ model via `sprig-review-consume'."
                       (setq sprig--session-id id)))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
+    (`(control-response ,id ,subtype) (sprig--interrupt-receipt id subtype))
     (`(done ,_ ,_) (setq sprig--busy nil)
-     (sprig--cancel-interrupt-timer)
+     (sprig--clear-interrupt)
      (sprig--status-refresh)))
   ;; A control-request is transport, not conversation: it carries no
   ;; renderable content, so it is answered above and not consumed.
@@ -976,12 +988,13 @@ mode is returned to \"auto\"."
   "Gracefully interrupt the in-flight turn, keeping the session live.
 Sends an `interrupt' control request; the CLI aborts the turn and ends it
 with a `result', so `sprig--busy' clears through the normal `done' path
-\(which also cancels the fallback timer) and the process stays up, needing
-no resume on the next send.  If no `done' arrives within
-`sprig-interrupt-timeout' seconds, `sprig--interrupt-timeout' kills the
-process instead, the old hard interrupt."
-  (sprig--send-interrupt)
-  (sprig--cancel-interrupt-timer)
+\(which also clears the fallback state) and the process stays up, needing
+no resume on the next send.  Should the CLI refuse the request (an error
+receipt, see `sprig--interrupt-receipt') or never end the turn within
+`sprig-interrupt-timeout' seconds (`sprig--interrupt-timeout'), it falls
+back to killing the process, the old hard interrupt."
+  (sprig--clear-interrupt)
+  (setq sprig--interrupt-request-id (sprig--send-interrupt))
   (when sprig-interrupt-timeout
     (setq sprig--interrupt-timer
           (run-at-time sprig-interrupt-timeout nil
@@ -989,11 +1002,30 @@ process instead, the old hard interrupt."
   (sprig--status-refresh)
   (message "sprig: interrupting the turn…"))
 
-(defun sprig--cancel-interrupt-timer ()
-  "Cancel this buffer's outstanding interrupt fallback timer, if any."
+(defun sprig--clear-interrupt ()
+  "Clear this buffer's outstanding graceful-interrupt state, if any.
+Cancels the fallback timer and forgets the request id, so a later receipt
+or timeout for a settled interrupt is ignored."
   (when sprig--interrupt-timer
     (cancel-timer sprig--interrupt-timer)
-    (setq sprig--interrupt-timer nil)))
+    (setq sprig--interrupt-timer nil))
+  (setq sprig--interrupt-request-id nil))
+
+(defun sprig--interrupt-receipt (id subtype)
+  "Act on the CLI's control_response ID with SUBTYPE for our interrupt.
+A `success' receipt just confirms the interrupt landed; the turn still
+ends through `done' (with the timer as a backstop), so nothing to do.  An
+`error' receipt means the CLI refused it, so fall back to the hard kill at
+once rather than waiting out `sprig-interrupt-timeout'.  Ignores receipts
+for anything but the outstanding interrupt."
+  (when (and sprig--interrupt-request-id
+             (equal id sprig--interrupt-request-id)
+             (not (equal subtype "success")))
+    (sprig--clear-interrupt)
+    (when sprig--busy
+      (sprig--teardown-process)
+      (sprig--status-refresh)
+      (message "sprig: the CLI refused the interrupt; killed the turn"))))
 
 (defun sprig--interrupt-timeout (buffer)
   "Kill BUFFER's turn after a graceful interrupt went unanswered.
@@ -1048,52 +1080,104 @@ surface."
       (sprig-review-set-remote (sprig--remote)))
     (pop-to-buffer buffer)))
 
-(declare-function term-mode "term" ())
-(declare-function term-char-mode "term" ())
+(defun sprig--login-command ()
+  "Command vector running `claude auth login', local or over SSH.
+Drives the paste-a-code OAuth flow (`--claudeai'), which needs no TTY: the
+CLI prints the authorization URL to stdout and reads the pasted code from
+stdin, so it runs down the same kind of pipe a session does.  A remote run
+sets CLAUDE_CONFIG_DIR with an `env' prefix the login shell expands; a
+local run gets it from the caller binding `process-environment'."
+  (let ((args (list sprig-program "auth" "login" "--claudeai"))
+        (remote-host (sprig--remote)))
+    (if remote-host
+        (let ((remote (mapconcat #'shell-quote-argument args " ")))
+          (when sprig-config-directory
+            (setq remote (concat "env CLAUDE_CONFIG_DIR="
+                                 (sprig--remote-dir-arg sprig-config-directory)
+                                 " " remote)))
+          (append (list sprig-ssh-program) sprig-ssh-args
+                  (list remote-host remote)))
+      args)))
+
+(defun sprig--login-url (text)
+  "Return the OAuth authorization URL printed in login output TEXT, or nil."
+  (and (string-match "\\(https://[^ \t\r\n]*oauth/authorize[^ \t\r\n]*\\)" text)
+       (match-string 1 text)))
 
 ;;;###autoload
 (defun sprig-login ()
-  "Log the `claude' CLI in for sprig's config dir, in a terminal.
-The stream-json transport a session runs on is headless, so it cannot
-drive the interactive `/login' OAuth flow.  This opens the interactive CLI
-in a `term' buffer instead, on the session host (over SSH with a TTY when
-`sprig-remote' is set, else locally) and with CLAUDE_CONFIG_DIR bound to
-`sprig-config-directory' when it is set.  Type `/login' there and complete
-the browser auth once; every headless sprig session on that host then
-reuses the stored credentials.
+  "Log the `claude' CLI in for sprig's config dir, without leaving Emacs.
+A session runs headless over the stream-json protocol, so it cannot drive
+the interactive `/login' itself.  This runs `claude auth login' down a
+pipe instead, on the session host (over SSH when `sprig-remote' is set,
+else locally) and with CLAUDE_CONFIG_DIR bound to `sprig-config-directory'
+when it is set.  It opens the authorization URL in your local browser
+\(the right place: the login is your account, not the host's), then reads
+the code the browser shows back and hands it to the CLI.  Every headless
+sprig session on that host then reuses the stored credentials.
 
 Run it once per host, and again whenever `sprig-config-directory' points
 at a config dir that is not yet logged in."
   (interactive)
-  (require 'term)
   (let* ((remote (sprig--remote))
          ;; A local run passes CLAUDE_CONFIG_DIR through the process env
-         ;; (no shell to expand `~', so expand here); a remote run sets it
-         ;; in the `env' prefix the remote login shell expands.
+         ;; (no shell to expand `~', so expand here); a remote one sets it
+         ;; in the `env' prefix of `sprig--login-command'.
          (process-environment
           (if (and sprig-config-directory (not remote))
               (cons (concat "CLAUDE_CONFIG_DIR="
                             (expand-file-name sprig-config-directory))
                     process-environment)
             process-environment))
-         (buffer
-          (if remote
-              (let ((inner (shell-quote-argument sprig-program)))
-                (when sprig-config-directory
-                  (setq inner (concat "env CLAUDE_CONFIG_DIR="
-                                      (sprig--remote-dir-arg sprig-config-directory)
-                                      " " inner)))
-                (apply #'make-term "sprig-login" sprig-ssh-program nil
-                       (append (sprig--ssh-tty-args) (list remote inner))))
-            (make-term "sprig-login" sprig-program))))
-    (set-buffer buffer)
-    (term-mode)
-    (term-char-mode)
-    (switch-to-buffer buffer)
-    (message "sprig-login: type /login to authenticate%s"
-             (if sprig-config-directory
-                 (format " (CLAUDE_CONFIG_DIR=%s)" sprig-config-directory)
-               ""))))
+         (proc (make-process
+                :name "sprig-login"
+                :buffer nil
+                :command (sprig--login-command)
+                :connection-type 'pipe
+                :coding 'utf-8-unix
+                :noquery t
+                :filter (lambda (p chunk)
+                          (process-put p :out
+                                       (concat (process-get p :out) chunk))))))
+    (unwind-protect
+        (let ((url nil) (waited 0.0))
+          ;; Wait for the CLI to print the authorization URL.
+          (while (and (process-live-p proc)
+                      (not (setq url (sprig--login-url
+                                      (or (process-get proc :out) ""))))
+                      (< waited 30))
+            (accept-process-output proc 0.2)
+            (setq waited (+ waited 0.2)))
+          (unless url
+            (error "sprig-login: no login URL from the CLI (see *sprig-login*)"))
+          (browse-url url)
+          (message "sprig-login: opened %s" url)
+          (let ((code (string-trim
+                       (read-string "Paste the code from the browser here: "))))
+            (when (string-empty-p code)
+              (error "sprig-login: no code entered"))
+            (process-send-string proc (concat code "\n")))
+          ;; Let the code exchange finish.
+          (while (process-live-p proc)
+            (accept-process-output proc 0.3))
+          (sprig--login-report proc))
+      (when (process-live-p proc)
+        (delete-process proc)))))
+
+(defun sprig--login-report (proc)
+  "Report the outcome of finished login PROC.
+On success just a message; on failure the CLI's output is shown in
+`*sprig-login*' so the reason is visible."
+  (if (eq (process-exit-status proc) 0)
+      (message "sprig-login: logged in%s"
+               (if sprig-config-directory
+                   (format " (%s)" sprig-config-directory) ""))
+    (with-current-buffer (get-buffer-create "*sprig-login*")
+      (erase-buffer)
+      (insert (or (process-get proc :out) ""))
+      (goto-char (point-min)))
+    (display-buffer "*sprig-login*")
+    (message "sprig-login: did not complete; see *sprig-login*")))
 
 ;;;; Folding commands
 
