@@ -1139,6 +1139,25 @@ and is fetched by the integration layer, not here."
   :type 'string
   :group 'sprig)
 
+(defcustom sprig-review-accept-instruction
+  "Yes, go ahead; use your judgement on any open choice."
+  "Affirmative the yes/accept verb sends to answer the agent's last question.
+The agent has the whole conversation in context, so a short yes resolves
+against whatever it just proposed (\"Want me to push?\" -> \"Yes\"); the
+trailing clause nudges it to pick when the question was an either/or.  For
+a genuinely open choice, compose a reply with `c c' instead."
+  :type 'string
+  :group 'sprig)
+
+(defcustom sprig-review-decline-instruction
+  "No, please don't; hold off and wait for my next instruction."
+  "Negative the no/decline verb sends to answer the agent's last question.
+The mirror of `sprig-review-accept-instruction': a short no, resolved by
+the agent against what it just proposed, telling it to stop rather than
+proceed.  For a reason or an alternative, compose a reply with `c c'."
+  :type 'string
+  :group 'sprig)
+
 (defun sprig-review-reject-instruction (changes)
   "Return an instruction asking the agent to undo CHANGES.
 CHANGES is a list of (FILE . HUNK-PLIST)."
@@ -1220,14 +1239,22 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
       (sprig-review--send (sprig-review-run-instruction cmd)))))
 
 (defun sprig-review-accept ()
-  "Accept the changes under review: commit them and clear the marks.
-Accepting is the whole gesture, so it sends the commit instruction
-(`sprig-review-commit-instruction') and clears any marks in one turn,
-rather than committing through a separate verb afterwards."
+  "Yes: affirm the agent's last question, the affirmative of what it asked.
+Sends `sprig-review-accept-instruction' as the next turn (\"Want me to
+push?\" -> \"Yes\").  The agent resolves the short yes against the
+conversation it already holds; this only answers, it does not commit
+(that is `C').  Its mirror is `sprig-review-decline'."
   (interactive)
-  (sprig-review--send sprig-review-commit-instruction)
-  (sprig-review-unmark-all)
-  (message "sprig: accepted (committing; marks cleared)"))
+  (sprig-review--send sprig-review-accept-instruction)
+  (message "sprig: yes"))
+
+(defun sprig-review-decline ()
+  "No: decline the agent's last question, the mirror of `sprig-review-accept'.
+Sends `sprig-review-decline-instruction' as the next turn, telling the
+agent to hold off rather than proceed."
+  (interactive)
+  (sprig-review--send sprig-review-decline-instruction)
+  (message "sprig: no"))
 
 (defun sprig-review-set-title (title)
   "Set this review's display TITLE in the header.
@@ -1484,9 +1511,7 @@ wrong thing to make easy."
   [["Answer"
     ("a" "answer, one question at a time" sprig-review-answer)
     ("r" "take every recommended option" sprig-review-answer-recommended)
-    ("s" "skip; go on unanswered" sprig-review-answer-skip)]
-   ["Marks"
-    ("k" "accept & commit" sprig-review-accept)]])
+    ("s" "skip; go on unanswered" sprig-review-answer-skip)]])
 
 ;;;; Answering: the a transient, and its buffer
 ;;
@@ -1641,14 +1666,15 @@ wrong thing to make easy."
   "Steer the conversation from the review buffer."
   [["Message"
     ("c" "compose & send" sprig-review-message)
+    ("y" "yes / accept" sprig-review-accept)
+    ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
     ("s" "steer the running turn" sprig-review-steer)
     ("r" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn" sprig-review-interrupt)]
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)
-    ("a" "accept & commit" sprig-review-accept)
-    ("C" "commit (keep marks)" sprig-review-commit)
+    ("C" "commit" sprig-review-commit)
     ("x" "run command" sprig-review-run)]])
 
 ;;;; Verb keybindings
@@ -1658,9 +1684,9 @@ wrong thing to make easy."
 (define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
-;; `a' answers, rather than accepting.  Accept commits and clears the marks
-;; (`c a' or `a k'), and a plain commit that keeps the marks is `C'; the top
-;; key was worth more to the question the agent is waiting on.
+;; `a' answers the agent's structured dialog; the yes/no reply to a plain
+;; prose question is `c y' / `c n' (not top-level: `n' is section motion).
+;; Commit is `C'.
 (define-key sprig-review-mode-map (kbd "a")   #'sprig-review-answer-dispatch)
 (define-key sprig-review-mode-map (kbd "C")   #'sprig-review-commit)
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
