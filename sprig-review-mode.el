@@ -231,12 +231,21 @@ Markup characters (`*', `#', ...) are hidden.  Has no effect when
   :group 'sprig)
 
 (defcustom sprig-context-window-tokens 200000
-  "Size of the model's context window, in tokens, for the header's Context %.
-The standard Claude window is 200000; raise it for a long-context (1M)
-session, or the reported percentage will run past 100.  The context size
-itself is read from each turn's own token usage, so only the window it is
-measured against is configured here."
+  "Baseline context-window size, in tokens, for the header's Context %.
+The standard Claude window is 200000.  The CLI does not report the true
+window, and a long-context (1M) session cannot be told from its model id,
+so a turn that uses more than this baseline auto-widens the denominator to
+the smallest tier in `sprig-context-window-tiers' that contains it: the
+percentage never runs past 100.  Set this to the real window to pin it."
   :type 'integer
+  :group 'sprig)
+
+(defcustom sprig-context-window-tiers '(200000 1000000)
+  "Known context-window sizes, ascending, that the header % auto-fits to.
+When a turn's context exceeds `sprig-context-window-tokens', the smallest
+tier here that still contains it becomes the denominator, so a 1M session
+reads against 1M rather than overflowing a 200k baseline."
+  :type '(repeat integer)
   :group 'sprig)
 
 ;;;; Face helpers
@@ -684,17 +693,37 @@ opening a child, and a wrapper here earns nothing to pay for it."
                                 'sprig-review-meta-key)
             "\n")))
 
+(defun sprig-review--context-window (tokens)
+  "Return the window size to measure TOKENS of context against, or nil.
+The smallest of `sprig-context-window-tokens' and the
+`sprig-context-window-tiers' that is at least TOKENS, so the percentage
+never runs past 100 (a long-context session the CLI does not flag widens
+to the tier that fits); TOKENS itself when it exceeds them all, and nil
+when neither is configured, so the header shows the bare count."
+  (let ((cands (sort (seq-filter (lambda (n) (and (integerp n) (> n 0)))
+                                 (cons sprig-context-window-tokens
+                                       (copy-sequence sprig-context-window-tiers)))
+                     #'<)))
+    (when cands
+      (or (seq-find (lambda (c) (>= c tokens)) cands) tokens))))
+
+(defun sprig-review--format-tokens (n)
+  "Format N tokens compactly, in thousands or millions."
+  (if (>= n 1000000) (format "%.1fM" (/ n 1000000.0))
+    (format "%.1fk" (/ n 1000.0))))
+
 (defun sprig-review--format-context (tokens)
-  "Return a header string for TOKENS of context in use, or nil.
-Shows the count in thousands and, when `sprig-context-window-tokens' is
-set, its share of that window as a percentage."
+  "Return a compact \"USED / WINDOW (PCT%)\" string for TOKENS, or nil.
+The window auto-fits TOKENS (see `sprig-review--context-window'), so the
+percentage stays within 100."
   (when (and (numberp tokens) (> tokens 0))
-    (let ((win sprig-context-window-tokens))
+    (let ((win (sprig-review--context-window tokens)))
       (if (and (numberp win) (> win 0))
-          (format "%.1fk / %dk  (%d%%)"
-                  (/ tokens 1000.0) (round (/ win 1000.0))
+          (format "%s / %s (%d%%)"
+                  (sprig-review--format-tokens tokens)
+                  (sprig-review--format-tokens win)
                   (round (* 100.0 (/ (float tokens) win))))
-        (format "%.1fk" (/ tokens 1000.0))))))
+        (sprig-review--format-tokens tokens)))))
 
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
@@ -719,10 +748,7 @@ META may carry :title, :project, :model, and :status."
                    (sprig-review--meta-line "Session" (plist-get model :session))
                    (sprig-review--meta-line
                     "Cost" (when (plist-get model :cost)
-                             (format "$%.4f" (plist-get model :cost))))
-                   (sprig-review--meta-line
-                    "Context" (sprig-review--format-context
-                               (plist-get model :context)))))
+                             (format "$%.4f" (plist-get model :cost))))))
       (when line (insert line)))
     (insert "\n")))
 
@@ -743,25 +769,31 @@ read, and a dialog is a question put to you, which wants the same air."
 ;; that nothing has moved for a while.
 
 (defun sprig-review--state (model)
-  "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended."
-  (cond
-   ;; Before anything else: the turn is not working, it is stopped, and it
-   ;; is stopped on you.
-   ((sprig-review-pending-dialog model)
-    (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
-   (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
-   ;; Sent, but nothing back yet: the transport is busy while it waits on the
-   ;; agent's first token, so this window would otherwise read as the previous
-   ;; turn's stale `✓ turn over'.
-   ((and (boundp 'sprig--busy) sprig--busy)
-    (list "▷" "sent, awaiting reply" 'sprig-review-pending))
-   ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
-   ;; What it cost is in the header, and is not what you were waiting to
-   ;; hear; the line says the one thing it is for.
-   ((plist-get model :done) (list "✓" "turn over" 'sprig-review-done))
-   ;; Replayed history, or a session not yet sent to: nothing is running,
-   ;; but no turn of ours ended either, so claim neither.
-   (t (list "●" "idle" 'sprig-review-idle))))
+  "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended.
+The context in use is appended to the text, since the state line sits where
+you are reading and is the natural place to watch the window fill."
+  (let ((base
+         (cond
+          ;; Before anything else: the turn is not working, it is stopped, and
+          ;; it is stopped on you.
+          ((sprig-review-pending-dialog model)
+           (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
+          (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
+          ;; Sent, but nothing back yet: the transport is busy while it waits on
+          ;; the agent's first token, so this window would otherwise read as the
+          ;; previous turn's stale `✓ turn over'.
+          ((and (boundp 'sprig--busy) sprig--busy)
+           (list "▷" "sent, awaiting reply" 'sprig-review-pending))
+          ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
+          ;; What it cost is in the header; the line says the one thing it is for.
+          ((plist-get model :done) (list "✓" "turn over" 'sprig-review-done))
+          ;; Replayed history, or a session not yet sent to: nothing is running,
+          ;; but no turn of ours ended either, so claim neither.
+          (t (list "●" "idle" 'sprig-review-idle))))
+        (ctx (sprig-review--format-context (plist-get model :context))))
+    (if ctx
+        (list (nth 0 base) (concat (nth 1 base) "  ·  " ctx) (nth 2 base))
+      base)))
 
 (defun sprig-review--insert-state (model)
   "Insert the state line, below the last message: what is going on, or ended.

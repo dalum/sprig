@@ -1073,21 +1073,28 @@ timestamp, or the state line's rule."
       (should (string-match-p "\\+new" sent)))))
 
 (ert-deftest sprig-review-mode-test-format-context ()
-  (let ((sprig-context-window-tokens 200000))
-    (should (equal (sprig-review--format-context 100000) "100.0k / 200k  (50%)"))
+  (let ((sprig-context-window-tokens 200000)
+        (sprig-context-window-tiers '(200000 1000000)))
+    (should (equal (sprig-review--format-context 100000) "100.0k / 200.0k (50%)"))
+    ;; Over the baseline auto-widens to the next tier, never past 100%.
+    (should (equal (sprig-review--format-context 250000) "250.0k / 1.0M (25%)"))
     (should-not (sprig-review--format-context 0))
     (should-not (sprig-review--format-context nil)))
-  ;; With no window set, the raw count still shows, no percentage.
-  (let ((sprig-context-window-tokens 0))
+  ;; With no window and no tiers configured, the raw count shows, no percentage.
+  (let ((sprig-context-window-tokens 0) (sprig-context-window-tiers nil))
     (should (equal (sprig-review--format-context 50000) "50.0k"))))
 
-(ert-deftest sprig-review-mode-test-header-shows-context ()
+(ert-deftest sprig-review-mode-test-state-line-shows-context ()
+  ;; The context in use rides on the state line, where the reader is watching
+  ;; the turn, not up in the header.
   (let ((sprig-context-window-tokens 200000)
+        (sprig-context-window-tiers '(200000 1000000))
         (model (sprig-review-build
                 '((context 100000) (text "hi") (done 0.01 nil)))))
     (sprig-review-tests--rendered model nil
-      (goto-char (point-min))
-      (should (re-search-forward "Context:.*100\\.0k / 200k.*50%" nil t)))))
+      (let ((line (car (sprig-review-tests--state-line))))
+        (should (string-match-p "turn over" line))
+        (should (string-match-p "100\\.0k / 200\\.0k (50%)" line))))))
 
 (ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it
