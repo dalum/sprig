@@ -91,7 +91,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `sprig-review-session` | `M-x` | Open a review buffer for a session (start fresh, or resume an id) |
 | `sprig-review-connect` | `M-x` | Start or resume the session owned by the current review buffer |
 | `sprig-review-open-file` | `M-x` | Review a session-log `.jsonl` file directly (offline, read-only) |
-| `sprig-login` | `M-x` | Open a terminal to log the CLI in for `sprig-config-directory` (once per host) |
+| `sprig-login` | `M-x` | Log the CLI in for `sprig-config-directory`, in your local browser (once per host) |
 
 ### Navigator
 
@@ -195,7 +195,7 @@ By default sprig shares the CLI's `~/.claude`, so its sessions sit alongside any
 (setq sprig-config-directory (expand-file-name "sprig/claude" (xdg-config-home)))
 ```
 
-A fresh config dir starts logged out. Because a session runs headless (over the stream-json protocol), it cannot drive the interactive `/login` flow itself, so run `M-x sprig-login` once per host: it opens the interactive CLI in a `term` buffer with the config dir set (over `ssh -t` when `sprig-remote` is set), where you type `/login` and finish the browser auth. Every headless sprig session on that host then reuses the stored credentials. Settings and `CLAUDE.md` under that dir are also separate from your main `~/.claude`.
+A fresh config dir starts logged out. A session runs headless (over the stream-json protocol) and cannot drive the interactive login itself, so run `M-x sprig-login` once per host. It runs `claude auth login` down a pipe with the config dir set, opens the authorization URL in your local browser (the right place: the login is your account, not the host's), and reads the code the browser shows back into the minibuffer for you to paste. It works the same for a remote session, over SSH. Every headless sprig session on that host then reuses the stored credentials. Settings and `CLAUDE.md` under that dir are also separate from your main `~/.claude`.
 
 ## Status / caveats
 
