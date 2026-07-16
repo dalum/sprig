@@ -80,6 +80,18 @@ where the diff faces' backgrounds would be a stripe across it."
   "Face for the removed-line count in a tool heading."
   :group 'sprig)
 
+(defface sprig-review-todo-done '((t :inherit shadow :strike-through t))
+  "Face for a completed item in a `TodoWrite' checklist."
+  :group 'sprig)
+
+(defface sprig-review-todo-active '((t :inherit warning :weight bold))
+  "Face for the in-progress item in a `TodoWrite' checklist."
+  :group 'sprig)
+
+(defface sprig-review-todo-pending '((t :inherit default))
+  "Face for a still-pending item in a `TodoWrite' checklist."
+  :group 'sprig)
+
 (defface sprig-review-user
   '((((class color) (background light)) :background "#eaeef8" :extend t)
     (((class color) (background dark))  :background "#2b3040" :extend t)
@@ -390,10 +402,31 @@ header instead pass their changes in, so this is only reached without one."
     (when (stringp val)
       (car (split-string val "\n")))))
 
+(defun sprig-review--todos (block)
+  "Return the todo list a `TodoWrite' BLOCK carries, or nil for another tool.
+Each element is the tool's own todo alist (`content', `status', and an
+`activeForm'); their order is the agent's, which is the reading order.
+Reads both input spellings, wire (a JSON string) and stored (an alist),
+through `sprig-review--parse-input'."
+  (when (equal (plist-get block :name) "TodoWrite")
+    (let ((obj (sprig-review--parse-input (plist-get block :input))))
+      (alist-get 'todos obj))))
+
+(defun sprig-review--todo-progress (todos)
+  "Return a \"N/M done\" count string for TODOS, or nil when there are none.
+This is the one thing a folded `TodoWrite' tells you, so it rides in the
+heading the way a diff's line counts do."
+  (when todos
+    (format "%d/%d done"
+            (seq-count (lambda (td) (equal (alist-get 'status td) "completed"))
+                       todos)
+            (length todos))))
+
 (defun sprig-review--tool-heading (block)
   "Return the single-line heading string for tool BLOCK."
   (let* ((name (or (plist-get block :name) "tool"))
          (changes (plist-get block :changes))
+         (todos (sprig-review--todos block))
          (summary (sprig-review--input-summary name (plist-get block :input)))
          (err (plist-get (plist-get block :result) :error)))
     (concat
@@ -402,6 +435,7 @@ header instead pass their changes in, so this is only reached without one."
       (changes
        (let ((c (car changes)))
          (concat "  " (plist-get c :file) "  " (sprig-review--stat-string c))))
+      (todos (concat "  " (sprig-review--todo-progress todos)))
       (summary (concat "  " (sprig-review--truncate
                              summary sprig-review-heading-max-width)))
       (t ""))
@@ -437,11 +471,31 @@ header instead pass their changes in, so this is only reached without one."
         (unless (string-empty-p text)
           (insert text "\n"))))))
 
+(defun sprig-review--todo-line (todo)
+  "Return the rendered line for one TODO alist: a status marker and its text.
+A completed item reads struck-through, the in-progress one stands out, and
+a pending one is plain, so the checklist's state is legible at a glance."
+  (let* ((status (alist-get 'status todo))
+         (content (or (alist-get 'content todo) ""))
+         (glyph (pcase status ("completed" "☑") ("in_progress" "▶") (_ "☐")))
+         (face (pcase status
+                 ("completed" 'sprig-review-todo-done)
+                 ("in_progress" 'sprig-review-todo-active)
+                 (_ 'sprig-review-todo-pending))))
+    (sprig-review--face (concat glyph " " content) face)))
+
+(defun sprig-review--insert-todos (todos)
+  "Insert TODOS as a checklist, one status-marked line each."
+  (dolist (td todos)
+    (insert (sprig-review--todo-line td) "\n")))
+
 (defun sprig-review--insert-tool (block)
-  "Insert tool BLOCK: heading, its file-change diffs, then its result.
+  "Insert tool BLOCK: heading, then its body (file diffs, todos, or result).
 Every tool folds to its one-line heading, so a turn reads as a list of
-what the agent did; TAB opens the change you want.  Set
-`sprig-review-expand-diffs' to render diff-bearing tools open instead."
+what the agent did; TAB opens the one you want.  A `TodoWrite' renders its
+checklist in place of a result, so the plan-of-work reads as a list rather
+than as a tool call.  Set `sprig-review-expand-diffs' to render
+diff-bearing tools open instead."
   (magit-insert-section (sprig-tool block
                                     (not (and sprig-review-expand-diffs
                                               (plist-get block :changes))))
@@ -449,10 +503,16 @@ what the agent did; TAB opens the change you want.  Set
     ;; Deferred so a folded tool keeps its body out of the buffer; magit only
     ;; draws the fold when the body goes through `magit-insert-section-body'.
     (magit-insert-section-body
-      (dolist (change (plist-get block :changes))
-        (sprig-review--insert-change change))
-      (when-let ((result (plist-get block :result)))
-        (sprig-review--insert-result result)))))
+      (let ((todos (sprig-review--todos block)))
+        (cond
+         ;; A TodoWrite's own result is a bookkeeping reminder; the checklist
+         ;; is the content worth reading, so show it and drop the result.
+         (todos (sprig-review--insert-todos todos))
+         (t
+          (dolist (change (plist-get block :changes))
+            (sprig-review--insert-change change))
+          (when-let ((result (plist-get block :result)))
+            (sprig-review--insert-result result))))))))
 
 (defvar markdown-hide-markup)
 (declare-function markdown-mode "markdown-mode" ())

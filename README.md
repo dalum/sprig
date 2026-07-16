@@ -115,7 +115,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 The review buffer is a read-only, Magit-like view of one session. It replays the whole transcript from the CLI's session log (`~/.claude/projects/<cwd>/<id>.jsonl` on the session host, fetched over SSH for a remote session) and, once connected, streams the in-flight turn in live. The agent's file edits render inline as a foldable diff, reconstructed from the `Edit` / `MultiEdit` / `Write` tool calls. Move with `n` / `p`, fold with `TAB`.
 
-Every tool call folds to its one-line heading, so a long turn reads as a list of what the agent did rather than as pages of diff; `TAB` opens the change you want to review. Set `sprig-review-expand-diffs` to `t` to have diff-bearing tools render open instead.
+Every tool call folds to its one-line heading, so a long turn reads as a list of what the agent did rather than as pages of diff; `TAB` opens the change you want to review. Set `sprig-review-expand-diffs` to `t` to have diff-bearing tools render open instead. A `TodoWrite` heading carries the plan's progress (`2/5 done`) and unfolds to the checklist itself, each item marked done, in progress, or pending, rather than to a bare tool result.
 
 Turns carry no role labels. Your own turns are tinted (`sprig-review-user`) and the agent's are not, which is the whole of the distinction, and only prose is padded with a blank line, so a turn's tool calls stay packed into one list.
 

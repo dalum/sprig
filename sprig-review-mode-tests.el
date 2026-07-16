@@ -63,6 +63,21 @@ timestamp, or the state line's rule."
        (tool-result "t1" nil "applied")
        (done 0.0123 nil)))))
 
+(defun sprig-review-tests--todo-model ()
+  "A model with one TodoWrite call carrying a three-item checklist."
+  (let ((input (json-serialize
+                (list :todos
+                      (vector
+                       (list :content "First" :status "completed"
+                             :activeForm "Doing first")
+                       (list :content "Second" :status "in_progress"
+                             :activeForm "Doing second")
+                       (list :content "Third" :status "pending"
+                             :activeForm "Doing third"))))))
+    (sprig-review-build
+     `((tool-call "t1" "TodoWrite" ,input)
+       (tool-result "t1" nil "Todos have been modified successfully")))))
+
 (ert-deftest sprig-review-mode-test-renders-text-and-diff ()
   (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (let ((s (buffer-string)))
@@ -211,6 +226,40 @@ timestamp, or the state line's rule."
     (sprig-review-tests--rendered model nil
       (should (equal (buffer-string)
                      "\non it\n\nthinking\nRead  a\n\n●  idle\n")))))
+
+(ert-deftest sprig-review-mode-test-todo-heading-shows-progress ()
+  ;; A folded TodoWrite still tells you how far along the plan is, the way a
+  ;; folded edit shows its line counts; the checklist itself is one TAB away.
+  (sprig-review-tests--rendered (sprig-review-tests--todo-model) nil
+    (let ((s (buffer-string)))
+      (should (string-match-p "^TodoWrite  1/3 done" s))
+      (should-not (string-match-p "☑" s)))))
+
+(ert-deftest sprig-review-mode-test-todo-checklist-expands ()
+  ;; Opening the TodoWrite shows the checklist, each item with a status
+  ;; marker, and no bookkeeping result line.
+  (sprig-review-tests--rendered (sprig-review-tests--todo-model) nil
+    (goto-char (point-min))
+    (re-search-forward "^TodoWrite")
+    (magit-section-show (magit-current-section))
+    (let ((s (buffer-string)))
+      (should (string-match-p "☑ First" s))
+      (should (string-match-p "▶ Second" s))
+      (should (string-match-p "☐ Third" s))
+      ;; The result is a reminder, not content; the checklist stands in for it.
+      (should-not (string-match-p "↳ result" s)))))
+
+(ert-deftest sprig-review-mode-test-todo-line-glyphs ()
+  ;; Each status maps to its own marker, so the checklist reads at a glance.
+  (should (string-prefix-p
+           "☑ " (substring-no-properties
+                 (sprig-review--todo-line '((content . "a") (status . "completed"))))))
+  (should (string-prefix-p
+           "▶ " (substring-no-properties
+                 (sprig-review--todo-line '((content . "b") (status . "in_progress"))))))
+  (should (string-prefix-p
+           "☐ " (substring-no-properties
+                 (sprig-review--todo-line '((content . "c") (status . "pending")))))))
 
 (defmacro sprig-review-tests--with-tz (tz &rest body)
   "Run BODY with the local timezone set to TZ, restoring it after."
