@@ -144,6 +144,105 @@
       (sprig--review-sink '(done nil nil))
       (should-not sprig--compacting))))
 
+(ert-deftest sprig-test-queue-waits-for-the-turn ()
+  "`c q' holds a message mid-turn and sends nothing until `done'."
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "then update the README")
+        ;; Nothing on the wire: the whole point is that it waits.
+        (should-not sent)
+        (should (equal sprig--queued '("then update the README")))
+        (sprig--review-sink '(done nil nil))
+        (should (equal sent '("then update the README")))
+        (should-not sprig--queued)))))
+
+(ert-deftest sprig-test-queue-sends-outright-when-idle ()
+  ;; No turn to wait for means the promise `after this turn' is already kept;
+  ;; holding it would strand the message until some later turn happened to end.
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy nil)
+        (sprig--review-queue "do it now")
+        (should (equal sent '("do it now")))
+        (should-not sprig--queued)))))
+
+(ert-deftest sprig-test-queue-flushes-one-turn-at-a-time ()
+  ;; Each queued message gets a turn of its own, so two do not run together
+  ;; into one message the agent reads as a single instruction.
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "first")
+        (sprig--review-queue "second")
+        (should (equal sprig--queued '("first" "second")))
+        (sprig--review-sink '(done nil nil))
+        (should (equal (reverse sent) '("first")))
+        (should (equal sprig--queued '("second")))
+        ;; That send set the busy flag again; its own `done' takes the next.
+        (should sprig--busy)
+        (sprig--review-sink '(done nil nil))
+        (should (equal (reverse sent) '("first" "second")))
+        (should-not sprig--queued)))))
+
+(ert-deftest sprig-test-queue-flushes-after-the-done-is-consumed ()
+  ;; Ordering: the queued `user' must be folded in after the `done' it waited
+  ;; for, or the transcript shows it sent into the turn it queued behind.
+  (with-temp-buffer
+    (let ((folded nil))
+      (cl-letf (((symbol-function 'sprig-review-consume)
+                 (lambda (event) (push (car-safe event) folded)))
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user) #'ignore))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "after")
+        (sprig--review-sink '(done nil nil))
+        (should (equal (reverse folded) '(done user)))))))
+
+(ert-deftest sprig-test-interrupt-drops-the-queue ()
+  ;; An interrupt ends the turn through `done', which would flush: firing the
+  ;; follow-up the instant you said stop is the one thing `c i' must not do.
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-interrupt) (lambda () "req-1"))
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "then update the README")
+        (sprig--interrupt-turn)
+        (should-not sprig--queued)
+        (sprig--review-sink '(done nil nil))
+        (should-not sent)))))
+
+(ert-deftest sprig-test-teardown-drops-the-queue ()
+  ;; The session is gone, so there is no turn left for the message to follow.
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+              ((symbol-function 'sprig--status-refresh) #'ignore))
+      (setq-local sprig--busy t)
+      (setq-local sprig--queued '("later"))
+      (sprig--teardown-process)
+      (should-not sprig--queued))))
+
 (ert-deftest sprig-test-parse-compacting-status ()
   ;; A compaction runs for a minute or more, so it is announced, not implied.
   (with-temp-buffer
@@ -1614,14 +1713,17 @@ Return the log directory."
       (should-not wrote))))
 
 (ert-deftest sprig-test-review-deliver-refuses-mid-turn ()
-  ;; An ordinary send still will not open a second turn; it points at `c s'.
+  ;; Deliver still will not open a second turn.  Only `c p' can reach this
+  ;; busy now (it needs a turn of its own for its permission mode), so the
+  ;; refusal points at the two verbs that do work mid-turn, not at itself.
   (with-temp-buffer
     (setq-local sprig--busy t)
     (cl-letf (((symbol-function 'sprig--ensure) #'ignore)
               ((symbol-function 'sprig--send-user)
                (lambda (_) (error "should not have sent"))))
       (let ((err (should-error (sprig--review-deliver "hi") :type 'user-error)))
-        (should (string-match-p "c s" (cadr err)))))))
+        (should (string-match-p "c c" (cadr err)))
+        (should (string-match-p "c q" (cadr err)))))))
 
 (ert-deftest sprig-test-undefine-faces-lets-a-reload-restyle ()
   ;; `defface' is a no-op on an already-defined face, so `sprig-reload' has

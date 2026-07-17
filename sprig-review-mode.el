@@ -37,6 +37,7 @@
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
+(declare-function sprig--review-queue "sprig" (text))
 (declare-function sprig--review-answer-dialog "sprig" (id input answers))
 (declare-function sprig--review-approve-plan "sprig" (id))
 (declare-function sprig--review-reject-plan "sprig" (id feedback))
@@ -52,6 +53,7 @@
 (defvar sprig--sink)
 (defvar sprig--busy)
 (defvar sprig--compacting)
+(defvar sprig--queued)
 (defvar sprig--session-id)
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
@@ -899,9 +901,19 @@ side bar carries a rule in the state colour, so the gutter marks the end of
 the turn as plainly as the line does."
   (pcase-let ((`(,glyph ,text ,face) (sprig-review--state model))
               (ctx (sprig-review--context-indicator (plist-get model :context)))
+              (queued (and (boundp 'sprig--queued) (length sprig--queued)))
               (start (point)))
     (magit-insert-section (sprig-state)
       (insert (sprig-review--face (format "%s  %s" glyph text) face))
+      ;; A queued message is invisible otherwise: it is not in the transcript
+      ;; (nothing was sent), and it fires on its own, so without this the turn
+      ;; ending would spawn a message the reader never asked for twice.  In
+      ;; its own face, like the context: it is not the turn's state, it is
+      ;; what happens next.
+      (when (and queued (> queued 0))
+        (insert (sprig-review--face "  ·  " face)
+                (sprig-review--face (format "%d queued" queued)
+                                    'sprig-review-pending)))
       (when ctx
         ;; The separator belongs to the line, the readout does not: the
         ;; context is coloured on its own terms, so a normal one does not
@@ -1431,6 +1443,12 @@ Falls back to a plain send when the turn has since finished, so a message
 does not go down with the turn it was composed against."
   (sprig--review-steer text))
 
+(defun sprig-review--queue (text)
+  "Hold TEXT until the in-flight turn ends (see `sprig--review-queue').
+Falls back to a plain send when no turn is running, for the same reason
+`sprig-review--steer' does."
+  (sprig--review-queue text))
+
 ;;;; Verbs
 
 (defun sprig-review--reject-pairs (sections)
@@ -1646,8 +1664,10 @@ On a diff hunk, best-effort move point to the first changed line."
   "Marked-section context prepended to the composed message, or nil.")
 (defvar-local sprig-review--compose-mode nil
   "Permission mode for the composed message (e.g. \"plan\"), or nil.")
-(defvar-local sprig-review--compose-steer nil
-  "Non-nil when the composed message steers the turn already in flight.")
+(defvar-local sprig-review--compose-queue nil
+  "Non-nil when the composed message waits for the in-flight turn to end.
+Nil is the ordinary `c c', which speaks now: it steers a running turn, and
+sends outright when none is running.")
 
 (defvar sprig-review-compose-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1671,11 +1691,19 @@ Uses only real marks, not the section-at-point fallback."
                                  (oref s start) (oref s end))))
                  secs "\n\n"))))
 
-(defun sprig-review-message (&optional plan steer)
-  "Compose a message and send it to this review's session.
+(defun sprig-review-message (&optional plan queue)
+  "Compose a message and send it to this review's session (`c c').
 Any marked sections are attached as context (see DESIGN.md's `c c').
-With PLAN non-nil, send the turn in plan mode (`c p').  With STEER
-non-nil, send it into the turn already in flight (`c s')."
+
+Says it now: with a turn running the message steers it (the agent takes it
+at its next tool-call boundary and carries on in the same turn), and with
+none it opens a turn of its own.  Which of the two is settled when you
+send, not when you start composing, so a turn that ends while you are
+still typing changes nothing you have to think about.
+
+With PLAN non-nil, send the turn in plan mode (`c p'), which needs a turn
+of its own and so refuses to fold into a running one.  With QUEUE non-nil,
+hold it until the running turn ends (`c q')."
   (interactive)
   (let ((review (current-buffer))
         (context (sprig-review--marked-context))
@@ -1686,11 +1714,11 @@ non-nil, send it into the turn already in flight (`c s')."
       (setq sprig-review--compose-target review
             sprig-review--compose-context context
             sprig-review--compose-mode (and plan "plan")
-            sprig-review--compose-steer steer))
+            sprig-review--compose-queue queue))
     (pop-to-buffer buf)
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
-             (if steer "STEER: goes into the running turn at its next step.  " "")
+             (if queue "QUEUED: waits for the running turn to end.  " "")
              (if context (format "%d section(s) attached.  "
                                  (length (sprig-review--marked-sections)))
                ""))))
@@ -1700,11 +1728,13 @@ non-nil, send it into the turn already in flight (`c s')."
   (interactive)
   (sprig-review-message t))
 
-(defun sprig-review-steer ()
-  "Compose a message and send it into the turn already in flight (`c s').
-The agent takes it at its next tool-call boundary and carries on in the
-same turn, so a turn heading the wrong way can be corrected without being
-interrupted and restarted.  With no turn running, this just sends."
+(defun sprig-review-queue ()
+  "Compose a message and send it once the running turn ends (`c q').
+The counterpart to a plain `c c', which speaks into the turn straight
+away: this leaves the turn alone to finish and speaks after, so a
+follow-up that is not a correction does not derail work that is going
+fine.  With no turn running there is nothing to wait for, so it just
+sends.  An interrupt drops the queue."
   (interactive)
   (sprig-review-message nil t))
 
@@ -1716,16 +1746,21 @@ interrupted and restarted.  With no turn running, this just sends."
          (review sprig-review--compose-target)
          (context sprig-review--compose-context)
          (mode sprig-review--compose-mode)
-         (steer sprig-review--compose-steer))
+         (queue sprig-review--compose-queue))
     (when (string-empty-p text) (user-error "Empty message"))
     (unless (buffer-live-p review) (user-error "The review buffer is gone"))
-    (quit-window t)
-    (with-current-buffer review
-      (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
-                       text)))
-        (if steer
-            (sprig-review--steer message)
-          (sprig-review--send message mode))))))
+    (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
+                     text)))
+      ;; Send before quitting, never after: `quit-window' kills this buffer,
+      ;; so a send that signals (a plan turn refused because one is already in
+      ;; flight) would take the composed prose down with it, leaving an error
+      ;; where the message used to be.  Signal first and the buffer survives,
+      ;; still holding the text, to send again or save.
+      (with-current-buffer review
+        (cond (queue (sprig-review--queue message))
+              (mode (sprig-review--send message mode))
+              (t (sprig-review--steer message)))))
+    (quit-window t)))
 
 (defun sprig-review-compose-abort ()
   "Cancel the message compose."
@@ -1993,11 +2028,11 @@ wrong thing to make easy."
 (transient-define-prefix sprig-review-dispatch ()
   "Steer the conversation from the review buffer."
   [["Message"
-    ("c" "compose & send" sprig-review-message)
+    ("c" "compose & send (steers a running turn)" sprig-review-message)
+    ("q" "compose & queue (after this turn)" sprig-review-queue)
     ("y" "yes / accept" sprig-review-accept)
     ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
-    ("s" "steer the running turn" sprig-review-steer)
     ("r" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn" sprig-review-interrupt)
     ("z" "compact context" sprig-review-compact)]

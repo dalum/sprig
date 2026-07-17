@@ -218,6 +218,14 @@ model: a compaction is something happening now, so replaying the log must
 not bring it back.  A compaction can run a minute or more, and an
 automatic one interrupts a turn mid-flight, so the state line says so
 instead of leaving the turn looking stalled.")
+(defvar-local sprig--queued nil
+  "Messages waiting for the in-flight turn to end, oldest first.
+Live transport state, like `sprig--busy': a queued message is something
+about to happen, not something the log records, so replaying cannot bring
+it back.  Flushed one per `done' (see `sprig--flush-queue'), so a queue of
+several plays out as one turn each rather than a single run-on message.
+Dropped on an interrupt or a process death: both mean the work the message
+was queued behind is not going to land, so the message's premise is gone.")
 (defvar-local sprig--interrupt-timer nil
   "Fallback timer armed while a graceful interrupt is outstanding, or nil.
 Set by `sprig--interrupt-turn' after it sends the `interrupt' control
@@ -582,6 +590,7 @@ fresh session rather than fail.")
           (with-current-buffer buf
             (setq sprig--process nil
                   sprig--busy nil)
+            (sprig--drop-queue "the session ended")
             (sprig--clear-interrupt)
             (sprig--status-refresh)
             (cond
@@ -677,6 +686,7 @@ it reports a clean teardown rather than logging a failure."
   (when (process-live-p sprig--process)
     (process-put sprig--process :deliberate t)
     (delete-process sprig--process))
+  (sprig--drop-queue "the session was stopped")
   (sprig--clear-interrupt)
   (setq sprig--process nil sprig--busy nil))
 
@@ -966,7 +976,13 @@ model via `sprig-review-consume'."
   ;; A control-request is transport, not conversation: it carries no
   ;; renderable content, so it is answered above and not consumed.
   (unless (eq (car-safe event) 'control-request)
-    (sprig-review-consume event)))
+    (sprig-review-consume event))
+  ;; The queue flushes after the `done' is consumed, never inside the pcase
+  ;; above: the flush sends, and a send consumes a `user' event of its own,
+  ;; which would then be folded in ahead of the `done' it was waiting for and
+  ;; read as though it had been sent into the turn it queued behind.
+  (when (eq (car-safe event) 'done)
+    (sprig--flush-queue)))
 
 (defun sprig--read-review-dir (&optional local)
   "Prompt for a session working directory, returning the string.
@@ -1017,14 +1033,59 @@ the message is delivered as a turn of its own rather than lost."
     (sprig-review-consume (list 'user text))
     (message "sprig: steering (the agent takes it at its next step)")))
 
+(defun sprig--review-queue (text)
+  "Hold TEXT until the in-flight turn ends, then send it as a turn of its own.
+The counterpart to `sprig--review-steer': steering changes the running
+turn's course, queueing leaves it alone and speaks once it is done.  So
+this is for the follow-up that should not derail what is running, the
+thing you would otherwise sit and wait to type.
+
+With no turn running there is nothing to wait for, so it just sends: the
+turn ended while the message was being composed, and the promise `after
+this turn' is already kept."
+  (if (not sprig--busy)
+      (sprig--review-deliver text)
+    (setq sprig--queued (append sprig--queued (list text)))
+    (sprig--status-refresh)
+    (message "sprig: queued (goes when the turn ends; c i drops it)")))
+
+(defun sprig--flush-queue ()
+  "Send the oldest queued message, if any, now the turn has ended.
+One per turn: each queued message gets a turn of its own, and the rest
+wait for that turn's own `done' to come round again."
+  (when sprig--queued
+    (let ((text (pop sprig--queued)))
+      (sprig--review-deliver text)
+      (message "sprig: sent the queued message%s"
+               (if sprig--queued
+                   (format " (%d still queued)" (length sprig--queued))
+                 "")))))
+
+(defun sprig--drop-queue (why)
+  "Forget any queued messages, reporting WHY, the thing that dropped them.
+Called where the turn ends in a way that unmakes what the queue was
+waiting for.  The text is echoed, not silently binned: it is unrecoverable
+otherwise, and the compose buffer that held it is long gone."
+  (when sprig--queued
+    (message "sprig: %s, dropped %d queued message(s): %s"
+             why (length sprig--queued)
+             (mapconcat (lambda (m) (format "%S" (truncate-string-to-width m 40 nil nil t)))
+                        sprig--queued "; "))
+    (setq sprig--queued nil)
+    (sprig--status-refresh)))
+
 (defun sprig--review-deliver (text &optional mode)
   "Send TEXT as this review buffer's own next user turn, echoing it locally.
 Used when the review buffer owns the session.  MODE, when given, sets the
 permission mode first (e.g. \"plan\"); with none, a session left in plan
 mode is returned to \"auto\"."
   (sprig--ensure)
+  ;; Reached with a turn running only from a verb that needs a turn of its
+  ;; own, `c p' being the one: a plan turn sets the permission mode first, so
+  ;; it cannot fold into a turn already running under another one.  The verbs
+  ;; that can fold in steer (`c c'), or wait (`c q'), and never come here busy.
   (when sprig--busy
-    (user-error "A turn is already in flight (steer it with `c s')"))
+    (user-error "A turn is already in flight (say it with `c c', or wait with `c q')"))
   (cond ((and mode (not (equal mode sprig--permission-mode)))
          (sprig--set-permission-mode mode))
         ((and (null mode) (equal sprig--permission-mode "plan"))
@@ -1050,7 +1111,13 @@ with a `result', so `sprig--busy' clears through the normal `done' path
 no resume on the next send.  Should the CLI refuse the request (an error
 receipt, see `sprig--interrupt-receipt') or never end the turn within
 `sprig-interrupt-timeout' seconds (`sprig--interrupt-timeout'), it falls
-back to killing the process, the old hard interrupt."
+back to killing the process, the old hard interrupt.
+
+Drops the queue, since the interrupt ends the turn through `done' and
+would otherwise flush it: you stopped the turn, so the follow-up you
+queued behind it would fire the moment you said stop, which is the last
+thing `c i' should mean."
+  (sprig--drop-queue "interrupted")
   (sprig--clear-interrupt)
   (setq sprig--interrupt-request-id (sprig--send-interrupt))
   (when sprig-interrupt-timeout

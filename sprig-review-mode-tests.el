@@ -1497,8 +1497,8 @@ the fold learns the id from the result rather than from the call."
           (should (equal sent-mode "plan")))))))
 
 (ert-deftest sprig-review-mode-test-compose-steer ()
-  ;; `c s' routes to the steer path, not the ordinary send, and carries any
-  ;; marked context with it just the same.
+  ;; A plain `c c' routes to the steer path, not the ordinary send, and
+  ;; carries any marked context with it just the same.
   (with-temp-buffer
     (sprig-review-mode)
     (let ((review (current-buffer)))
@@ -1508,7 +1508,7 @@ the fold learns the id from the result rather than from the call."
         (setq sprig-review--compose-target review
               sprig-review--compose-context "Regarding this hunk"
               sprig-review--compose-mode nil
-              sprig-review--compose-steer t)
+              sprig-review--compose-queue nil)
         (let (steered sent)
           (cl-letf (((symbol-function 'sprig-review--steer)
                      (lambda (text) (setq steered text)))
@@ -1520,24 +1520,93 @@ the fold learns the id from the result rather than from the call."
           (should (equal steered
                          "Regarding:\n\nRegarding this hunk\n\nactually, stop and do X")))))))
 
-(ert-deftest sprig-review-mode-test-steer-composes-with-the-flag ()
-  ;; `sprig-review-steer' opens the compose buffer marked to steer, and in no
-  ;; permission mode of its own: a turn in flight has already picked one.
+(ert-deftest sprig-review-mode-test-queue-composes-with-the-flag ()
+  ;; `sprig-review-queue' opens the compose buffer marked to wait, and in no
+  ;; permission mode of its own: the turn it queues behind has picked one.
   (with-temp-buffer
     (sprig-review-mode)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
-      (sprig-review-steer))
+      (sprig-review-queue))
     (with-current-buffer "*sprig-message*"
-      (should sprig-review--compose-steer)
+      (should sprig-review--compose-queue)
       (should-not sprig-review--compose-mode))
-    ;; Whereas a plain `c c' compose does not steer.
+    ;; Whereas a plain `c c' compose does not wait: it speaks now.
     (with-temp-buffer
       (sprig-review-mode)
       (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
         (sprig-review-message))
       (with-current-buffer "*sprig-message*"
-        (should-not sprig-review--compose-steer)))
+        (should-not sprig-review--compose-queue)))
     (kill-buffer "*sprig-message*")))
+
+(ert-deftest sprig-review-mode-test-compose-send-routes-by-flag ()
+  "A plain `c c' steers, `c q' queues, `c p' delivers with its mode."
+  (dolist (case '((nil     nil    steer)
+                  (nil     t      queue)
+                  ("plan"  nil    send)))
+    (pcase-let ((`(,mode ,queue ,want) case)
+                (took nil))
+      (with-temp-buffer
+        (let ((review (current-buffer)))
+          (sprig-review-mode)
+          (with-current-buffer (get-buffer-create "*sprig-message*")
+            (sprig-review-compose-mode)
+            (erase-buffer)
+            (insert "do the thing")
+            (setq sprig-review--compose-target review
+                  sprig-review--compose-context nil
+                  sprig-review--compose-mode mode
+                  sprig-review--compose-queue queue)
+            (cl-letf (((symbol-function 'quit-window) #'ignore)
+                      ((symbol-function 'sprig-review--steer)
+                       (lambda (_) (setq took 'steer)))
+                      ((symbol-function 'sprig-review--queue)
+                       (lambda (_) (setq took 'queue)))
+                      ((symbol-function 'sprig-review--send)
+                       (lambda (&rest _) (setq took 'send))))
+              (sprig-review-compose-send)))
+          (should (eq took want))))))
+  (kill-buffer "*sprig-message*"))
+
+(ert-deftest sprig-review-mode-test-compose-send-keeps-text-when-the-send-fails ()
+  ;; `quit-window' kills the compose buffer, so sending has to come first: a
+  ;; `c p' refused mid-turn used to signal after the kill and take the prose
+  ;; with it, leaving the user an error where their message had been.
+  (with-temp-buffer
+    (let ((review (current-buffer))
+          (quit nil))
+      (sprig-review-mode)
+      (with-current-buffer (get-buffer-create "*sprig-message*")
+        (sprig-review-compose-mode)
+        (erase-buffer)
+        (insert "plan me something")
+        (setq sprig-review--compose-target review
+              sprig-review--compose-context nil
+              sprig-review--compose-mode "plan"
+              sprig-review--compose-queue nil)
+        (cl-letf (((symbol-function 'quit-window) (lambda (&rest _) (setq quit t)))
+                  ((symbol-function 'sprig-review--send)
+                   (lambda (&rest _) (user-error "A turn is already in flight"))))
+          (should-error (sprig-review-compose-send) :type 'user-error))
+        ;; The window never quit, so the buffer lives and still holds the text.
+        (should-not quit)
+        (should (equal (string-trim (buffer-string)) "plan me something"))))
+    (kill-buffer "*sprig-message*")))
+
+(ert-deftest sprig-review-mode-test-state-shows-the-queue ()
+  "A queued message is visible on the state line, and only while queued."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((inhibit-read-only t))
+      (setq-local sprig--busy t)
+      (setq-local sprig--queued '("later, do X" "and then Y"))
+      (sprig-review--insert-state nil)
+      (should (string-match-p "2 queued" (buffer-string)))
+      (erase-buffer)
+      ;; Flushed: the line stops advertising a queue that is gone.
+      (setq-local sprig--queued nil)
+      (sprig-review--insert-state nil)
+      (should-not (string-match-p "queued" (buffer-string))))))
 
 ;;;; A review buffer that owns its session
 
