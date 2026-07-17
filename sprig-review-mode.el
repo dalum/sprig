@@ -51,6 +51,9 @@
 (defvar sprig--process)
 (defvar sprig--sink)
 (defvar sprig--busy)
+(defvar sprig--session-id)
+(defvar sprig--working-dir)
+(defvar sprig--remote-override)
 
 ;;;; Faces
 
@@ -1466,7 +1469,12 @@ point is in none."
 On a tool-call section, the command that tool ran; on a prose section, the
 shell command in the fenced code block point is in (or its sole one), which
 lets you run a command the agent proposed but did not execute.  Acts on the
-marked section, or the one at point when nothing is marked."
+marked section, or the one at point when nothing is marked.
+
+Steers rather than sends: asking for a command while the agent is working
+is the case that matters (it is usually a correction to what you are
+watching), and waiting out the turn to ask would defeat it.  With no turn
+running this is an ordinary send."
   (interactive)
   (let* ((sections (sprig-review--marked-sections))
          (tool (seq-find (lambda (s) (eq (oref s type) 'sprig-tool)) sections))
@@ -1478,7 +1486,7 @@ marked section, or the one at point when nothing is marked."
                     (prose (sprig-review--prose-command prose))
                     (t (user-error
                         "No tool call or command block marked or at point")))))
-    (sprig-review--send (sprig-review-run-instruction cmd))))
+    (sprig-review--steer (sprig-review-run-instruction cmd))))
 
 (defun sprig-review-accept ()
   "Yes: affirm the agent's last question, the affirmative of what it asked.
@@ -1506,6 +1514,34 @@ this affects only what the navigator and header show for the open buffer."
    (list (read-string "Title: " (plist-get sprig-review--meta :title))))
   (setq sprig-review--meta (plist-put sprig-review--meta :title title))
   (sprig-review--refresh))
+
+(declare-function sprig-review-session "sprig" (dir &optional session-id local fork))
+
+(defun sprig-review-new ()
+  "Start a fresh conversation in this session's directory (`s n').
+This session is left alone: the new one gets its own review buffer and its
+own session, which is what you want when the next piece of work is
+unrelated rather than a continuation of this one.  Call
+`sprig-review-session' directly to be asked for a different directory."
+  (interactive)
+  (sprig-review-session sprig--working-dir nil (null sprig--remote-override)))
+
+(defun sprig-review-fork ()
+  "Fork this session into one of its own, leaving this one untouched (`s f').
+The fork replays this session's history and carries it on under a session
+id of its own, so the two diverge from here: this buffer's session is not
+written to again by the fork.  The CLI forks from the end of a session, so
+this branches from where the conversation now stands, not from point.
+
+The fork is only made on its first send, which is when the CLI is asked to
+resume this session `--fork-session'; until then the new buffer is just a
+replay of this history."
+  (interactive)
+  (unless sprig--session-id
+    (user-error "This session has no id yet; send something first, then fork"))
+  (sprig-review-session sprig--working-dir sprig--session-id
+                        (null sprig--remote-override) t)
+  (message "sprig: forked; the branch starts at its first send"))
 
 (defun sprig-review-retry ()
   "Re-send the most recent user turn."
@@ -1923,12 +1959,21 @@ wrong thing to make easy."
     ("C" "commit" sprig-review-commit)
     ("x" "run command / fenced block" sprig-review-run)]])
 
+(transient-define-prefix sprig-review-session-dispatch ()
+  "Start or fork a session from the review buffer.
+`c' steers the conversation this buffer already owns; `s' is where a
+session of its own begins."
+  [["Session"
+    ("n" "new conversation" sprig-review-new)
+    ("f" "fork this session" sprig-review-fork)]])
+
 ;;;; Verb keybindings
 
 (define-key sprig-review-mode-map (kbd "SPC") #'sprig-review-toggle-mark)
 (define-key sprig-review-mode-map (kbd "m")   #'sprig-review-toggle-mark)
 (define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
+(define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

@@ -259,6 +259,43 @@
         (should-not (member "--append-system-prompt" args))
         (should-not (member "--resume" args))))))
 
+(ert-deftest sprig-test-fork-session-args ()
+  ;; A fork resumes its parent and asks the CLI to carry that history on
+  ;; under an id of its own, so the parent's log is not written to.
+  (with-temp-buffer
+    (let ((sprig-model nil) (sprig-system-prompt nil) (sprig-extra-args nil)
+          (sprig--session-id "parent-1") (sprig--fork-session t))
+      (let ((args (sprig--base-args)))
+        (should (member "--resume" args))
+        (should (member "parent-1" args))
+        (should (member "--fork-session" args))))
+    ;; A plain resume never forks, or every send would branch the session.
+    (let ((sprig-model nil) (sprig-system-prompt nil) (sprig-extra-args nil)
+          (sprig--session-id "parent-1") (sprig--fork-session nil))
+      (should-not (member "--fork-session" (sprig--base-args))))
+    ;; No session to fork from: nothing to resume, so nothing to fork.
+    (let ((sprig-model nil) (sprig-system-prompt nil) (sprig-extra-args nil)
+          (sprig--session-id nil) (sprig--fork-session t))
+      (should-not (member "--fork-session" (sprig--base-args))))))
+
+(ert-deftest sprig-test-fork-takes-the-new-session-id ()
+  ;; The CLI answers a fork with the new session's own id.  It has to replace
+  ;; the parent id the fork resumed from, and the fork flag has to clear, or
+  ;; the next send would fork the parent again instead of continuing here.
+  (with-temp-buffer
+    (let ((sprig--session-id "parent-1") (sprig--fork-session t))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+        (sprig--review-sink '(session "fork-2")))
+      (should (equal sprig--session-id "fork-2"))
+      (should-not sprig--fork-session)))
+  ;; Without a fork, an id already captured stands: the CLI repeats it on
+  ;; every resume, and taking it again would be a no-op at best.
+  (with-temp-buffer
+    (let ((sprig--session-id "sess-1") (sprig--fork-session nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+        (sprig--review-sink '(session "sess-1")))
+      (should (equal sprig--session-id "sess-1")))))
+
 (ert-deftest sprig-test-command-local ()
   (with-temp-buffer
     (let ((sprig-remote nil) (sprig-program "claude") (sprig-directory nil))

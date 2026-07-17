@@ -133,12 +133,15 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
-| `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute) |
+| `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute). Steers, so it lands in a turn already running |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
 | `c` | Transient, listing every verb: `c c` compose & send, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c s` steer the running turn, `c r` resend last turn, `c i` interrupt, `c z` compact the context (`C-u c z` steers the summary), and `c k` / `c C` / `c x` for reject / commit / run |
+| `s` | Transient for starting a session of its own: `s n` new conversation, `s f` fork this one |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel; a plain `c c` afterwards returns to normal execution. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
+
+Where `c` steers the conversation the buffer already owns, `s` is where a session of its own begins. `s n` starts a fresh conversation in this session's directory, leaving this one alone; `M-x sprig-review-session` asks for a different directory. `s f` **forks**: the new buffer replays this history and carries it on under a session id of its own, so the two diverge from here and the parent's log is never written to again. The CLI forks from the end of a session, so the branch starts from where the conversation now stands, not from point; the fork itself is only made on its first send, until which the new buffer is just a replay.
 
 `c s` **steers the turn already in flight**, rather than waiting it out or killing it. The CLI's stdin stays open for the length of a turn, so the message is queued and handed to the agent at its next tool-call boundary: it reads it and changes course *within the same turn*, no interrupt and no restart. Watching a turn head the wrong way, `c s` is the cheap correction and `c i` the expensive one. A `c c` mid-turn still refuses, since that would be a second turn. If the turn happens to finish while you are still composing, the message is sent as an ordinary turn rather than lost.
 

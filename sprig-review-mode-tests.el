@@ -1227,7 +1227,40 @@ the fold learns the id from the result rather than from the call."
           (should (= 2 (length (seq-uniq (mapcar #'buffer-name buffers))))))
       (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))
 
+(ert-deftest sprig-review-mode-test-fork-gets-its-own-buffer ()
+  ;; A fork carries its parent's id until the CLI answers with its own, so it
+  ;; must not land in the parent's buffer: that would stomp the very session
+  ;; it was forked from.  It resumes the parent id with the fork flag set.
+  (let ((sprig-remote nil) parent forked)
+    (unwind-protect
+        (progn
+          (setq parent (sprig-review-session "/tmp/sprig-fork-probe/" "sess-1"))
+          (setq forked (sprig-review-session "/tmp/sprig-fork-probe/" "sess-1"
+                                             nil t))
+          (should-not (eq parent forked))
+          (with-current-buffer forked
+            (should (equal sprig--session-id "sess-1"))
+            (should sprig--fork-session)
+            (should (string-match-p "fork" (buffer-name))))
+          ;; The parent is left alone: it is no fork, and keeps its own buffer.
+          (with-current-buffer parent
+            (should-not sprig--fork-session))
+          ;; Opening the parent again still reuses the parent's buffer.
+          (should (eq parent (sprig-review-session "/tmp/sprig-fork-probe/"
+                                                   "sess-1"))))
+      (dolist (b (list parent forked))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest sprig-review-mode-test-fork-needs-a-session ()
+  ;; Nothing to fork from before the session has an id of its own.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--session-id nil)
+    (should-error (sprig-review-fork) :type 'user-error)))
+
 (ert-deftest sprig-review-mode-test-run-verb ()
+  ;; `x' steers rather than sends, so asking for a command lands in the turn
+  ;; you are watching instead of waiting it out.
   (let ((model (sprig-review-build
                 `((tool-call "b1" "Bash"
                              ,(json-serialize (list :command "make test")))
@@ -1236,7 +1269,7 @@ the fold learns the id from the result rather than from the call."
       (goto-char (point-min))
       (re-search-forward "^Bash  ")
       (let (sent)
-        (cl-letf (((symbol-function 'sprig-review--send)
+        (cl-letf (((symbol-function 'sprig-review--steer)
                    (lambda (text) (setq sent text))))
           (sprig-review-run))
         (should (string-match-p "make test" sent))))))
@@ -1261,7 +1294,7 @@ the fold learns the id from the result rather than from the call."
                 '((text "First:\n\n```sh\nmake test\n```\n\nOr:\n\n```bash\n./deploy.sh\n```\n\nWhich?")))))
     (sprig-review-tests--rendered model nil
       (let (sent)
-        (cl-letf (((symbol-function 'sprig-review--send)
+        (cl-letf (((symbol-function 'sprig-review--steer)
                    (lambda (text) (setq sent text))))
           (goto-char (point-min)) (search-forward "make test")
           (sprig-review-run)

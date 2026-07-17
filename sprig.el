@@ -201,6 +201,14 @@ Example, hiding /tmp and everything under it:
   "The stream-json `claude' process bound to this conversation buffer.")
 (defvar-local sprig--session-id nil
   "Session id captured from the CLI, used for --resume.")
+(defvar-local sprig--fork-session nil
+  "Non-nil while this buffer's session is still to be forked off its parent.
+Set by `sprig-review-session' for a fork, where `sprig--session-id' starts
+out as the *parent's* id so the spawn resumes it; the added
+`--fork-session' then makes the CLI continue that history under an id of
+its own rather than writing to the parent's log.  Cleared as soon as the
+CLI hands that id back, since the fork has happened by then and a later
+send must resume the fork rather than fork the parent afresh.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
 (defvar-local sprig--interrupt-timer nil
@@ -274,7 +282,10 @@ configured default."
    (when sprig-system-prompt
      (list "--append-system-prompt" sprig-system-prompt))
    (when sprig--session-id
-     (list "--resume" sprig--session-id))
+     (append (list "--resume" sprig--session-id)
+             ;; Fork the resumed session rather than write on into it, so
+             ;; the parent conversation is left exactly as it was.
+             (when sprig--fork-session (list "--fork-session"))))
    sprig-extra-args))
 
 (defun sprig--remote-dir-arg (dir)
@@ -903,8 +914,18 @@ Keeps the transport bookkeeping (session id, permission mode, busy flag)
 in step without a Markdown transcript, then folds EVENT into the review
 model via `sprig-review-consume'."
   (pcase event
-    (`(session ,id) (when (and id (not sprig--session-id))
-                      (setq sprig--session-id id)))
+    (`(session ,id)
+     (when id
+       (cond
+        ;; A fork answers with the new session's own id, and it has to be
+        ;; taken over the parent's: the parent id was only ever here to
+        ;; resume from, and leaving it would make the next send fork the
+        ;; parent again rather than carry the fork on.
+        (sprig--fork-session
+         (setq sprig--session-id id
+               sprig--fork-session nil))
+        ((not sprig--session-id)
+         (setq sprig--session-id id)))))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
     (`(control-response ,id ,subtype) (sprig--interrupt-receipt id subtype))
@@ -1046,7 +1067,7 @@ back to killing the process; the session resumes on the next send."
         (message "sprig: interrupt timed out; killed the turn (resumes on next send)")))))
 
 ;;;###autoload
-(defun sprig-review-session (dir &optional session-id local)
+(defun sprig-review-session (dir &optional session-id local fork)
   "Open a review buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
@@ -1055,27 +1076,35 @@ send; without, the buffer starts empty and a send opens a fresh session.
 LOCAL non-nil (interactively, a prefix argument) forces the session to
 run on the local machine even when `sprig-remote' is set; its log then
 lives locally and it is driven from its own review buffer rather than the
-remote navigator's list.  The review buffer is the only conversation
-surface."
+remote navigator's list.  FORK non-nil resumes SESSION-ID under an id of
+its own (see `sprig--fork-session'), so the replayed history is carried on
+in a session of its own and the parent is left untouched.  The review
+buffer is the only conversation surface."
   (interactive
    (let ((local current-prefix-arg))
      (list (sprig--read-review-dir local) nil local)))
   (require 'sprig-review-mode)
-  (let* ((label (format "*sprig-review: %s*"
+  (let* ((label (format "*sprig-review: %s%s*"
                         (or session-id
                             (and dir (file-name-nondirectory
                                       (directory-file-name dir)))
-                            "new")))
+                            "new")
+                        (if fork " (fork)" "")))
          ;; A resumed session is named by its id, and reusing that buffer is
          ;; right: opening one session twice should land in one buffer.  A
          ;; fresh session has no id yet, so its label is only the directory;
          ;; that must be made unique, or a second new session in the same
          ;; directory would reuse — and stomp — the first one's buffer while
-         ;; its process keeps streaming into it.
-         (name (if session-id label (generate-new-buffer-name label)))
+         ;; its process keeps streaming into it.  A fork carries its parent's
+         ;; id until the CLI answers with its own, so it must be uniquified
+         ;; too, or it would reuse the very buffer it was forked from.
+         (name (if (and session-id (not fork))
+                   label
+                 (generate-new-buffer-name label)))
          (buffer (sprig-review-buffer name)))
     (with-current-buffer buffer
       (setq sprig--session-id session-id
+            sprig--fork-session (and fork session-id t)
             sprig--working-dir dir
             sprig--remote-override (if local nil 'inherit)
             sprig--sink #'sprig--review-sink
