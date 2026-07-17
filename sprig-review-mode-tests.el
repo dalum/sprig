@@ -1187,7 +1187,11 @@ the fold learns the id from the result rather than from the call."
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))
     ;; Below the first threshold: bare count, no escalation face.
-    (should (equal (sprig-review--context-indicator 90000) '("90.0k" . nil)))
+    ;; Below the thresholds it still carries a face of its own, never nil:
+    ;; inheriting the state face would paint a normal context yellow purely
+    ;; because a turn was running.
+    (should (equal (sprig-review--context-indicator 90000)
+                   '("90.0k" . sprig-review-context)))
     ;; Large and very large: a word and an escalating face.
     (should (equal (sprig-review--context-indicator 160000)
                    '("160.0k (large)" . sprig-review-context-large)))
@@ -1214,6 +1218,19 @@ the fold learns the id from the result rather than from the call."
       (should (re-search-forward "large" nil t))
       (should (eq (get-text-property (1- (point)) 'font-lock-face)
                   'sprig-review-context-large)))))
+
+(ert-deftest sprig-review-mode-test-context-face-is-not-the-turn-face ()
+  ;; A normal context must not be painted by the turn: the busy state and
+  ;; the large-context face are both yellow, so inheriting the state face
+  ;; made a perfectly ordinary context read as a warning mid-turn.
+  (let ((sprig-context-large-tokens 150000)
+        (sprig-context-huge-tokens 200000)
+        (model (sprig-review-build '((context 90000) (text "hi")))))
+    (sprig-review-tests--rendered model nil
+      (goto-char (point-min))
+      (should (re-search-forward "90\\.0k" nil t))
+      (should (eq (get-text-property (1- (point)) 'font-lock-face)
+                  'sprig-review-context)))))
 
 (ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it

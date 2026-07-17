@@ -142,6 +142,16 @@ Softer than `sprig-review-working' (not bold): the turn is on its way but
 nothing has come back yet."
   :group 'sprig)
 
+(defface sprig-review-context
+  '((t :inherit shadow))
+  "State-line face for a context that has not grown large.
+The readout is ambient rather than a signal at this size, so it is dimmed
+and, above all, coloured independently of the turn: it must not inherit
+the state's own face, or a normal context would read as a warning merely
+because a turn was in flight (the busy state and `sprig-review-context-large'
+are both yellow)."
+  :group 'sprig)
+
 (defface sprig-review-context-large
   '((t :inherit warning :weight bold))
   "State-line face for a context that has grown large.
@@ -797,8 +807,10 @@ opening a child, and a wrapper here earns nothing to pay for it."
 The count is always shown; crossing `sprig-context-large-tokens' or
 `sprig-context-huge-tokens' escalates the face and adds a word, so the
 readout is a signal the context has grown large rather than a percentage
-against a window the CLI never reports.  FACE is nil below the thresholds,
-so the caller keeps the surrounding state-line face."
+against a window the CLI never reports.  FACE is always one of the context
+faces, never nil: the readout says how big the context is and nothing about
+the turn, so it is coloured on its own terms rather than inheriting the
+state line's face (see `sprig-review-context')."
   (when (and (numberp tokens) (> tokens 0))
     (let ((count (sprig-review--format-tokens tokens)))
       (cond
@@ -806,7 +818,7 @@ so the caller keeps the surrounding state-line face."
         (cons (concat count " (very large)") 'sprig-review-context-huge))
        ((and sprig-context-large-tokens (>= tokens sprig-context-large-tokens))
         (cons (concat count " (large)") 'sprig-review-context-large))
-       (t (cons count nil))))))
+       (t (cons count 'sprig-review-context))))))
 
 (defun sprig-review--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
@@ -874,7 +886,8 @@ read, and a dialog is a question put to you, which wants the same air."
 (defun sprig-review--insert-state (model)
   "Insert the state line, below the last message: what is going on, or ended.
 The context in use rides at the end of the line, where the reader is
-already watching the turn; its face escalates once it grows large.  The
+already watching the turn; its face escalates once it grows large, and is
+its own rather than the line's, so it says nothing about the turn.  The
 side bar carries a rule in the state colour, so the gutter marks the end of
 the turn as plainly as the line does."
   (pcase-let ((`(,glyph ,text ,face) (sprig-review--state model))
@@ -883,8 +896,11 @@ the turn as plainly as the line does."
     (magit-insert-section (sprig-state)
       (insert (sprig-review--face (format "%s  %s" glyph text) face))
       (when ctx
+        ;; The separator belongs to the line, the readout does not: the
+        ;; context is coloured on its own terms, so a normal one does not
+        ;; read as a warning just because the turn is busy (both yellow).
         (insert (sprig-review--face "  ·  " face)
-                (sprig-review--face (car ctx) (or (cdr ctx) face))))
+                (sprig-review--face (car ctx) (cdr ctx))))
       (insert "\n"))
     (when (> (sprig-review--margin-width) 0)
       (let ((ov (make-overlay start (min (1+ start) (point-max)))))
