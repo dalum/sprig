@@ -100,13 +100,30 @@
 
 (ert-deftest sprig-test-parse-compact-boundary-context ()
   ;; A compaction reports its post-compact size, so the readout drops at once.
+  ;; The stream spells the boundary in snake_case, unlike the session log's
+  ;; camelCase: reading the log's spelling here matches no live line at all,
+  ;; which left the readout stuck at the pre-compact size until a refresh.
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line
                     (json-serialize
                      (list :type "system" :subtype "compact_boundary"
-                           :compactMetadata (list :preTokens 398861
-                                                  :postTokens 5457))))
+                           :compact_metadata (list :pre_tokens 398861
+                                                   :post_tokens 5457))))
                    '((context 5457))))))
+
+(ert-deftest sprig-test-parse-compact-boundary-verbatim ()
+  ;; The line above is hand-written, so it can drift from the CLI and still
+  ;; agree with itself.  This one is a boundary captured verbatim off the
+  ;; wire, kept as the ground truth for the spelling.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"compact_boundary\","
+                            "\"session_id\":\"83cc1bae-9db9-42d6-a092-07e4a0a117dd\","
+                            "\"compact_metadata\":{\"trigger\":\"manual\","
+                            "\"pre_tokens\":23237,\"post_tokens\":2223,"
+                            "\"cumulative_dropped_tokens\":21014,"
+                            "\"duration_ms\":31888}}"))
+                   '((context 2223))))))
 
 (ert-deftest sprig-test-parse-text-block-start ()
   (with-temp-buffer

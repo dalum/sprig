@@ -402,9 +402,12 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; A compaction landed: the boundary carries the post-compact token
          ;; count, the context now in use.  Report it so the readout drops
          ;; from the pre-compact size at once, not on the next turn.
+         ;; The stream names these in snake_case; the session log spells the
+         ;; same boundary in camelCase, which `sprig-review-session-record-events'
+         ;; reads on replay.  Keep the two spellings with their own reader.
          ((and (equal .type "system") (equal .subtype "compact_boundary")
-               .compactMetadata.postTokens)
-          (list (list 'context .compactMetadata.postTokens)))
+               .compact_metadata.post_tokens)
+          (list (list 'context .compact_metadata.post_tokens)))
          ;; Streaming assistant content (text and tool-use blocks).
          ((equal .type "stream_event")
           (cond
