@@ -38,6 +38,7 @@
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
 (declare-function sprig--review-queue "sprig" (text))
+(declare-function sprig--review-drop-queue "sprig" ())
 (declare-function sprig--review-answer-dialog "sprig" (id input answers))
 (declare-function sprig--review-approve-plan "sprig" (id))
 (declare-function sprig--review-reject-plan "sprig" (id feedback))
@@ -1738,6 +1739,14 @@ sends.  An interrupt drops the queue."
   (interactive)
   (sprig-review-message nil t))
 
+(defun sprig-review-drop-queue ()
+  "Forget the messages queued with `c q', leaving the turn to run (`c Q').
+The only way to take a queued message back: nothing has been sent, so
+there is nothing to steer or interrupt.  `c i' does not do this, on
+purpose (see `sprig--review-drop-queue')."
+  (interactive)
+  (sprig--review-drop-queue))
+
 (defun sprig-review-compose-send ()
   "Send the composed message (with any attached context) to the conversation."
   (interactive)
@@ -2030,11 +2039,12 @@ wrong thing to make easy."
   [["Message"
     ("c" "compose & send (steers a running turn)" sprig-review-message)
     ("q" "compose & queue (after this turn)" sprig-review-queue)
+    ("Q" "drop the queued messages" sprig-review-drop-queue)
     ("y" "yes / accept" sprig-review-accept)
     ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
     ("r" "resend last turn" sprig-review-retry)
-    ("i" "interrupt turn" sprig-review-interrupt)
+    ("i" "interrupt turn (any queued message then goes)" sprig-review-interrupt)
     ("z" "compact context" sprig-review-compact)]
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)

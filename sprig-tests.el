@@ -215,9 +215,10 @@
         (sprig--review-sink '(done nil nil))
         (should (equal (reverse folded) '(done user)))))))
 
-(ert-deftest sprig-test-interrupt-drops-the-queue ()
-  ;; An interrupt ends the turn through `done', which would flush: firing the
-  ;; follow-up the instant you said stop is the one thing `c i' must not do.
+(ert-deftest sprig-test-interrupt-keeps-the-queue ()
+  ;; An interrupt ends the turn through `done', which flushes like any other:
+  ;; a queued message is the next thing, not the rest of this thing, so
+  ;; `c i' with one queued reads as `stop, do this instead'.
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
@@ -227,11 +228,37 @@
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
         (setq-local sprig--busy t)
-        (sprig--review-queue "then update the README")
+        (sprig--review-queue "do this instead")
         (sprig--interrupt-turn)
+        (should (equal sprig--queued '("do this instead")))
+        (sprig--review-sink '(done nil nil))
+        (should (equal sent '("do this instead")))))))
+
+(ert-deftest sprig-test-drop-queue-spares-the-turn ()
+  ;; `c Q' is the only way to take a queued message back: nothing was sent,
+  ;; so there is nothing to steer, and `c i' would now send it.  It drops the
+  ;; queue and nothing else, leaving the turn running.
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "on second thoughts, no")
+        (sprig--review-drop-queue)
         (should-not sprig--queued)
+        ;; The turn it was queued behind runs on, untouched.
+        (should sprig--busy)
         (sprig--review-sink '(done nil nil))
         (should-not sent)))))
+
+(ert-deftest sprig-test-drop-queue-with-nothing-queued ()
+  ;; Says so rather than claiming to have dropped nothing.
+  (with-temp-buffer
+    (setq-local sprig--queued nil)
+    (should (equal (sprig--review-drop-queue) "sprig: nothing queued"))))
 
 (ert-deftest sprig-test-teardown-drops-the-queue ()
   ;; The session is gone, so there is no turn left for the message to follow.

@@ -1062,17 +1062,29 @@ wait for that turn's own `done' to come round again."
                  "")))))
 
 (defun sprig--drop-queue (why)
-  "Forget any queued messages, reporting WHY, the thing that dropped them.
-Called where the turn ends in a way that unmakes what the queue was
-waiting for.  The text is echoed, not silently binned: it is unrecoverable
-otherwise, and the compose buffer that held it is long gone."
+  "Forget any queued messages, reporting WHY they will not be sent.
+The text is echoed, not binned in silence: nothing else holds it, the
+compose buffer that did is long gone, and a queue is dropped precisely
+where the user is not expecting it to be."
   (when sprig--queued
-    (message "sprig: %s, dropped %d queued message(s): %s"
+    (message "sprig: %s, so %d queued message(s) will not be sent: %s"
              why (length sprig--queued)
              (mapconcat (lambda (m) (format "%S" (truncate-string-to-width m 40 nil nil t)))
                         sprig--queued "; "))
     (setq sprig--queued nil)
     (sprig--status-refresh)))
+
+(defun sprig--review-drop-queue ()
+  "Forget the messages queued with `c q', without touching the turn (`c Q').
+Deliberately not folded into `c i': dropping the queue and stopping the
+turn are different wants, and only one of them needs the other's help.
+Queue a follow-up, change your mind, and this is the way to take it back
+\(there is no other: nothing has been sent, so there is nothing to steer).
+Stopping the turn *and* meaning it is then this and `c i', two gestures
+that each say one thing."
+  (if sprig--queued
+      (sprig--drop-queue "you dropped the queue")
+    (message "sprig: nothing queued")))
 
 (defun sprig--review-deliver (text &optional mode)
   "Send TEXT as this review buffer's own next user turn, echoing it locally.
@@ -1113,11 +1125,11 @@ receipt, see `sprig--interrupt-receipt') or never end the turn within
 `sprig-interrupt-timeout' seconds (`sprig--interrupt-timeout'), it falls
 back to killing the process, the old hard interrupt.
 
-Drops the queue, since the interrupt ends the turn through `done' and
-would otherwise flush it: you stopped the turn, so the follow-up you
-queued behind it would fire the moment you said stop, which is the last
-thing `c i' should mean."
-  (sprig--drop-queue "interrupted")
+Leaves the queue alone, so the interrupt's own `done' flushes it like any
+other: a queued message is the next thing, not the rest of this thing, so
+stopping the turn does not unmake it.  Interrupting with one queued reads
+as `stop, do this instead', which is the useful gesture.  To stop and mean
+it, drop the queue first (`c Q')."
   (sprig--clear-interrupt)
   (setq sprig--interrupt-request-id (sprig--send-interrupt))
   (when sprig-interrupt-timeout
