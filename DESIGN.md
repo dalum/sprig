@@ -275,15 +275,17 @@ Many branches can stream at once, each in its own file and buffer. Emacs Lisp is
 ## Open questions
 
 - Backend abstraction: how thin an interface over different agent providers. The `claude` CLI keeps memory server-side and resumes by session id, so it wants only the new user turn; a stateless messages backend wants the whole transcript replayed. Fork-by-copy needs the replay path.
-- How thinking / reasoning is represented in the transcript. Tool calls are settled (see the sentinel and tool-activity sections); thinking is not yet surfaced.
-- Keybindings for the verbs in each surface.
+- Whether a subagent's work is reviewable or merely visible: `k` on a hunk a subagent wrote is an instruction to the *main* agent, which did not make the edit itself.
 
-Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>` so agent output cannot forge a delimiter) and tool-call representation (sentinel-delimited fenced blocks with header chrome and a render level).
+Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>` so agent output cannot forge a delimiter); tool-call representation (sentinel-delimited fenced blocks with header chrome and a render level); keybindings for the verbs (see the transient sections above); and how thinking is represented (its own block type, coalesced like text, rendered folded by default since it is verbose).
+
+Known gap, not a question: thinking renders on **replay only**. The log's assistant records carry `thinking` content blocks and `sprig-review-session-record-events` reads them, but the live stream parser has no thinking branch (it handles `text_delta` and `input_json_delta` alone), so a turn's reasoning is invisible while it streams and then appears on the next `g`. Beware when checking this against the logs in this repo's own project directory: they contain sessions *about* the protocol, so grepping them for wire shapes like `thinking_delta` finds sprig's own probe output rather than evidence the CLI emits it.
 
 ## Build status
 
 - **Done:** the read-only review buffer is the whole conversation surface (see "Current direction" above for the detailed progress log). The transport parses the `claude` stream-json into a neutral event vocabulary and routes it to a session-owning review buffer; history and the store are the CLI's own session logs; the `sprig-status` navigator lists those logs per project directory with live status, titles, and last-reply previews (open / connect / interrupt / disconnect). One turn at a time per session, over the CLI (local or via SSH with `sprig-remote`); several sessions can stream at once.
-- **Next slice:** the fork forest over sessions, richer plan-mode review, and finer run granularity.
+- **Next slice:** subagent visibility (the biggest hole: a `Task` call renders as a tool call with nothing inside it, see below), then richer plan-mode review and finer run granularity. The navigator's fork forest is still a flat list: `s f` made forking real again, so sessions now have a parent worth drawing, but nothing yet draws it.
+- **Known holes**, roughly in the order they bite: a **subagent's work is invisible** (sidechain records are skipped; their transcripts are on disk under `<project>/<session-id>/subagents/agent-*.jsonl`); **thinking is replay-only** (see Open questions); a change made by **`Bash` rather than `Edit`/`Write` leaves no diff**, since diffs are attributed from tool-call payloads and git ground truth is deferred; **`/model` and `/clear` have no verb** (`sprig-model` is a defcustom feeding `--model`, but nothing changes it live).
 
 ## First build slice (as shipped)
 
