@@ -277,6 +277,36 @@
 ;; was pinned to an invented shape, the test and the code agreed with each
 ;; other and with nothing the CLI emits.
 
+(ert-deftest sprig-test-subagent-events-read-a-stored-transcript ()
+  "The replay reader turns a subagent's own log into the same step events.
+Its transcript is a file of its own that the session log never mentions, so
+without this a refreshed `Agent' call would lose the work you just watched."
+  (let ((lines (list
+                (concat "{\"type\":\"user\",\"isSidechain\":true,"
+                        "\"message\":{\"role\":\"user\",\"content\":\"go and look\"}}")
+                (concat "{\"type\":\"assistant\",\"isSidechain\":true,"
+                        "\"message\":{\"content\":[{\"type\":\"tool_use\","
+                        "\"id\":\"toolu_1\",\"name\":\"Read\","
+                        "\"input\":{\"file_path\":\"/tmp/n.txt\"}}]}}")
+                (concat "{\"type\":\"user\",\"isSidechain\":true,"
+                        "\"message\":{\"role\":\"user\",\"content\":"
+                        "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\","
+                        "\"content\":\"hello\"}]}}"))))
+    (should (equal (sprig-review-subagent-events "toolu_P" lines)
+                   ;; The log stores input as an object; the model reads either
+                   ;; spelling, so it is passed on as it lies.
+                   '((subagent-call "toolu_P" "toolu_1" "Read"
+                                    ((file_path . "/tmp/n.txt")))
+                     (subagent-result "toolu_P" "toolu_1" nil "hello"))))
+    ;; And they fold onto the row exactly as the live ones do.
+    (let* ((model (sprig-review-build
+                   (append '((tool-call "toolu_P" "Agent" "{}")
+                             (tool-result "toolu_P" nil "done"))
+                           (sprig-review-subagent-events "toolu_P" lines))))
+           (steps (plist-get (plist-get (car (plist-get model :blocks)) :agent) :steps)))
+      (should (equal (mapcar (lambda (s) (plist-get s :name)) steps) '("Read")))
+      (should (equal (plist-get (plist-get (car steps) :result) :text) "hello")))))
+
 (ert-deftest sprig-test-merge-plist-keeps-what-a-record-omits ()
   ;; Each task record carries its own subset, so a nil means `not carried',
   ;; never `clear it': a plain overwrite would drop the agent type that only
@@ -303,6 +333,55 @@
     (should (equal (plist-get (plist-get blk :agent) :agent-type) "Explore"))
     (should (equal (plist-get (plist-get blk :agent) :description) "Reading note.txt"))
     (should (equal (plist-get (plist-get blk :agent) :status) "completed"))))
+
+(ert-deftest sprig-test-subagent-steps-nest-under-the-agent-call ()
+  "A subagent's steps become tool blocks under the `Agent' row, not beside it."
+  (let* ((model (sprig-review-build
+                 '((text-block) (text "Off we go.")
+                   (tool-call "toolu_P" "Agent" "{\"description\":\"find it\"}")
+                   (subagent-call "toolu_P" "toolu_1" "Bash" "{\"command\":\"ls\"}")
+                   (subagent-result "toolu_P" "toolu_1" nil "total 4")
+                   (subagent-call "toolu_P" "toolu_2" "Read" "{\"file_path\":\"/tmp/n.txt\"}")
+                   (subagent-result "toolu_P" "toolu_2" nil "hello")
+                   (tool-result "toolu_P" nil "It says hello."))))
+         (blocks (plist-get model :blocks))
+         (agent (seq-find (lambda (b) (equal (plist-get b :name) "Agent")) blocks))
+         (steps (plist-get (plist-get agent :agent) :steps)))
+    ;; The steps are not blocks of the transcript: the buffer shows the main
+    ;; agent's prose and its one `Agent' row, with the work folded inside.
+    (should (equal (mapcar (lambda (b) (plist-get b :type)) blocks) '(text tool)))
+    (should (equal (mapcar (lambda (s) (plist-get s :name)) steps) '("Bash" "Read")))
+    ;; Each keeps its own result, in the order it happened.
+    (should (equal (plist-get (plist-get (car steps) :result) :text) "total 4"))
+    (should (equal (plist-get (plist-get (cadr steps) :result) :text) "hello"))
+    ;; And the `Agent' call still has its own report.
+    (should (equal (plist-get (plist-get agent :result) :text) "It says hello."))))
+
+(ert-deftest sprig-test-subagent-steps-land-after-the-agent-has-finished ()
+  ;; The replay path reads the steps from the subagent's own file and folds
+  ;; them in after the whole transcript, so the `Agent' call already has its
+  ;; result by then: a finder that skipped finished blocks would drop them all.
+  (let* ((model (sprig-review-build
+                 '((tool-call "toolu_P" "Agent" "{}")
+                   (tool-result "toolu_P" nil "done")
+                   (subagent-call "toolu_P" "toolu_1" "Read" "{\"file_path\":\"/tmp/n\"}")
+                   (subagent-result "toolu_P" "toolu_1" nil "hello"))))
+         (agent (car (plist-get model :blocks)))
+         (steps (plist-get (plist-get agent :agent) :steps)))
+    (should (equal (mapcar (lambda (s) (plist-get s :name)) steps) '("Read")))
+    (should (equal (plist-get (plist-get (car steps) :result) :text) "hello"))))
+
+(ert-deftest sprig-test-subagent-edit-gets-a-real-diff ()
+  ;; A step is an ordinary tool block, so a subagent editing a file shows the
+  ;; change the same way the main agent's edit does.
+  (let* ((model (sprig-review-build
+                 (list '(tool-call "toolu_P" "Agent" "{}")
+                       (list 'subagent-call "toolu_P" "toolu_1" "Edit"
+                             (json-serialize
+                              '(:file_path "/tmp/f.txt" :old_string "a" :new_string "b"))))))
+         (step (car (plist-get (plist-get (car (plist-get model :blocks)) :agent) :steps))))
+    (should (plist-get step :changes))
+    (should (equal (plist-get (car (plist-get step :changes)) :file) "/tmp/f.txt"))))
 
 (ert-deftest sprig-test-subagent-does-not-split-the-agent-prose ()
   ;; The subagent's narration is not the main agent speaking, so it must not
@@ -369,27 +448,42 @@
                          "\"task_id\":\"a095acb48e0523216\","
                          "\"patch\":{\"status\":\"completed\"}}")))))
 
-(ert-deftest sprig-test-subagent-tool-results-stay-out-of-the-transcript ()
-  "A subagent's own tool results are not the main thread's work.
-Its `tool_use' arrives as a top-level `assistant' record, which is not read,
-so folding these in would strand each as a loose result with no name: the
-subagent's `ls' output would surface as an unattributed row."
+(ert-deftest sprig-test-subagent-work-routes-under-its-agent-row ()
+  "A subagent's steps go under its `Agent' row, never into the main thread.
+Its `tool_use' arrives as a top-level `assistant' record, which is not read
+for text, so folding its results into the transcript would strand each as a
+loose row with no name: the subagent's `ls' output would read as the main
+agent's own work."
   (with-temp-buffer
-    (let ((subagent (concat "{\"type\":\"user\","
-                            "\"parent_tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+    ;; Its call.
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"assistant\","
+                            "\"parent_tool_use_id\":\"toolu_PARENT\","
+                            "\"message\":{\"content\":[{\"type\":\"tool_use\","
+                            "\"id\":\"toolu_014m9t6n5iTQpLReQBTZYR9k\","
+                            "\"name\":\"Read\","
+                            "\"input\":{\"file_path\":\"/tmp/note.txt\"}}]}}"))
+                   '((subagent-call "toolu_PARENT" "toolu_014m9t6n5iTQpLReQBTZYR9k"
+                                    "Read" "{\"file_path\":\"/tmp/note.txt\"}"))))
+    ;; Its result.
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"user\","
+                            "\"parent_tool_use_id\":\"toolu_PARENT\","
                             "\"message\":{\"role\":\"user\",\"content\":"
                             "[{\"type\":\"tool_result\","
-                            "\"tool_use_id\":\"toolu_01JnBcYLMdRvTLhHHLQcMgxU\","
-                            "\"content\":\"total 4\"}]}}"))
-          (main (concat "{\"type\":\"user\","
-                        "\"message\":{\"role\":\"user\",\"content\":"
-                        "[{\"type\":\"tool_result\","
-                        "\"tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
-                        "\"content\":\"Found it.\"}]}}")))
-      (should-not (sprig--claude-parse-line subagent))
-      ;; The `Agent' call's own result carries no parent and still lands.
-      (should (equal (sprig--claude-parse-line main)
-                     '((tool-result "toolu_01P7GYemHFw4irpCEyJ9N7uk" nil "Found it.")))))))
+                            "\"tool_use_id\":\"toolu_014m9t6n5iTQpLReQBTZYR9k\","
+                            "\"content\":\"hello\"}]}}"))
+                   '((subagent-result "toolu_PARENT" "toolu_014m9t6n5iTQpLReQBTZYR9k"
+                                      nil "hello"))))
+    ;; The `Agent' call's own result carries no parent, and still lands in the
+    ;; transcript as an ordinary tool result.
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"user\","
+                            "\"message\":{\"role\":\"user\",\"content\":"
+                            "[{\"type\":\"tool_result\","
+                            "\"tool_use_id\":\"toolu_PARENT\","
+                            "\"content\":\"Found it.\"}]}}"))
+                   '((tool-result "toolu_PARENT" nil "Found it."))))))
 
 (ert-deftest sprig-test-parse-compacting-status ()
   ;; A compaction runs for a minute or more, so it is announced, not implied.

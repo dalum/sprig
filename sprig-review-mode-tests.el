@@ -1595,6 +1595,35 @@ the fold learns the id from the result rather than from the call."
         (should (equal (string-trim (buffer-string)) "plan me something"))))
     (kill-buffer "*sprig-message*")))
 
+(ert-deftest sprig-review-mode-test-agent-steps-nest-and-fold ()
+  "A subagent's steps render inside the `Agent' row, each folding as a tool."
+  (let ((model (list :blocks
+                     (list (list :type 'tool :id "toolu_P" :name "Agent"
+                                 :input "{\"description\":\"find it\"}"
+                                 :agent (list :status "completed"
+                                              :steps (list (list :type 'tool :id "toolu_1"
+                                                                 :name "Bash"
+                                                                 :input "{\"command\":\"ls -la\"}"
+                                                                 :result '(:error nil :text "total 4"))))
+                                 :result '(:error nil :text "It says hello."))))))
+    (sprig-review-tests--rendered model nil
+      (let ((s (buffer-string)))
+        ;; The Agent row is folded, so its steps are not in the buffer yet.
+        (should (string-match-p "Agent" s))
+        (should-not (string-match-p "ls -la" s)))
+      ;; Open it: the step is there as its own row, still folded to a line.
+      (goto-char (point-min))
+      (re-search-forward "^Agent")
+      (magit-section-show (magit-current-section))
+      (let ((s (buffer-string)))
+        (should (string-match-p "Bash  ls -la" s))
+        ;; Each step keeps its own fold: its result is one more TAB away, so
+        ;; opening an `Agent' row lists what it did without dumping the lot.
+        (should-not (string-match-p "total 4" s))
+        ;; The report sits after the work that led to it.
+        (should (string-match-p "↳ result" s))
+        (should (< (string-match "Bash" s) (string-match "↳ result" s)))))))
+
 (ert-deftest sprig-review-mode-test-agent-row-narrates-while-it-runs ()
   "An `Agent' row says what its subagent is doing, then stops once it is done."
   (let ((running (list :type 'tool :id "toolu_A" :name "Agent"

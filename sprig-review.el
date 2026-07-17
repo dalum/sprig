@@ -137,12 +137,18 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;                   :answered BOOL :answers ANSWERS :time ISO)
 ;;   (:type error    :text STR :time ISO)
 ;;
-;; A tool block's `:agent' is a subagent's live progress, folded onto the
-;; `Agent' call it runs under (`:status', `:agent-type', `:description',
-;; `:last-tool', `:tokens', `:tool-uses').  It is live-only, and correctly so:
-;; the CLI narrates a subagent while it runs but writes none of that to the
-;; session log, so a replayed `Agent' call has no `:agent' and needs none, the
-;; work being over and its report already sitting in the tool result.
+;; A tool block's `:agent' is the subagent folded onto the `Agent' call it runs
+;; under: its progress (`:status', `:agent-type', `:description', `:last-tool',
+;; `:tokens', `:tool-uses') and `:steps', the tool calls it made.  A step is
+;; itself a tool block, so it renders through the same code and gets a real
+;; diff when the subagent edits a file.
+;;
+;; The progress is live-only, and correctly so: the CLI narrates a running
+;; subagent but writes none of that narration to any log, so a replayed
+;; `Agent' call has no progress and needs none, the work being over.  The
+;; steps outlive the turn by the other route: live they stream in tagged with
+;; their parent, and on replay they are read back from the subagent's own
+;; file (see `sprig-review-subagent-events').
 ;;
 ;; A `tasks' block is the CLI's granular task tools folded into one running
 ;; checklist.  Where a `TodoWrite' resends its whole list each call, this
@@ -188,6 +194,25 @@ lose what an earlier one established."
         (when v (setq out (plist-put out k v))))
       (setq new (cddr new)))
     out))
+
+(defun sprig-review--agent-put (block key value)
+  "Set KEY to VALUE in BLOCK's `:agent' plist, creating the plist if need be.
+`plist-put' cannot grow a nil plist in place, so the result has to be put
+back on the block; this keeps that from being spelled out at each call."
+  (plist-put block :agent
+             (sprig-review--merge-plist (plist-get block :agent)
+                                        (list key value))))
+
+(defun sprig-review--find-tool (blocks id)
+  "Return the tool block in BLOCKS with ID, finished or not, or nil.
+Unlike `sprig-review--find-open-tool', a result does not put the block out
+of reach.  Subagent events need that: live they arrive while the `Agent'
+call is still open, but a replayed log's are read from the subagent's own
+file and folded in after the whole transcript, result and all."
+  (seq-find (lambda (b)
+              (and (eq (plist-get b :type) 'tool)
+                   (equal (plist-get b :id) id)))
+            blocks))
 
 (defun sprig-review--find-open-tool (blocks id)
   "Return the tool block in BLOCKS with ID and no result yet, or nil."
@@ -333,12 +358,29 @@ See the section commentary for the event vocabulary and block shapes."
         ;; main agent speaking, so it must not split the main agent's prose in
         ;; two, the way a real block of its own would.
         (`(subagent ,id ,state)
-         (when-let ((blk (sprig-review--find-open-tool blocks id)))
+         (when-let ((blk (sprig-review--find-tool blocks id)))
            (plist-put blk :agent
                       ;; Merged, not replaced: `task_progress' repeats and
                       ;; carries only what changed, so a plain overwrite would
                       ;; drop the agent type `task_started' named once.
                       (sprig-review--merge-plist (plist-get blk :agent) state))))
+        ;; A subagent's step becomes an ordinary tool block, nested under the
+        ;; `Agent' row rather than pushed on the transcript.  Being the same
+        ;; shape, it renders through the same code and gets a real diff when
+        ;; the subagent edits a file.
+        (`(subagent-call ,parent ,id ,name ,input)
+         (when-let ((blk (sprig-review--find-tool blocks parent)))
+           (sprig-review--agent-put
+            blk :steps
+            (append (plist-get (plist-get blk :agent) :steps)
+                    (list (list :type 'tool :id id :name name :input input
+                                :changes (sprig-review-tool-changes name input)
+                                :result nil :time time))))))
+        (`(subagent-result ,parent ,id ,is-error ,rtext)
+         (when-let* ((blk (sprig-review--find-tool blocks parent))
+                     (step (sprig-review--find-tool
+                            (plist-get (plist-get blk :agent) :steps) id)))
+           (plist-put step :result (list :error is-error :text rtext))))
         (`(dialog ,id ,kind ,input)
          (setq open nil)
          (push (list :type 'dialog :id id :kind kind :input input
@@ -511,16 +553,62 @@ conversation content.  A conversation record is stamped with its own
          record
          (if mode (cons (list 'mode mode) events) events)))))))
 
-(defun sprig-review-parse-session-line (line)
-  "Parse one JSONL session-log LINE into a list of events, or nil."
+(defun sprig-review--parse-session-json (line)
+  "Parse one JSONL LINE into a record alist, or nil if it is not one."
   (let ((record (ignore-errors
                   (json-parse-string line :object-type 'alist :array-type 'list
                                      :null-object nil :false-object nil))))
-    (and (consp record) (sprig-review-session-record-events record))))
+    (and (consp record) record)))
+
+(defun sprig-review-parse-session-line (line)
+  "Parse one JSONL session-log LINE into a list of events, or nil."
+  (when-let ((record (sprig-review--parse-session-json line)))
+    (sprig-review-session-record-events record)))
 
 (defun sprig-review-session-events (lines)
   "Return the ordered event list parsed from LINES of the session log."
   (apply #'append (mapcar #'sprig-review-parse-session-line lines)))
+
+(defun sprig-review--subagent-block-event (parent block)
+  "Map one subagent message BLOCK under PARENT to a step event, or nil."
+  (when (consp block)
+    (let ((type (alist-get 'type block)))
+      (cond
+       ((equal type "tool_use")
+        (list 'subagent-call parent (or (alist-get 'id block) "t")
+              (alist-get 'name block)
+              ;; The log stores input as an object; the model takes either
+              ;; spelling through `sprig-review--parse-input', so it is
+              ;; passed on as it lies rather than round-tripped through JSON.
+              (alist-get 'input block)))
+       ((equal type "tool_result")
+        (list 'subagent-result parent (or (alist-get 'tool_use_id block) "t")
+              (alist-get 'is_error block)
+              (string-trim (sprig-review--flatten-content
+                            (alist-get 'content block)))))))))
+
+(defun sprig-review-subagent-events (parent lines)
+  "Return the step events for the subagent under PARENT, from LINES.
+PARENT is the `Agent' tool call the subagent ran under, taken from the
+`toolUseId' of the transcript's `.meta.json' sidecar.
+
+The CLI writes a subagent's transcript to a file of its own and mentions
+none of it in the session log, so a replayed `Agent' call would otherwise
+show only its report, losing the work behind it that a live one shows.
+Reading it back here is what keeps a refresh from erasing what you just
+watched.
+
+Pure, like the rest of the reader: the caller reads the file (over TRAMP,
+for a remote session), so nothing here needs to know where it lives."
+  (apply #'append
+         (mapcar
+          (lambda (line)
+            (when-let* ((record (sprig-review--parse-session-json line))
+                        (content (alist-get 'content (alist-get 'message record))))
+              (delq nil (mapcar (lambda (b)
+                                  (sprig-review--subagent-block-event parent b))
+                                (and (listp content) content)))))
+          lines)))
 
 (defun sprig-review-session-model (lines)
   "Build a review model from LINES of the stored session log."

@@ -48,6 +48,7 @@
 (declare-function sprig--status-refresh "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
+(declare-function sprig--session-log-file "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -585,12 +586,19 @@ diff-bearing tools open instead."
     ;; Deferred so a folded tool keeps its body out of the buffer; magit only
     ;; draws the fold when the body goes through `magit-insert-section-body'.
     (magit-insert-section-body
-      (let ((todos (sprig-review--todos block)))
+      (let ((todos (sprig-review--todos block))
+            (steps (plist-get (plist-get block :agent) :steps)))
         (cond
          ;; A TodoWrite's own result is a bookkeeping reminder; the checklist
          ;; is the content worth reading, so show it and drop the result.
          (todos (sprig-review--insert-todos todos))
          (t
+          ;; A subagent's steps nest inside the `Agent' row that spawned them,
+          ;; each an ordinary tool section: folded to a line, TAB to open, a
+          ;; diff where it edited.  Before the result, since they are what led
+          ;; to it, and the reader arrives at the report having seen the work.
+          (dolist (step steps)
+            (sprig-review--insert-tool step))
           (dolist (change (plist-get block :changes))
             (sprig-review--insert-change change))
           (when-let ((result (plist-get block :result)))
@@ -1252,10 +1260,15 @@ from the buffer."
   (interactive)
   (when (and (boundp 'sprig--busy) sprig--busy)
     (user-error "A turn is in flight; refresh once it lands"))
-  (let ((events (sprig-review-session-events
-                 (if sprig-review--file
-                     (sprig-review-read-session-lines sprig-review--file)
-                   (sprig--session-log-lines)))))
+  (let* ((lines (if sprig-review--file
+                    (sprig-review-read-session-lines sprig-review--file)
+                  (sprig--session-log-lines)))
+         ;; A live session finds its own log; a remote one has no local path,
+         ;; so it replays without its subagents' steps rather than not at all.
+         (file (or sprig-review--file
+                   (and (fboundp 'sprig--session-log-file)
+                        (sprig--session-log-file))))
+         (events (sprig-review--replayed-events lines file)))
     (sprig-review-seed events sprig-review--meta)
     (message "sprig: re-read %d event%s from the log"
              (length events) (if (= (length events) 1) "" "s"))))
@@ -1333,6 +1346,44 @@ META is passed to `sprig-review-render'."
     (insert-file-contents file)
     (split-string (buffer-string) "\n" t)))
 
+(defun sprig-review--subagent-events-for-file (file)
+  "Return replayed subagent step events for session-log FILE, or nil.
+The CLI writes each subagent's transcript beside the log it belongs to, in
+`<session-id>/subagents/', and mentions none of it in the log itself, so
+this is the only way a replayed `Agent' call gets its work back rather than
+just its report.  A `.meta.json' sidecar names the `Agent' call each
+transcript ran under, which is what lets a step find its row.
+
+Reads by path, so a log opened over TRAMP brings its subagents with it.
+Missing or unreadable files are simply no steps: the transcript is an
+extra, and the `Agent' row still carries the report without it."
+  (let ((dir (expand-file-name (concat (file-name-base file) "/subagents")
+                               (file-name-directory file))))
+    (when (file-directory-p dir)
+      (apply #'append
+             (mapcar
+              (lambda (meta)
+                (ignore-errors
+                  (let* ((obj (sprig-review--parse-session-json
+                               (with-temp-buffer
+                                 (insert-file-contents meta)
+                                 (buffer-string))))
+                         (parent (alist-get 'toolUseId obj))
+                         (log (concat (string-remove-suffix ".meta.json" meta)
+                                      ".jsonl")))
+                    (when (and parent (file-readable-p log))
+                      (sprig-review-subagent-events
+                       parent (sprig-review-read-session-lines log))))))
+              (directory-files dir t "\\.meta\\.json\\'"))))))
+
+(defun sprig-review--replayed-events (lines file)
+  "Return the events of LINES, with FILE's subagent steps folded in.
+The steps go last, after the whole transcript: they are read from files of
+their own, so there is no interleaving them by time, and the fold finds an
+`Agent' call by id whether or not its result has landed."
+  (append (sprig-review-session-events lines)
+          (and file (sprig-review--subagent-events-for-file file))))
+
 ;;;###autoload
 (defun sprig-review-open-file (file)
   "Open a read-only review of a stored `claude' session-log FILE.
@@ -1344,8 +1395,8 @@ and is fetched by the integration layer, not here."
                  (format "*sprig-review: %s*" (file-name-base file)))))
     (with-current-buffer buffer
       (setq sprig-review--file file)     ; so `g' re-reads this same file
-      (sprig-review-seed (sprig-review-session-events
-                          (sprig-review-read-session-lines file))))
+      (sprig-review-seed (sprig-review--replayed-events
+                          (sprig-review-read-session-lines file) file)))
     (pop-to-buffer buffer)))
 
 ;;;; Marks

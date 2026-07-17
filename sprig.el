@@ -354,6 +354,8 @@ A local session's working directory is set by `sprig--spawn' binding
 ;;   (compacting FLAG)         a compaction started (t) or ended (nil)
 ;;   (subagent ID PLIST)       a subagent's progress, ID being the `Agent'
 ;;                             tool call it runs under (see `sprig--claude-task')
+;;   (subagent-call ID TID NAME INPUT)  a step the subagent under ID took
+;;   (subagent-result ID TID ERR TEXT)  that step's result
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (control-response ID SUB) the CLI's receipt for a request we sent
@@ -396,6 +398,32 @@ state (`sprig--blocks') stays local to it."
                                 .is_error
                                 (string-trim
                                  (sprig--tool-result-text .content)))))))
+                  content))))
+
+(defun sprig--claude-subagent-steps (parent content)
+  "Turn a subagent message CONTENT under PARENT into its step events.
+PARENT is the `Agent' call the subagent runs under, so its steps hang off
+the row already on screen rather than loose in the main agent's work.
+
+A subagent's messages arrive whole, not as deltas, so unlike the main
+agent's there is nothing to reassemble: one record, one step.  Its own
+prose is dropped and only its tool calls kept; the reader wants to know
+what it *did*, and what it concluded arrives as the `Agent' call's result."
+  (when (listp content)
+    (delq nil
+          (mapcar (lambda (block)
+                    (when (consp block)
+                      (let-alist block
+                        (cond
+                         ((equal .type "tool_use")
+                          (list 'subagent-call parent (or .id "t") .name
+                                ;; Serialised to match the main agent's calls,
+                                ;; whose input reaches the model as JSON text.
+                                (if .input (json-serialize .input) "{}")))
+                         ((equal .type "tool_result")
+                          (list 'subagent-result parent (or .tool_use_id "t")
+                                .is_error
+                                (string-trim (sprig--tool-result-text .content))))))))
                   content))))
 
 (defun sprig--claude-task (subtype ev)
@@ -542,15 +570,16 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; hand rather than via `.message.content': `let-alist' would bind
          ;; that eagerly for every line, and a `system'/`error' line whose
          ;; `message' is a plain string would crash the nested lookup.
-         ;; A subagent's own tool results arrive here too, tagged with the
-         ;; `Agent' call they run under.  They are not the main thread's work
-         ;; and their calls were never seen (a subagent's `tool_use' comes as a
-         ;; top-level `assistant' record, which carries no deltas and so is not
-         ;; read), so folding them in would strand each one as a loose result
-         ;; with no name: the subagent's `ls' output would surface as an
-         ;; unattributed row in the transcript.  The `Agent' row narrates the
-         ;; subagent instead (see `sprig--claude-task').
-         ((and (equal .type "user") (not .parent_tool_use_id))
+         ;; A subagent's own work, tagged with the `Agent' call it runs under.
+         ;; It must not fold into the main thread: its results would strand as
+         ;; loose rows with no name (their calls arrive as top-level
+         ;; `assistant' records, which carry no deltas and so were never read),
+         ;; putting the subagent's `ls' output in the transcript as though the
+         ;; main agent had run it.  Routed under its `Agent' row instead.
+         ((and (member .type '("assistant" "user")) .parent_tool_use_id)
+          (sprig--claude-subagent-steps
+           .parent_tool_use_id (and (listp .message) (alist-get 'content .message))))
+         ((equal .type "user")
           (sprig--claude-tool-results
            (and (listp .message) (alist-get 'content .message))))
          ;; The CLI asks us to answer an interactive control request: a
@@ -967,6 +996,19 @@ of its recorded cwd.  Signals if SSH exits non-zero."
         (error "sprig: remote command failed (%s): %s"
                status (string-trim (buffer-string))))
       (buffer-string))))
+
+(defun sprig--session-log-file ()
+  "Return the path of this buffer's session log, or nil when there is none.
+Nil for a remote session as well: that log is read by shell over SSH (see
+`sprig--session-log-lines') rather than opened by path, so there is no name
+here for a caller to hang anything else off.  A caller that wants the files
+*beside* the log, the subagent transcripts, needs this rather than the
+lines, and gets nothing for a remote session, which is why a remote
+`Agent' replays without its steps."
+  (when (and sprig--session-id (not (sprig--remote)))
+    (car (directory-files-recursively
+          (expand-file-name (sprig--projects-directory))
+          (concat "\\`" (regexp-quote sprig--session-id) "\\.jsonl\\'")))))
 
 (defun sprig--session-log-lines ()
   "Return the stored session-log lines for this buffer's session.
