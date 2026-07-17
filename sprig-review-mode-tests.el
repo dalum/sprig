@@ -1219,6 +1219,19 @@ the fold learns the id from the result rather than from the call."
       (should (eq (get-text-property (1- (point)) 'font-lock-face)
                   'sprig-review-context-large)))))
 
+(ert-deftest sprig-review-mode-test-no-section-highlight ()
+  ;; The section at point is not what the verbs act on, so magit's highlight
+  ;; only washes out the faces the conversation is read through.  Both
+  ;; switches are buffer-local, so a magit buffer keeps its own highlight.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (should-not magit-section-highlight-current)
+    (should-not magit-section-highlight-selection)
+    (should (local-variable-p 'magit-section-highlight-current))
+    (should (local-variable-p 'magit-section-highlight-selection)))
+  (with-temp-buffer
+    (should magit-section-highlight-current)))
+
 (ert-deftest sprig-review-mode-test-context-face-is-not-the-turn-face ()
   ;; A normal context must not be painted by the turn: the busy state and
   ;; the large-context face are both yellow, so inheriting the state face

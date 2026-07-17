@@ -1205,6 +1205,13 @@ Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   ;; Markdown markup (`*', `#', ...) carries `invisible markdown-markup' from
   ;; `sprig-review--fontify-markdown'; hide it here so only the styling shows.
   (add-to-invisibility-spec 'markdown-markup)
+  ;; Magit highlights the section at point to show what its verbs would act
+  ;; on.  Here the verbs act on marks and hunks, not on whatever point drifts
+  ;; over, so the highlight says nothing and only washes out the faces the
+  ;; conversation is read through.  Drop it, and the selection highlight with
+  ;; it, so the region looks as it does in any other buffer.
+  (setq-local magit-section-highlight-current nil)
+  (setq-local magit-section-highlight-selection nil)
   ;; Claim the margin the timestamps hang in before the buffer is displayed,
   ;; so its first window comes up with the right width.
   (setq-local left-margin-width (sprig-review--margin-width)))
