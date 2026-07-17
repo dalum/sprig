@@ -125,6 +125,59 @@
                             "\"duration_ms\":31888}}"))
                    '((context 2223))))))
 
+(ert-deftest sprig-test-sink-tracks-compacting ()
+  ;; Live state, not model state: a replayed log must not resurrect it.
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+      (sprig--review-sink '(compacting t))
+      (should sprig--compacting)
+      (sprig--review-sink '(compacting nil))
+      (should-not sprig--compacting))))
+
+(ert-deftest sprig-test-sink-done-clears-compacting ()
+  ;; An interrupted compaction need never report a result, and a flag left
+  ;; set would leave the line claiming one that stopped with the turn.
+  (with-temp-buffer
+    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+              ((symbol-function 'sprig--status-refresh) #'ignore))
+      (sprig--review-sink '(compacting t))
+      (sprig--review-sink '(done nil nil))
+      (should-not sprig--compacting))))
+
+(ert-deftest sprig-test-parse-compacting-status ()
+  ;; A compaction runs for a minute or more, so it is announced, not implied.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    "{\"type\":\"system\",\"subtype\":\"status\",\"status\":\"compacting\"}")
+                   '((compacting t))))))
+
+(ert-deftest sprig-test-parse-compact-result-success ()
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"status\",\"status\":null,"
+                            "\"compact_result\":\"success\"}"))
+                   '((compacting nil))))))
+
+(ert-deftest sprig-test-parse-compact-result-failed ()
+  ;; Captured off the wire: the CLI's own `result' for this turn still says
+  ;; success, and the reason reaches the reader nowhere else, so a failed
+  ;; compaction is silent unless the status line reports it.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"status\",\"status\":null,"
+                            "\"compact_result\":\"failed\","
+                            "\"compact_error\":\"Not enough messages to compact.\"}"))
+                   '((compacting nil)
+                     (error "Compaction failed: Not enough messages to compact."))))))
+
+(ert-deftest sprig-test-parse-status-still-reports-mode ()
+  ;; The compaction bracket shares the status line with the permission mode.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"status\","
+                            "\"permissionMode\":\"plan\"}"))
+                   '((mode "plan"))))))
+
 (ert-deftest sprig-test-parse-text-block-start ()
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line (sprig-tests--text-block-start))

@@ -1183,6 +1183,27 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "/tmp/x\\.el" sent))
       (should (string-match-p "\\+new" sent)))))
 
+(ert-deftest sprig-review-mode-test-state-says-compacting ()
+  ;; A compaction stops a turn for a minute or more, so it outranks the
+  ;; turn's own state: `working…' or `sent, awaiting reply' would both read
+  ;; as an ordinary wait and leave the buffer looking stalled.
+  (with-temp-buffer
+    (let ((sprig--compacting t)
+          (sprig--busy t)
+          (sprig-review--streaming t))
+      (should (equal (sprig-review--state nil)
+                     '("▼" "compacting…" sprig-review-working))))
+    ;; Once it lands, the turn speaks for itself again.
+    (let ((sprig--compacting nil)
+          (sprig--busy t)
+          (sprig-review--streaming t))
+      (should (equal (cadr (sprig-review--state nil)) "working…"))))
+  ;; A dialog still wins: it is stopped on you, which no wait outranks.
+  (with-temp-buffer
+    (let ((sprig--compacting t)
+          (model (list :blocks (list (list :type 'dialog :id "d" :request nil)))))
+      (should (equal (car (sprig-review--state model)) "?")))))
+
 (ert-deftest sprig-review-mode-test-context-indicator ()
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))

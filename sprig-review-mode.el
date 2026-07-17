@@ -51,6 +51,7 @@
 (defvar sprig--process)
 (defvar sprig--sink)
 (defvar sprig--busy)
+(defvar sprig--compacting)
 (defvar sprig--session-id)
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
@@ -870,6 +871,12 @@ read, and a dialog is a question put to you, which wants the same air."
    ;; stopped on you.
    ((sprig-review-pending-dialog model)
     (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
+   ;; Ahead of the turn's own state: a compaction stops the turn dead for a
+   ;; minute or more, so `working…' would be the least of what is going on.
+   ;; An automatic one lands mid-turn, uninvited, which is exactly when the
+   ;; reader wonders why nothing is moving.
+   ((and (boundp 'sprig--compacting) sprig--compacting)
+    (list "▼" "compacting…" 'sprig-review-working))
    (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
    ;; Sent, but nothing back yet: the transport is busy while it waits on the
    ;; agent's first token, so this window would otherwise read as the previous

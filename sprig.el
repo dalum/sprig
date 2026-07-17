@@ -211,6 +211,13 @@ CLI hands that id back, since the fork has happened by then and a later
 send must resume the fork rather than fork the parent afresh.")
 (defvar-local sprig--busy nil
   "Non-nil while a turn is in flight.")
+(defvar-local sprig--compacting nil
+  "Non-nil while the session is compacting its context.
+Live transport state, like `sprig--busy', rather than part of the review
+model: a compaction is something happening now, so replaying the log must
+not bring it back.  A compaction can run a minute or more, and an
+automatic one interrupts a turn mid-flight, so the state line says so
+instead of leaving the turn looking stalled.")
 (defvar-local sprig--interrupt-timer nil
   "Fallback timer armed while a graceful interrupt is outstanding, or nil.
 Set by `sprig--interrupt-turn' after it sends the `interrupt' control
@@ -336,6 +343,7 @@ A local session's working directory is set by `sprig--spawn' binding
 ;;   (tool-result ID ERR TEXT) a tool result (ERR non-nil means error)
 ;;   (done COST ERR)           the turn finished
 ;;   (context TOKENS)          the turn's prompt size, i.e. context in use
+;;   (compacting FLAG)         a compaction started (t) or ended (nil)
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (control-response ID SUB) the CLI's receipt for a request we sent
@@ -396,9 +404,24 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ((and (equal .type "system") (equal .subtype "init"))
           (when .session_id (list (list 'session .session_id))))
          ;; A status message reports the current permission mode, e.g. after
-         ;; a `set_permission_mode' control request switches to plan.
-         ((and (equal .type "system") (equal .subtype "status") .permissionMode)
-          (list (list 'mode .permissionMode)))
+         ;; a `set_permission_mode' control request switches to plan, and it
+         ;; brackets a compaction: `compacting' when it starts, then a
+         ;; `compact_result' when it lands.  A compaction takes a minute or
+         ;; more, so say it is running rather than let the line read as an
+         ;; ordinary wait.  A failed one is reported here and nowhere the
+         ;; reader would see it: the CLI's own `result' still says success,
+         ;; so without this the verb fails silently.
+         ((and (equal .type "system") (equal .subtype "status"))
+          (append
+           (when .permissionMode (list (list 'mode .permissionMode)))
+           (cond
+            ((equal .status "compacting") (list (list 'compacting t)))
+            (.compact_result
+             (cons (list 'compacting nil)
+                   (unless (equal .compact_result "success")
+                     (list (list 'error
+                                 (format "Compaction failed: %s"
+                                         (or .compact_error .compact_result))))))))))
          ;; A compaction landed: the boundary carries the post-compact token
          ;; count, the context now in use.  Report it so the readout drops
          ;; from the pre-compact size at once, not on the next turn.
@@ -930,9 +953,14 @@ model via `sprig-review-consume'."
         ((not sprig--session-id)
          (setq sprig--session-id id)))))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
+    (`(compacting ,flag) (setq sprig--compacting flag))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
     (`(control-response ,id ,subtype) (sprig--interrupt-receipt id subtype))
-    (`(done ,_ ,_) (setq sprig--busy nil)
+    ;; The turn ending clears the compaction too: an interrupted or failed
+    ;; one need not report a result, and a flag left set would leave the
+    ;; line claiming a compaction that stopped with the turn.
+    (`(done ,_ ,_) (setq sprig--busy nil
+                         sprig--compacting nil)
      (sprig--clear-interrupt)
      (sprig--status-refresh)))
   ;; A control-request is transport, not conversation: it carries no
