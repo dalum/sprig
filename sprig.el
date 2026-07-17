@@ -1964,6 +1964,20 @@ override the defface one anyway."
     (when (string-prefix-p "sprig-" (symbol-name face))
       (put face 'face-defface-spec nil))))
 
+(declare-function sprig-review--suppress-section-highlight "sprig-review-mode")
+
+(defun sprig--resettle-review-buffers ()
+  "Re-apply the review mode's settings in buffers already in that mode.
+A major mode body runs once, when the buffer is created, so a review
+buffer opened before an edit keeps the settings the old body gave it: a
+reload alone cannot reach them, the way it cannot reach faces (see
+`sprig--undefine-faces').  Re-applying beats re-running the mode, which
+would take the buffer's session and section state down with it."
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer
+      (when (derived-mode-p 'sprig-review-mode)
+        (sprig-review--suppress-section-highlight)))))
+
 ;;;###autoload
 (defun sprig-reload ()
   "Reload sprig's source files from disk, in dependency order.
@@ -1971,12 +1985,14 @@ A development convenience: after editing any of `sprig-review', `sprig',
 or `sprig-review-mode', re-load all three from `sprig--source-directory'
 so the change takes effect without restarting Emacs.  The `.el' source is
 loaded, not any stale byte code beside it.  Edited faces take effect too
-\(see `sprig--undefine-faces').  Open buffers keep their state; only their
-behaviour picks up the new definitions."
+\(see `sprig--undefine-faces'), as do the review mode's settings (see
+`sprig--resettle-review-buffers').  Open buffers keep their state; only
+their behaviour picks up the new definitions."
   (interactive)
   (sprig--undefine-faces)
   (dolist (file sprig--source-files)
     (load (expand-file-name (concat file ".el") sprig--source-directory) nil t))
+  (sprig--resettle-review-buffers)
   (message "sprig: reloaded %d files from %s"
            (length sprig--source-files) sprig--source-directory))
 

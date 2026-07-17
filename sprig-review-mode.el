@@ -1188,6 +1188,24 @@ from the buffer."
 Inherits magit-section's navigation and folding; the sprig verbs are
 added on top as they land.")
 
+(defun sprig-review--suppress-section-highlight ()
+  "Turn magit's section highlight off in the current buffer.
+Magit highlights the section at point to show what its verbs would act
+on.  Here the verbs act on marks and hunks, not on whatever point drifts
+over, so the highlight says nothing and only washes out the faces the
+conversation is read through.  The selection highlight goes with it, so
+the region looks as it does in any other buffer.
+
+Both settings are buffer-local, leaving a real magit buffer alone.  This
+is called from `sprig-review-mode', and again by `sprig-reload' for the
+buffers whose mode body ran before the edit."
+  (setq-local magit-section-highlight-current nil)
+  (setq-local magit-section-highlight-selection nil)
+  ;; The settings only govern the next update, so a highlight already drawn
+  ;; would sit there until something else redrew it.  Force the update that
+  ;; deletes it; magit runs one from `post-command-hook'.
+  (setq magit-section-highlight-force-update t))
+
 (define-derived-mode sprig-review-mode magit-section-mode "Sprig-Review"
   "Major mode for reviewing an agent conversation as read-only sections.
 Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
@@ -1205,13 +1223,7 @@ Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   ;; Markdown markup (`*', `#', ...) carries `invisible markdown-markup' from
   ;; `sprig-review--fontify-markdown'; hide it here so only the styling shows.
   (add-to-invisibility-spec 'markdown-markup)
-  ;; Magit highlights the section at point to show what its verbs would act
-  ;; on.  Here the verbs act on marks and hunks, not on whatever point drifts
-  ;; over, so the highlight says nothing and only washes out the faces the
-  ;; conversation is read through.  Drop it, and the selection highlight with
-  ;; it, so the region looks as it does in any other buffer.
-  (setq-local magit-section-highlight-current nil)
-  (setq-local magit-section-highlight-selection nil)
+  (sprig-review--suppress-section-highlight)
   ;; Claim the margin the timestamps hang in before the buffer is displayed,
   ;; so its first window comes up with the right width.
   (setq-local left-margin-width (sprig-review--margin-width)))

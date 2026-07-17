@@ -1232,6 +1232,22 @@ the fold learns the id from the result rather than from the call."
   (with-temp-buffer
     (should magit-section-highlight-current)))
 
+(ert-deftest sprig-review-mode-test-reload-resettles-an-open-buffer ()
+  ;; A mode body runs once, at buffer creation, so a reload alone leaves a
+  ;; buffer opened beforehand with the old settings: the very buffer the
+  ;; reload was meant to fix keeps the highlight.
+  (with-temp-buffer
+    (sprig-review-mode)
+    ;; Stand in for a buffer whose mode body ran before the edit.
+    (setq-local magit-section-highlight-current t)
+    (setq-local magit-section-highlight-selection t)
+    (setq magit-section-highlight-force-update nil)
+    (sprig--resettle-review-buffers)
+    (should-not magit-section-highlight-current)
+    (should-not magit-section-highlight-selection)
+    ;; A highlight already drawn goes on the next command, not just later.
+    (should magit-section-highlight-force-update)))
+
 (ert-deftest sprig-review-mode-test-context-face-is-not-the-turn-face ()
   ;; A normal context must not be painted by the turn: the busy state and
   ;; the large-context face are both yellow, so inheriting the state face
