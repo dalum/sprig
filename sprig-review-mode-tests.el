@@ -1170,12 +1170,13 @@ the fold learns the id from the result rather than from the call."
 
 (ert-deftest sprig-review-mode-test-reject-verb ()
   ;; The whole verb path: extract the hunk at point, build the instruction,
-  ;; hand it to the send (stubbed here to capture it).
+  ;; hand it to the steer (stubbed here to capture it).  It steers, since a
+  ;; hunk lands mid-turn and the agent should hear about a bad one at once.
   (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-review--steer)
                  (lambda (text) (setq sent text))))
         (sprig-review-reject))
       (should (string-match-p "undo this change" sent))

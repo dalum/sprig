@@ -1402,7 +1402,12 @@ does not go down with the turn it was composed against."
 
 (defun sprig-review-reject ()
   "Ask the agent to undo the marked diff hunks, or the hunk at point.
-On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
+On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md).
+
+Steers rather than sends: hunks land while the turn is still running, so
+a bad one is usually spotted mid-turn, and waiting the turn out to say so
+lets the agent keep building on it.  With no turn running this is an
+ordinary send."
   (interactive)
   (let* ((sections (sprig-review--marked-sections))
          (pairs (sprig-review--reject-pairs sections)))
@@ -1412,7 +1417,7 @@ On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md)."
                      (format "Reject %d hunk(s), ignoring %d other mark(s)? "
                              (length pairs) (- (length sections) (length pairs))))))
       (user-error "Cancelled"))
-    (sprig-review--send (sprig-review-reject-instruction pairs))
+    (sprig-review--steer (sprig-review-reject-instruction pairs))
     (sprig-review--unmark-sections
      (sprig-review--sections-of-type sections 'sprig-hunk))))
 

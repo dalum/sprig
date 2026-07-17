@@ -132,7 +132,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `t` | Retitle the buffer's header (display only; the CLI owns the stored title) |
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
-| `k` | Reject: ask the agent to undo the marked (or point) diff hunks |
+| `k` | Reject: ask the agent to undo the marked (or point) diff hunks. Steers, so a bad hunk can be called out while the turn is still running |
 | `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute). Steers, so it lands in a turn already running |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
