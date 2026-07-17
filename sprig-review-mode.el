@@ -797,7 +797,7 @@ readout is a signal the context has grown large rather than a percentage
 against a window the CLI never reports.  FACE is nil below the thresholds,
 so the caller keeps the surrounding state-line face."
   (when (and (numberp tokens) (> tokens 0))
-    (let ((count (concat (sprig-review--format-tokens tokens) " ctx")))
+    (let ((count (sprig-review--format-tokens tokens)))
       (cond
        ((and sprig-context-huge-tokens (>= tokens sprig-context-huge-tokens))
         (cons (concat count " (very large)") 'sprig-review-context-huge))

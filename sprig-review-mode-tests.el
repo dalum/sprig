@@ -1186,12 +1186,12 @@ the fold learns the id from the result rather than from the call."
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))
     ;; Below the first threshold: bare count, no escalation face.
-    (should (equal (sprig-review--context-indicator 90000) '("90.0k ctx" . nil)))
+    (should (equal (sprig-review--context-indicator 90000) '("90.0k" . nil)))
     ;; Large and very large: a word and an escalating face.
     (should (equal (sprig-review--context-indicator 160000)
-                   '("160.0k ctx (large)" . sprig-review-context-large)))
+                   '("160.0k (large)" . sprig-review-context-large)))
     (should (equal (sprig-review--context-indicator 250000)
-                   '("250.0k ctx (very large)" . sprig-review-context-huge)))
+                   '("250.0k (very large)" . sprig-review-context-huge)))
     (should-not (sprig-review--context-indicator 0))
     (should-not (sprig-review--context-indicator nil))))
 
@@ -1207,7 +1207,7 @@ the fold learns the id from the result rather than from the call."
       (let ((line (buffer-substring-no-properties
                    (line-beginning-position) (line-end-position))))
         (should (string-match-p "turn over" line))
-        (should (string-match-p "160\\.0k ctx (large)" line)))
+        (should (string-match-p "160\\.0k (large)" line)))
       ;; The large segment carries its own escalation face, not the state face.
       (goto-char (point-min))
       (should (re-search-forward "large" nil t))
