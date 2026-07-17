@@ -130,11 +130,19 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;;   (:type text     :text STR :time ISO)
 ;;   (:type thinking :text STR :time ISO)
 ;;   (:type tool     :id ID :name NAME :input JSON :changes CHANGES
-;;                   :result (:error BOOL :text STR) | nil :time ISO)
+;;                   :result (:error BOOL :text STR) | nil :agent PLIST | nil
+;;                   :time ISO)
 ;;   (:type tasks    :items ITEMS :time ISO)
 ;;   (:type dialog   :id ID :kind KIND :input INPUT
 ;;                   :answered BOOL :answers ANSWERS :time ISO)
 ;;   (:type error    :text STR :time ISO)
+;;
+;; A tool block's `:agent' is a subagent's live progress, folded onto the
+;; `Agent' call it runs under (`:status', `:agent-type', `:description',
+;; `:last-tool', `:tokens', `:tool-uses').  It is live-only, and correctly so:
+;; the CLI narrates a subagent while it runs but writes none of that to the
+;; session log, so a replayed `Agent' call has no `:agent' and needs none, the
+;; work being over and its report already sitting in the tool result.
 ;;
 ;; A `tasks' block is the CLI's granular task tools folded into one running
 ;; checklist.  Where a `TodoWrite' resends its whole list each call, this
@@ -168,6 +176,18 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; itself, which is what keeps it stable: the model is rebuilt from that
 ;; list on every render, so a time read off the clock here would tick
 ;; forward under a conversation that had long since finished.
+
+(defun sprig-review--merge-plist (base new)
+  "Return BASE with NEW's non-nil values laid over it.
+A nil in NEW means `this record did not carry the field', never `clear it':
+the CLI's task records each carry their own subset, so an overwrite would
+lose what an earlier one established."
+  (let ((out (copy-sequence base)))
+    (while new
+      (let ((k (car new)) (v (cadr new)))
+        (when v (setq out (plist-put out k v))))
+      (setq new (cddr new)))
+    out))
 
 (defun sprig-review--find-open-tool (blocks id)
   "Return the tool block in BLOCKS with ID and no result yet, or nil."
@@ -308,6 +328,17 @@ See the section commentary for the event vocabulary and block shapes."
                            :result (list :error is-error :text rtext)
                            :time time)
                      blocks))))))
+        ;; Subagent progress lands on the `Agent' call it runs under.  It does
+        ;; not close the open text block: the subagent's narration is not the
+        ;; main agent speaking, so it must not split the main agent's prose in
+        ;; two, the way a real block of its own would.
+        (`(subagent ,id ,state)
+         (when-let ((blk (sprig-review--find-open-tool blocks id)))
+           (plist-put blk :agent
+                      ;; Merged, not replaced: `task_progress' repeats and
+                      ;; carries only what changed, so a plain overwrite would
+                      ;; drop the agent type `task_started' named once.
+                      (sprig-review--merge-plist (plist-get blk :agent) state))))
         (`(dialog ,id ,kind ,input)
          (setq open nil)
          (push (list :type 'dialog :id id :kind kind :input input
@@ -352,9 +383,14 @@ navigator titles a live session's row with this, recovering the replayed
 ;; counterpart of the wire parser in sprig.el: both map their own schema
 ;; onto the shared event vocabulary that `sprig-review-build' consumes.
 ;;
-;; The log is really a tree (records link by uuid/parentUuid) and subagent
-;; transcripts are flagged `isSidechain'; v1 reads the main thread and
-;; skips sidechains.
+;; The log is really a tree: records link by uuid/parentUuid.
+;;
+;; A subagent leaves nothing here.  Its transcript is written to a file of its
+;; own, `<session-id>/subagents/agent-<task-id>.jsonl', with a `.meta.json'
+;; naming the `Agent' call it ran under; the main log carries only that call
+;; and its result.  So the `isSidechain' skip below never fires on a main log
+;; (the flag is set in those separate files, on records this never reads) and
+;; is kept as a guard, not as the thing that hides subagent work.
 
 (defun sprig-review-session-file (cwd session-id)
   "Return the session-log path (with a leading ~) for CWD and SESSION-ID.
@@ -455,7 +491,9 @@ conversation content.  A conversation record is stamped with its own
       (when-let ((pt (alist-get 'postTokens
                                 (alist-get 'compactMetadata record))))
         (list (list 'context pt))))
-     ;; Only the main thread; sidechains are subagent transcripts.
+     ;; Only the main thread.  A guard, not a filter: a main log holds no
+     ;; sidechain records (see the note above), so this fires only if a
+     ;; subagent's own file is ever fed through here.
      ((eq (alist-get 'isSidechain record) t) nil)
      ((equal type "assistant")
       (sprig-review--stamp-events

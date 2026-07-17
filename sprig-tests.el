@@ -270,6 +270,127 @@
       (sprig--teardown-process)
       (should-not sprig--queued))))
 
+;;;; Subagents
+;;
+;; The lines below are captured off the wire from a real `Agent' run (an
+;; Explore subagent reading a file), not hand-built: the last time a parse
+;; was pinned to an invented shape, the test and the code agreed with each
+;; other and with nothing the CLI emits.
+
+(ert-deftest sprig-test-merge-plist-keeps-what-a-record-omits ()
+  ;; Each task record carries its own subset, so a nil means `not carried',
+  ;; never `clear it': a plain overwrite would drop the agent type that only
+  ;; `task_started' names.
+  (should (equal (sprig-review--merge-plist
+                  '(:status "running" :agent-type "Explore" :description "old")
+                  '(:status "running" :agent-type nil :description "new"))
+                 '(:status "running" :agent-type "Explore" :description "new")))
+  (should (equal (sprig-review--merge-plist nil '(:status "running"))
+                 '(:status "running"))))
+
+(ert-deftest sprig-test-subagent-folds-onto-its-agent-call ()
+  "Progress lands on the `Agent' row it runs under, and accumulates."
+  (let* ((model (sprig-review-build
+                 '((tool-call "toolu_A" "Agent" "{\"description\":\"find it\"}")
+                   (subagent "toolu_A" (:status "running" :agent-type "Explore"
+                                        :description "starting"))
+                   (subagent "toolu_A" (:status "running" :description "Reading note.txt"
+                                        :last-tool "Read" :tool-uses 2))
+                   (subagent "toolu_A" (:status "completed")))))
+         (blk (car (plist-get model :blocks))))
+    (should (equal (plist-get blk :name) "Agent"))
+    ;; The type survives from the first record; the description follows the last.
+    (should (equal (plist-get (plist-get blk :agent) :agent-type) "Explore"))
+    (should (equal (plist-get (plist-get blk :agent) :description) "Reading note.txt"))
+    (should (equal (plist-get (plist-get blk :agent) :status) "completed"))))
+
+(ert-deftest sprig-test-subagent-does-not-split-the-agent-prose ()
+  ;; The subagent's narration is not the main agent speaking, so it must not
+  ;; close the open text block and cut the main agent's prose in two.
+  (let ((model (sprig-review-build
+                '((text-block) (text "I'll launch an agent. ")
+                  (tool-call "toolu_A" "Agent" "{}")
+                  (subagent "toolu_A" (:status "running" :description "working"))
+                  (text "Done: it says hello.")))))
+    (should (equal (mapcar (lambda (b) (plist-get b :type))
+                           (plist-get model :blocks))
+                   '(text tool text)))))
+
+(ert-deftest sprig-test-parse-task-started ()
+  ;; Names the agent and the job it was given.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"task_started\","
+                            "\"task_id\":\"a095acb48e0523216\","
+                            "\"tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+                            "\"description\":\"Find note.txt contents\","
+                            "\"subagent_type\":\"Explore\","
+                            "\"task_type\":\"local_agent\"}"))
+                   '((subagent "toolu_01P7GYemHFw4irpCEyJ9N7uk"
+                               (:status "running" :agent-type "Explore"
+                                :description "Find note.txt contents")))))))
+
+(ert-deftest sprig-test-parse-task-progress ()
+  ;; The only event that repeats, so it is what makes the row move.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"task_progress\","
+                            "\"task_id\":\"a095acb48e0523216\","
+                            "\"tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+                            "\"description\":\"Running List probe dir and find note.txt\","
+                            "\"subagent_type\":\"Explore\","
+                            "\"usage\":{\"total_tokens\":7900,\"tool_uses\":1,"
+                            "\"duration_ms\":3335},"
+                            "\"last_tool_name\":\"Bash\"}"))
+                   '((subagent "toolu_01P7GYemHFw4irpCEyJ9N7uk"
+                               (:status "running" :agent-type "Explore"
+                                :description "Running List probe dir and find note.txt"
+                                :last-tool "Bash" :tokens 7900 :tool-uses 1)))))))
+
+(ert-deftest sprig-test-parse-task-notification ()
+  ;; Ends the run.  Its `summary' is deliberately not carried: the same prose
+  ;; arrives again as the `Agent' call's tool result.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"system\",\"subtype\":\"task_notification\","
+                            "\"task_id\":\"a095acb48e0523216\","
+                            "\"tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+                            "\"status\":\"completed\","
+                            "\"summary\":\"Found it on the first try.\"}"))
+                   '((subagent "toolu_01P7GYemHFw4irpCEyJ9N7uk"
+                               (:status "completed")))))))
+
+(ert-deftest sprig-test-parse-task-without-a-tool-use-id ()
+  ;; `task_updated' patches by `task_id' alone, so there is no row to hang it
+  ;; on; inventing one would be worse than dropping it.
+  (with-temp-buffer
+    (should-not (sprig--claude-parse-line
+                 (concat "{\"type\":\"system\",\"subtype\":\"task_updated\","
+                         "\"task_id\":\"a095acb48e0523216\","
+                         "\"patch\":{\"status\":\"completed\"}}")))))
+
+(ert-deftest sprig-test-subagent-tool-results-stay-out-of-the-transcript ()
+  "A subagent's own tool results are not the main thread's work.
+Its `tool_use' arrives as a top-level `assistant' record, which is not read,
+so folding these in would strand each as a loose result with no name: the
+subagent's `ls' output would surface as an unattributed row."
+  (with-temp-buffer
+    (let ((subagent (concat "{\"type\":\"user\","
+                            "\"parent_tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+                            "\"message\":{\"role\":\"user\",\"content\":"
+                            "[{\"type\":\"tool_result\","
+                            "\"tool_use_id\":\"toolu_01JnBcYLMdRvTLhHHLQcMgxU\","
+                            "\"content\":\"total 4\"}]}}"))
+          (main (concat "{\"type\":\"user\","
+                        "\"message\":{\"role\":\"user\",\"content\":"
+                        "[{\"type\":\"tool_result\","
+                        "\"tool_use_id\":\"toolu_01P7GYemHFw4irpCEyJ9N7uk\","
+                        "\"content\":\"Found it.\"}]}}")))
+      (should-not (sprig--claude-parse-line subagent))
+      ;; The `Agent' call's own result carries no parent and still lands.
+      (should (equal (sprig--claude-parse-line main)
+                     '((tool-result "toolu_01P7GYemHFw4irpCEyJ9N7uk" nil "Found it.")))))))
+
 (ert-deftest sprig-test-parse-compacting-status ()
   ;; A compaction runs for a minute or more, so it is announced, not implied.
   (with-temp-buffer

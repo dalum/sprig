@@ -1595,6 +1595,29 @@ the fold learns the id from the result rather than from the call."
         (should (equal (string-trim (buffer-string)) "plan me something"))))
     (kill-buffer "*sprig-message*")))
 
+(ert-deftest sprig-review-mode-test-agent-row-narrates-while-it-runs ()
+  "An `Agent' row says what its subagent is doing, then stops once it is done."
+  (let ((running (list :type 'tool :id "toolu_A" :name "Agent"
+                       :input "{\"description\":\"Find note.txt contents\"}"
+                       :agent '(:status "running" :agent-type "Explore"
+                                :description "Reading note.txt")))
+        (done (list :type 'tool :id "toolu_A" :name "Agent"
+                    :input "{\"description\":\"Find note.txt contents\"}"
+                    :agent '(:status "completed" :agent-type "Explore"
+                             :description "Reading note.txt")
+                    :result '(:error nil :text "It says hello."))))
+    (let ((s (substring-no-properties (sprig-review--tool-heading running))))
+      ;; The job it was given, and where it has got to: both, and in that order.
+      (should (string-match-p "Find note.txt contents" s))
+      (should (string-match-p "▸ Explore: Reading note.txt" s)))
+    ;; Done: the row carries the report, so the activity would be stale noise.
+    (let ((s (substring-no-properties (sprig-review--tool-heading done))))
+      (should (string-match-p "Find note.txt contents" s))
+      (should-not (string-match-p "▸" s)))
+    ;; An ordinary tool has no subagent and gains nothing.
+    (should-not (sprig-review--agent-activity
+                 (list :type 'tool :name "Read" :input "{}")))))
+
 (ert-deftest sprig-review-mode-test-plan-indicator ()
   "The freshest plan's progress, by either route into the buffer."
   ;; No plan, no count: an ordinary turn's line stays as it was.

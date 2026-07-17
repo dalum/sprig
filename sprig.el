@@ -352,6 +352,8 @@ A local session's working directory is set by `sprig--spawn' binding
 ;;   (done COST ERR)           the turn finished
 ;;   (context TOKENS)          the turn's prompt size, i.e. context in use
 ;;   (compacting FLAG)         a compaction started (t) or ended (nil)
+;;   (subagent ID PLIST)       a subagent's progress, ID being the `Agent'
+;;                             tool call it runs under (see `sprig--claude-task')
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (control-response ID SUB) the CLI's receipt for a request we sent
@@ -396,6 +398,42 @@ state (`sprig--blocks') stays local to it."
                                  (sprig--tool-result-text .content)))))))
                   content))))
 
+(defun sprig--claude-task (subtype ev)
+  "Turn a `task_*' system record EV of SUBTYPE into a `subagent' event, or nil.
+The CLI narrates a subagent over its own small protocol, keyed throughout by
+`tool_use_id', which is the `Agent' call in the transcript, so the progress
+lands on the row the reader is already looking at.
+
+The three carry different things and all of them are wanted: `task_started'
+names the agent and the job, `task_progress' says what it is doing right now
+\(and is the only event that repeats, so it is what makes the row move), and
+`task_notification' ends it with a status.  `task_updated' is skipped: it
+patches status by `task_id' alone, carrying no `tool_use_id' to route by, and
+says nothing `task_notification' has not already said.
+
+Returns nil for a record with no `tool_use_id' rather than inventing a row
+to hang it on."
+  (let-alist ev
+    (when .tool_use_id
+      (list
+       (list 'subagent .tool_use_id
+             (pcase subtype
+               ("task_started"
+                (list :status "running" :agent-type .subagent_type
+                      :description .description))
+               ("task_progress"
+                (list :status "running" :agent-type .subagent_type
+                      :description .description
+                      :last-tool .last_tool_name
+                      :tokens .usage.total_tokens
+                      :tool-uses .usage.tool_uses))
+               ("task_notification"
+                ;; The summary is deliberately dropped: the subagent's report
+                ;; arrives again as this `Agent' call's tool result, which the
+                ;; buffer already renders, so keeping it here would print the
+                ;; same prose twice under one row.
+                (list :status (or .status "completed")))))))))
+
 (defun sprig--claude-parse-line (line)
   "Parse one stream-json LINE from the `claude' CLI into a list of events.
 Returns the events in order (see the event vocabulary above), or nil.
@@ -430,6 +468,16 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
                      (list (list 'error
                                  (format "Compaction failed: %s"
                                          (or .compact_error .compact_result))))))))))
+         ;; A subagent's progress, keyed by the `Agent' call it runs under.
+         ;; This is the only word we get while one runs: its own messages
+         ;; arrive as top-level `assistant' records (which carry no deltas,
+         ;; so nothing streams), and its transcript is written to a file of
+         ;; its own that the session log never mentions.  Without these the
+         ;; `Agent' row would simply sit there for the minutes it takes.
+         ((and (equal .type "system")
+               (member .subtype '("task_started" "task_progress"
+                                  "task_notification")))
+          (sprig--claude-task .subtype ev))
          ;; A compaction landed: the boundary carries the post-compact token
          ;; count, the context now in use.  Report it so the readout drops
          ;; from the pre-compact size at once, not on the next turn.
@@ -494,7 +542,15 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; hand rather than via `.message.content': `let-alist' would bind
          ;; that eagerly for every line, and a `system'/`error' line whose
          ;; `message' is a plain string would crash the nested lookup.
-         ((equal .type "user")
+         ;; A subagent's own tool results arrive here too, tagged with the
+         ;; `Agent' call they run under.  They are not the main thread's work
+         ;; and their calls were never seen (a subagent's `tool_use' comes as a
+         ;; top-level `assistant' record, which carries no deltas and so is not
+         ;; read), so folding them in would strand each one as a loose result
+         ;; with no name: the subagent's `ls' output would surface as an
+         ;; unattributed row in the transcript.  The `Agent' row narrates the
+         ;; subagent instead (see `sprig--claude-task').
+         ((and (equal .type "user") (not .parent_tool_use_id))
           (sprig--claude-tool-results
            (and (listp .message) (alist-get 'content .message))))
          ;; The CLI asks us to answer an interactive control request: a

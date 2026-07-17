@@ -478,12 +478,30 @@ own state is coloured; this only says how far in."
                          items)
               (length items)))))
 
+(defun sprig-review--agent-activity (block)
+  "Return what BLOCK's subagent is doing right now, or nil when none is.
+Only while it runs: once it is done the row carries the subagent's report,
+which says more than any summary of the work behind it could.  A subagent
+can run for minutes, and the `Agent' row is otherwise still, so this is the
+whole of what says the thing is alive rather than wedged.
+
+Shows what it is doing over how much it has done: `Reading note.txt' is the
+CLI's own account of the current step, and it moves, which is what the reader
+is really checking for.  The token and tool counts are dropped as noise next
+to that."
+  (when-let ((agent (plist-get block :agent)))
+    (when (equal (plist-get agent :status) "running")
+      (let ((type (plist-get agent :agent-type))
+            (desc (plist-get agent :description)))
+        (if (and type desc) (format "%s: %s" type desc) (or type desc))))))
+
 (defun sprig-review--tool-heading (block)
   "Return the single-line heading string for tool BLOCK."
   (let* ((name (or (plist-get block :name) "tool"))
          (changes (plist-get block :changes))
          (todos (sprig-review--todos block))
          (summary (sprig-review--input-summary name (plist-get block :input)))
+         (activity (sprig-review--agent-activity block))
          (err (plist-get (plist-get block :result) :error)))
     (concat
      (sprig-review--face name 'sprig-review-tool)
@@ -495,6 +513,14 @@ own state is coloured; this only says how far in."
       (summary (concat "  " (sprig-review--truncate
                              summary sprig-review-heading-max-width)))
       (t ""))
+     ;; After the job it was given, not instead of it: the two say different
+     ;; things, what the subagent was asked for and where it has got to.
+     (if activity
+         (sprig-review--face
+          (concat "  ▸ " (sprig-review--truncate
+                          activity sprig-review-heading-max-width))
+          'sprig-review-working)
+       "")
      (if err (sprig-review--face "  [error]" 'error) ""))))
 
 ;;;; Section insertion
