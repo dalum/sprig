@@ -146,6 +146,14 @@ Softer than `sprig-review-working' (not bold): the turn is on its way but
 nothing has come back yet."
   :group 'sprig)
 
+(defface sprig-review-plan
+  '((t :inherit shadow))
+  "Face for the state line's plan-progress count.
+Its own face rather than the state's, like the context readout beside it: a
+plan is not the turn, so it should not turn amber merely because a turn is
+running."
+  :group 'sprig)
+
 (defface sprig-review-context
   '((t :inherit shadow))
   "State-line face for a context that has not grown large.
@@ -440,6 +448,35 @@ heading the way a diff's line counts do."
             (seq-count (lambda (td) (equal (alist-get 'status td) "completed"))
                        todos)
             (length todos))))
+
+(defun sprig-review--plan-items (model)
+  "Return the items of the freshest plan in MODEL, or nil if it has none.
+A plan reaches the buffer by either of two routes, a whole-list `TodoWrite'
+or the granular task tools folded into a `tasks' block, and both land on the
+same content/status alist.  Newest wins: the blocks are oldest-first, so
+this reads them backwards and stops at the first plan it meets, which is
+the one still being worked."
+  (seq-some (lambda (block)
+              (or (and (eq (plist-get block :type) 'tasks)
+                       (plist-get block :items))
+                  (sprig-review--todos block)))
+            (reverse (plist-get model :blocks))))
+
+(defun sprig-review--plan-indicator (model)
+  "Return a \"4/5\" count of the freshest plan's progress, or nil for no plan.
+For the state line: the checklist itself is back up the buffer, and scrolling
+to it to learn how far in the agent is defeats a line whose whole job is to
+say what is going on.  Deliberately one dim face and no escalation, the way
+the context readout stays dim until it is genuinely worth alarm: the line
+already carries the state's colour and the context's, and a third would make
+a plain running turn read as three warnings.  The checklist is where a task's
+own state is coloured; this only says how far in."
+  (let ((items (sprig-review--plan-items model)))
+    (when items
+      (format "%d/%d"
+              (seq-count (lambda (td) (equal (alist-get 'status td) "completed"))
+                         items)
+              (length items)))))
 
 (defun sprig-review--tool-heading (block)
   "Return the single-line heading string for tool BLOCK."
@@ -902,10 +939,16 @@ side bar carries a rule in the state colour, so the gutter marks the end of
 the turn as plainly as the line does."
   (pcase-let ((`(,glyph ,text ,face) (sprig-review--state model))
               (ctx (sprig-review--context-indicator (plist-get model :context)))
+              (plan (sprig-review--plan-indicator model))
               (queued (and (boundp 'sprig--queued) (length sprig--queued)))
               (start (point)))
     (magit-insert-section (sprig-state)
       (insert (sprig-review--face (format "%s  %s" glyph text) face))
+      ;; Nearest the state, since it qualifies it: `working…' says something is
+      ;; happening, `☑ 4/5' says how much of it is left to happen.
+      (when plan
+        (insert (sprig-review--face "  ·  " face)
+                (sprig-review--face (format "☑ %s" plan) 'sprig-review-plan)))
       ;; A queued message is invisible otherwise: it is not in the transcript
       ;; (nothing was sent), and it fires on its own, so without this the turn
       ;; ending would spawn a message the reader never asked for twice.  In

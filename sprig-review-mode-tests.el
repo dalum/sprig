@@ -233,7 +233,9 @@ timestamp, or the state line's rule."
   (sprig-review-tests--rendered (sprig-review-tests--todo-model) nil
     (let ((s (buffer-string)))
       (should (string-match-p "^TodoWrite  1/3 done" s))
-      (should-not (string-match-p "☑" s)))))
+      ;; The checklist stays folded: no item is rendered.  Asserted on the
+      ;; item, not on a bare `☑', since the state line now carries one too.
+      (should-not (string-match-p "☑ First" s)))))
 
 (ert-deftest sprig-review-mode-test-todo-checklist-expands ()
   ;; Opening the TodoWrite shows the checklist, each item with a status
@@ -1592,6 +1594,56 @@ the fold learns the id from the result rather than from the call."
         (should-not quit)
         (should (equal (string-trim (buffer-string)) "plan me something"))))
     (kill-buffer "*sprig-message*")))
+
+(ert-deftest sprig-review-mode-test-plan-indicator ()
+  "The freshest plan's progress, by either route into the buffer."
+  ;; No plan, no count: an ordinary turn's line stays as it was.
+  (should-not (sprig-review--plan-indicator nil))
+  (should-not (sprig-review--plan-indicator
+               (list :blocks (list (list :type 'text :text "hi")))))
+  ;; The granular task tools, folded into a `tasks' block.
+  (should (equal (sprig-review--plan-indicator
+                  (list :blocks
+                        (list (list :type 'tasks
+                                    :items '(((content . "a") (status . "completed"))
+                                             ((content . "b") (status . "in_progress"))
+                                             ((content . "c") (status . "pending")))))))
+                 "1/3"))
+  ;; A whole-list `TodoWrite' reaches the same count down the other route.
+  (should (equal (sprig-review--plan-indicator
+                  (list :blocks
+                        (list (list :type 'tool-call :name "TodoWrite"
+                                    :input '((todos . (((content . "a") (status . "completed"))
+                                                       ((content . "b") (status . "completed")))))))))
+                 "2/2")))
+
+(ert-deftest sprig-review-mode-test-plan-indicator-takes-the-freshest ()
+  ;; Blocks are oldest-first, and a plan supersedes the one before it: the
+  ;; count has to follow the plan being worked, not the first one ever seen.
+  (should (equal (sprig-review--plan-indicator
+                  (list :blocks
+                        (list (list :type 'tasks
+                                    :items '(((content . "old") (status . "pending"))))
+                              (list :type 'text :text "on reflection")
+                              (list :type 'tasks
+                                    :items '(((content . "new") (status . "completed"))
+                                             ((content . "new2") (status . "pending")))))))
+                 "1/2")))
+
+(ert-deftest sprig-review-mode-test-state-shows-the-plan ()
+  "The plan count rides the state line, and stays off it when there is no plan."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((inhibit-read-only t)
+          (model (list :blocks
+                       (list (list :type 'tasks
+                                   :items '(((content . "a") (status . "completed"))
+                                            ((content . "b") (status . "pending"))))))))
+      (sprig-review--insert-state model)
+      (should (string-match-p "☑ 1/2" (buffer-string)))
+      (erase-buffer)
+      (sprig-review--insert-state nil)
+      (should-not (string-match-p "☑" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-state-shows-the-queue ()
   "A queued message is visible on the state line, and only while queued."
