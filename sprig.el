@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.12.0
+;; Version: 0.13.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -44,6 +44,7 @@
 (require 'subr-x)
 (require 'tabulated-list)
 (require 'transient)                     ; the navigator's c / a dispatch menus
+(require 'iso8601)                       ; parse the log's own timestamps
 (require 'sprig-review)                  ; pure data layer; no magit-section
 (eval-when-compile (require 'let-alist))
 
@@ -174,11 +175,24 @@ feel.  Prefer leaving it nil and using `/'."
   :type '(choice (const :tag "No initial filter" nil)
                  (repeat directory)))
 
-(defcustom sprig-status-preview-max-lines 3
-  "Maximum number of lines shown in a navigator inline reply preview.
+(defcustom sprig-status-preview-max-lines nil
+  "Line cap for a navigator inline reply preview, or nil for the whole reply.
 `sprig-status-toggle-preview' (bound to TAB) expands the row at point to
-show the tail of that session's last reply, filled to this many lines."
-  :type 'integer)
+the last exchange: your last prompt as a lead line, then the agent's reply
+prose, wrapped to the window.  nil (the default) shows the reply in full,
+however long; a number bounds the prompt and reply together to that many
+lines, cutting the reply with an ellipsis.  Set a number to keep a long
+reply from filling the list."
+  :type '(choice (const :tag "Whole reply (no cap)" nil) integer))
+
+(defcustom sprig-status-preview-markdown t
+  "When non-nil, fontify the navigator inline reply preview with markdown.
+The expanded reply is rendered with `markdown-mode' faces and its `*'/`#'
+markup dropped, so bold, headings, lists and code read as formatting rather
+than raw characters, muted under `sprig-status-preview'.  Has no effect when
+`markdown-mode' is not installed; the reply then falls back to plainly filled
+prose.  Mirrors `sprig-review-fontify-markdown' for the review buffer."
+  :type 'boolean)
 
 (defcustom sprig-status-ignore-directories nil
   "Regexps for stored sessions the navigator should hide.
@@ -195,6 +209,11 @@ Example, hiding /tmp and everything under it:
 
 (defface sprig-status-preview '((t :inherit shadow :slant italic))
   "Face for the inline reply preview shown under an expanded navigator row.")
+
+(defface sprig-status-preview-prompt '((t :inherit shadow :weight bold))
+  "Face for the last user prompt shown as the lead of an inline preview.
+Muted like the reply below it, but weighted so the prompt reads as the
+question the reply is answering rather than more of the reply.")
 
 (defface sprig-status-group '((t :inherit font-lock-keyword-face :weight bold))
   "Face for a navigator group heading naming the host its rows run on.")
@@ -1769,29 +1788,95 @@ on the US byte; the title is nil when the file had none."
 
 ;;; Last-reply preview
 
-(defun sprig--last-paragraph (text)
-  "Return the last non-empty paragraph of TEXT, or nil.
-Line breaks within the paragraph are collapsed to single spaces, so it can
-be re-wrapped for display."
-  (let (result)
-    (dolist (para (split-string text "\n[ \t]*\n" t))
-      (let ((collapsed (string-trim
-                        (replace-regexp-in-string "[ \t\n]+" " " para))))
-        (unless (string-empty-p collapsed)
-          (setq result collapsed))))
-    result))
+(defun sprig--collapse-whitespace (text)
+  "Return TEXT with runs of whitespace collapsed to single spaces, trimmed."
+  (string-trim (replace-regexp-in-string "[ \t\n]+" " " text)))
 
-(defun sprig--events-last-text (events)
-  "Return the last assistant text block's last paragraph from EVENTS, or nil.
-EVENTS are in chronological order (the review model's input order)."
+(defun sprig--normalize-prose (text)
+  "Return TEXT with each paragraph collapsed to a re-wrappable line, or nil.
+Blank-line paragraph breaks are kept (one blank line between paragraphs) so
+the result fills cleanly while still reading as paragraphs; nil when empty."
+  (let ((paras (delq nil
+                     (mapcar (lambda (p)
+                               (let ((c (sprig--collapse-whitespace p)))
+                                 (unless (string-empty-p c) c)))
+                             (split-string (or text "") "\n[ \t]*\n" t)))))
+    (and paras (string-join paras "\n\n"))))
+
+(defun sprig--tidy-prose (text)
+  "Return TEXT trimmed with runs of blank lines squeezed to one, or nil.
+Single line breaks are kept so lists and headings survive to the preview's
+markdown pass; nil when TEXT holds no non-blank content."
+  (let ((s (string-trim
+            (replace-regexp-in-string "\n\\(?:[ \t]*\n\\)+" "\n\n" (or text "")))))
+    (and (not (string-empty-p s)) s)))
+
+(defun sprig--format-time-value (time)
+  "Return TIME (any `format-time-string' value) as a short local string, or nil.
+A stamp from today shows the clock alone; an older one is prefixed with its
+month and day.  nil when TIME is nil."
+  (and time
+       (format-time-string
+        (if (string= (format-time-string "%Y-%m-%d" time)
+                     (format-time-string "%Y-%m-%d"))
+            "%H:%M"
+          "%m-%d %H:%M")
+        time)))
+
+(defun sprig--format-time (iso)
+  "Return ISO, an ISO 8601 timestamp, as a short local time string, or nil.
+Formatted like `sprig--format-time-value'; nil when ISO is missing or cannot
+be parsed."
+  (when (stringp iso)
+    (ignore-errors
+      (sprig--format-time-value (encode-time (iso8601-parse iso))))))
+
+(defun sprig--events-preview (events)
+  "Return a preview plist for EVENTS' conversation tail, or nil.
+The plist is (:prompt STR :reply STR :time ISO :context N :done BOOL :error
+BOOL :pending BOOL): the last user turn collapsed to a line, the agent's reply
+that answered it (every text block since that turn, structure kept for the
+markdown pass), the stamp of the freshest block, and the turn's outcome and
+context size for the preview's state line.  When the turn since your prompt
+carried no prose (it ended on a tool call or a question), or there is no user
+turn at all, the reply falls back to the last assistant text anywhere.  EVENTS
+are chronological (the review model's input order)."
   (let* ((model (ignore-errors (sprig-review-build events)))
-         (blocks (and model (plist-get model :blocks)))
-         (last (seq-find (lambda (b) (eq (plist-get b :type) 'text))
-                         (reverse blocks))))
-    (and last (sprig--last-paragraph (plist-get last :text)))))
+         (blocks (and model (plist-get model :blocks))))
+    (when blocks
+      (let* ((last-user (let ((pos nil) (i 0))
+                          (dolist (b blocks)
+                            (when (eq (plist-get b :type) 'user) (setq pos i))
+                            (setq i (1+ i)))
+                          pos))
+             (prompt (and last-user
+                          (sprig--collapse-whitespace
+                           (plist-get (nth last-user blocks) :text))))
+             (reply (or (and last-user
+                             (sprig--tidy-prose
+                              (mapconcat
+                               (lambda (b) (plist-get b :text))
+                               (seq-filter
+                                (lambda (b) (eq (plist-get b :type) 'text))
+                                (nthcdr (1+ last-user) blocks))
+                               "\n\n")))
+                        (let ((last (seq-find
+                                     (lambda (b) (eq (plist-get b :type) 'text))
+                                     (reverse blocks))))
+                          (and last (sprig--tidy-prose
+                                     (plist-get last :text)))))))
+        (let ((prompt* (and prompt (not (string-empty-p prompt)) prompt))
+              (ctx (plist-get model :context))
+              (done (plist-get model :done))
+              (err (plist-get model :error))
+              (pending (and (sprig-review-pending-dialog model) t)))
+          (when (or prompt* reply ctx done err pending)
+            (list :prompt prompt* :reply reply
+                  :time (plist-get (car (last blocks)) :time)
+                  :context ctx :done done :error err :pending pending)))))))
 
 (defun sprig--entry-preview (entry)
-  "Return the inline reply preview for status ENTRY, or nil.
+  "Return the inline preview plist for status ENTRY, or nil.
 From the open review buffer's events when ENTRY has one, else the stored
 session log's tail, read on the host that row's session ran on rather than
 the configured default: with a group per host the two are often not the
@@ -1801,11 +1886,11 @@ same, and the wrong one has no such log."
         (sprig-remote (plist-get entry :host)))
     (cond
      ((buffer-live-p buf)
-      (sprig--events-last-text
+      (sprig--events-preview
        (reverse (buffer-local-value 'sprig-review--events buf))))
      (file
       (let ((tail (sprig--session-log-tail file)))
-        (and tail (sprig--events-last-text
+        (and tail (sprig--events-preview
                    (sprig-review-session-events (split-string tail "\n" t)))))))))
 
 ;;; Collect open buffers and stored sessions into rows
@@ -1866,12 +1951,17 @@ group filtered down to nothing keeps its heading all the same."
                            :project (plist-get e :project)
                            :title (plist-get e :title)
                            :status 'disconnected
+                           :mtime (plist-get e :mtime)
                            :session (plist-get e :session))
                      table))
-           ;; An owning buffer that could not title itself borrows the log's.
-           ((null (plist-get existing :title))
-            (puthash key (plist-put existing :title (plist-get e :title))
-                     table))))))
+           ;; An owning buffer borrows the log's mtime (so an open row shows
+           ;; when it last ran too) and its title, if it could not title itself.
+           (t
+            (unless (plist-get existing :title)
+              (setq existing (plist-put existing :title (plist-get e :title))))
+            (unless (plist-get existing :mtime)
+              (setq existing (plist-put existing :mtime (plist-get e :mtime))))
+            (puthash key existing table))))))
     (let ((rows (mapcar (lambda (k)
                           (let ((e (gethash k table)))
                             (if (plist-get e :title)
@@ -1882,7 +1972,8 @@ group filtered down to nothing keeps its heading all the same."
         (setq rows (seq-filter
                     (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
                     rows)))
-      (sprig--status-sort-by-group rows (sprig--status-group-hosts rows)))))
+      (sprig--status-sort-by-group (sprig--status-sort-rows rows)
+                                   (sprig--status-group-hosts rows)))))
 
 (defun sprig--status-group-hosts (rows)
   "Return the ordered group hosts for ROWS.
@@ -1900,8 +1991,8 @@ being filed under someone else's heading."
 
 (defun sprig--status-sort-by-group (rows hosts)
   "Order ROWS by their host's position in HOSTS.
-`sort' is stable, so within a group the rows keep the newest-first order
-the scan gave them."
+`sort' is stable, so within a group the rows keep the column order
+`sprig--status-sort-rows' gave them."
   (let ((rank (make-hash-table :test 'equal))
         (n 0))
     (dolist (host hosts)
@@ -1910,6 +2001,41 @@ the scan gave them."
     (sort (copy-sequence rows)
           (lambda (a b) (< (gethash (plist-get a :host) rank 0)
                            (gethash (plist-get b :host) rank 0))))))
+
+(defvar-local sprig--status-sort '("Time" . t)
+  "Active navigator sort as (COLUMN-NAME . DESCENDING-P).
+Applied within each host group, before the stable group sort, so the two
+groups stay apart while their rows order by the chosen column.  The default
+sorts by `Time' descending, newest first.  `sprig-status-sort' changes it.")
+
+(defun sprig--status-entry-time (entry)
+  "Return ENTRY's sort time: its log mtime, or now for a session with no log.
+A live session not yet written to a log is the freshest thing there is, so
+it sorts to the top of a newest-first list rather than the bottom."
+  (or (plist-get entry :mtime) most-positive-fixnum))
+
+(defun sprig--status-rank (status)
+  "Return a sort rank for STATUS, busiest (streaming) first."
+  (pcase status ('streaming 0) ('waiting 1) ('idle 2) ('interrupted 3) (_ 4)))
+
+(defun sprig--status-row-less (name)
+  "Return an ascending `sort' predicate over status entries for column NAME."
+  (pcase name
+    ("Time" (lambda (a b) (< (sprig--status-entry-time a)
+                             (sprig--status-entry-time b))))
+    ("S" (lambda (a b) (< (sprig--status-rank (plist-get a :status))
+                          (sprig--status-rank (plist-get b :status)))))
+    (_ (let ((k (pcase name ("Title" :title) ("Project" :project) (_ :session))))
+         (lambda (a b) (string-lessp (downcase (or (plist-get a k) ""))
+                                     (downcase (or (plist-get b k) ""))))))))
+
+(defun sprig--status-sort-rows (rows)
+  "Sort ROWS by `sprig--status-sort' ahead of the stable group sort, so the
+column order becomes the order within each host group."
+  (pcase-let ((`(,name . ,desc) (or sprig--status-sort '("Time" . t))))
+    (let ((less (sprig--status-row-less name)))
+      (sort (copy-sequence rows)
+            (if desc (lambda (a b) (funcall less b a)) less)))))
 
 (defun sprig--entry-matches-filter (entry filter)
   "Non-nil if ENTRY's project label or title contains FILTER.
@@ -1967,13 +2093,20 @@ never outlives its row."
                                 "-")
                               (if (and (stringp session) (> (length session) 0))
                                   (substring session 0 (min 8 (length session)))
-                                "-")))
+                                "-")
+                              (propertize
+                               (or (sprig--format-time-value (plist-get e :mtime))
+                                   "-")
+                               'face 'sprig-status-preview)))
                 rows))))
     (setq sprig--status-index index)
     (setq mode-line-process
           (concat (and sprig--status-filter
                        (format " /%s" sprig--status-filter))
-                  (and sprig--status-show-all " [all]")))
+                  (and sprig--status-show-all " [all]")
+                  (when sprig--status-sort
+                    (format " %s%s" (if (cdr sprig--status-sort) "↓" "↑")
+                            (car sprig--status-sort)))))
     (sprig--status-prune-expanded index)
     (nreverse rows)))
 
@@ -2040,25 +2173,148 @@ heading and not a row."
     (beginning-of-line)
     found))
 
+(defun sprig--fill-to-lines (text width)
+  "Fill TEXT to WIDTH columns and return it as a list of lines."
+  (with-temp-buffer
+    (insert text)
+    (let ((fill-column width))
+      (fill-region (point-min) (point-max)))
+    (split-string (buffer-string) "\n" t)))
+
+(defvar markdown-hide-markup)
+(declare-function markdown-mode "markdown-mode" ())
+(declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
+
+(defun sprig--markdown-fill (text width)
+  "Return TEXT as markdown-fontified display lines filled to WIDTH, or nil.
+Fontifies in a reusable hidden buffer with `markdown-mode', fills the prose
+to WIDTH, then drops the `*'/`#' markup characters markdown marked invisible
+and underlays `sprig-status-preview' so plain prose stays muted while bold,
+headings and code keep their markdown faces.  Returns nil when
+`sprig-status-preview-markdown' is off or `markdown-mode' is not installed,
+so the caller can fall back to plain prose."
+  (when (and sprig-status-preview-markdown
+             (require 'markdown-mode nil t))
+    (with-current-buffer (get-buffer-create " *sprig-status-markdown*")
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (delay-mode-hooks (markdown-mode))
+        (setq-local markdown-hide-markup t)
+        ;; The toggle wires markup hiding fully where merely setting the flag
+        ;; may not (mirrors `sprig-review--fontify-markdown').
+        (when (fboundp 'markdown-toggle-markup-hiding)
+          (ignore-errors (markdown-toggle-markup-hiding 1)))
+        (insert text)
+        (font-lock-ensure)
+        ;; Fill first, while the markup is still present for markdown's
+        ;; paragraph detection, then delete what it marked invisible so the
+        ;; markers neither eat width nor show through.
+        (let ((fill-column width))
+          (fill-region (point-min) (point-max)))
+        (let ((pos (point-min)))
+          (while (< pos (point-max))
+            (let ((next (or (next-single-property-change pos 'invisible)
+                            (point-max))))
+              (if (get-text-property pos 'invisible)
+                  (delete-region pos next)
+                (setq pos next)))))
+        (add-face-text-property (point-min) (point-max) 'sprig-status-preview t)
+        (split-string (string-trim-right (buffer-string) "\n+") "\n")))))
+
+(defun sprig--status-reply-lines (reply width)
+  "Return REPLY as display lines wrapped to WIDTH.
+With `markdown-mode' and `sprig-status-preview-markdown' on the lines carry
+markdown faces (see `sprig--markdown-fill'); otherwise the reply collapses to
+prose and fills in the muted preview face."
+  (or (sprig--markdown-fill reply width)
+      (mapcar (lambda (l) (propertize l 'face 'sprig-status-preview))
+              (sprig--fill-to-lines (or (sprig--normalize-prose reply) reply)
+                                    width))))
+
+(defun sprig--ellipsize (text width)
+  "Return TEXT truncated to WIDTH columns, ending in an ellipsis if cut."
+  (if (<= (string-width text) width)
+      text
+    (concat (truncate-string-to-width text (max 1 (1- width))) "…")))
+
+(defun sprig--format-tokens (n)
+  "Format N tokens compactly, in thousands or millions."
+  (if (>= n 1000000) (format "%.1fM" (/ n 1000000.0))
+    (format "%.1fk" (/ n 1000.0))))
+
+(defun sprig--status-state-line (entry preview)
+  "Return the preview's leading state line for ENTRY, or nil.
+Mirrors the review buffer's state line: a glyph and word for what the turn
+is doing or how it ended, then the context in use.  The live streaming and
+waiting states come from ENTRY's own status, as the row glyph does; the
+turn's outcome and its context size come from PREVIEW's model fields.  nil
+when there is no status and no model at all (nothing to say)."
+  (let ((status (plist-get entry :status))
+        (ctx (plist-get preview :context)))
+    (when (or status ctx (plist-get preview :done) (plist-get preview :error)
+              (plist-get preview :pending))
+      (pcase-let
+          ((`(,glyph ,text ,face)
+            (cond
+             ((eq status 'streaming) '("▶" "working…" warning))
+             ((or (eq status 'waiting) (plist-get preview :pending))
+              '("?" "waiting on you" sprig-review-waiting))
+             ((plist-get preview :error) '("✗" "turn failed" error))
+             ((plist-get preview :done) '("✓" "turn over" success))
+             ((eq status 'interrupted)
+              '("◼" "interrupted" font-lock-comment-face))
+             (t '("●" "idle" shadow)))))
+        (concat (propertize (format "     %s  %s" glyph text) 'face face)
+                (when (and (numberp ctx) (> ctx 0))
+                  (concat (propertize "  ·  " 'face face)
+                          (propertize (sprig--format-tokens ctx)
+                                      'face 'sprig-review-context))))))))
+
 (defun sprig--status-preview-lines (entry)
   "Return the propertized display lines for ENTRY's inline preview.
-The last reply's tail is filled to `sprig-status-preview-max-lines' and
-indented; a row with no reply yet shows a single muted placeholder."
-  (let* ((text (sprig--entry-preview entry))
+A leading state line (what the turn is doing or how it ended, and the context
+in use), then the last exchange, indented: your last prompt as one lead line,
+then the agent's reply prose wrapped to the window.  The exchange's time is not
+repeated here; it rides the row's own `Time' column, visible collapsed too.
+`sprig-status-preview-max-lines' bounds the prompt and reply together when it is
+a number; nil (the default) shows the whole reply.  A row with no reply yet
+shows a single muted placeholder."
+  (let* ((preview (sprig--entry-preview entry))
+         (prompt (plist-get preview :prompt))
+         (reply (plist-get preview :reply))
+         (state (sprig--status-state-line entry preview))
          (width (max 24 (- (min 100 (window-width)) 6)))
-         (lines (if (and text (not (string-empty-p text)))
-                    (with-temp-buffer
-                      (insert text)
-                      (let ((fill-column width))
-                        (fill-region (point-min) (point-max)))
-                      (split-string (buffer-string) "\n" t))
-                  (list "(no reply yet)"))))
-    (when (> (length lines) sprig-status-preview-max-lines)
-      (setq lines (seq-take lines sprig-status-preview-max-lines))
-      (setcar (last lines) (concat (car (last lines)) " …")))
-    (mapcar (lambda (l)
-              (propertize (concat "     " l) 'face 'sprig-status-preview))
-            lines)))
+         (lines '()))
+    (when state (push state lines))
+    (cond
+     ((not (or prompt reply))
+      (push (propertize "     (no reply yet)" 'face 'sprig-status-preview) lines))
+     (t
+      (when prompt
+        (push (propertize (concat "     » " (sprig--ellipsize prompt (- width 2)))
+                          'face 'sprig-status-preview-prompt)
+              lines))
+      (when reply
+        (let* ((cap sprig-status-preview-max-lines)
+               (budget (and cap (max 1 (- cap (length lines)))))
+               (wrapped (sprig--status-reply-lines reply width)))
+          ;; Drop trailing blank lines so a cap, or the row's end, lands on
+          ;; real content rather than an empty paragraph gap.
+          (while (and wrapped (string-blank-p (car (last wrapped))))
+            (setq wrapped (butlast wrapped)))
+          (when (and budget (> (length wrapped) budget))
+            (setq wrapped (seq-take wrapped budget))
+            (setcar (last wrapped)
+                    (concat (car (last wrapped))
+                            (propertize " …" 'face 'sprig-status-preview))))
+          (dolist (l wrapped)
+            ;; A paragraph gap stays a truly empty line: an indented blank
+            ;; line is trailing whitespace, which some setups highlight.
+            (push (if (string-blank-p l)
+                      ""
+                    (concat (propertize "     " 'face 'sprig-status-preview) l))
+                  lines))))))
+    (nreverse lines)))
 
 ;;; Host group headings
 
@@ -2152,7 +2408,12 @@ on its row rather than stranding it on the heading."
                                            (sprig--status-preview-lines entry)
                                            "\n")
                                 "\n")
-                        (sprig--status-stamp-group from (point) host)))))))
+                        (sprig--status-stamp-group from (point) host)
+                        ;; Carry the row's id onto its preview lines so a verb
+                        ;; keyed on point (c c, a a, TAB) finds the same
+                        ;; session there as on the row itself.
+                        (put-text-property from (point)
+                                           'sprig--status-preview-id id)))))))
             (forward-line 1))
           ;; Whatever is left took no rows this render; head it anyway.
           (goto-char (point-max))
@@ -2206,7 +2467,27 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
 (define-key sprig-status-mode-map (kbd "L")   #'sprig-status-show-all)
+(define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
+;; The columns are unsortable to `tabulated-list', so a header click falls
+;; through to here rather than its native sort, which would break the groups.
+(define-key sprig-status-mode-map [header-line mouse-1] #'sprig-status-sort)
+(define-key sprig-status-mode-map [header-line mouse-2] #'sprig-status-sort)
 (define-key sprig-status-mode-map (kbd "?")   #'describe-mode)
+
+(defun sprig--status-apply-format ()
+  "Set the navigator's column format and (re)initialise its header.
+Split from the mode so `sprig-reload' can re-apply an edited column layout to
+an already-open navigator, whose header is otherwise fixed at mode init."
+  (setq tabulated-list-format
+        [("S" 2 t)
+         ("Title" 32 t)
+         ("Project" 24 t)
+         ("Session" 9 nil)
+         ("Time" 11 nil)]
+        tabulated-list-padding 1
+        tabulated-list-sort-key nil
+        tabulated-list-entries #'sprig--status-entries)
+  (tabulated-list-init-header))
 
 (define-derived-mode sprig-status-mode tabulated-list-mode "Sprig-Status"
   "Major mode listing Sprig conversations and their live status.
@@ -2214,16 +2495,8 @@ reprint; point is kept on its row by `tabulated-list-print'."
 under point with \\[sprig-status-dispatch] (its `c c' composes, `c o'
 connects), answer its waiting question with \\[sprig-status-answer-dispatch],
 interrupt with \\[sprig-status-interrupt], refresh with \\[revert-buffer]."
-  (setq tabulated-list-format
-        [("S" 2 t)
-         ("Title" 32 t)
-         ("Project" 24 t)
-         ("Session" 9 nil)]
-        tabulated-list-padding 1
-        tabulated-list-sort-key nil
-        tabulated-list-entries #'sprig--status-entries)
   (setq-local revert-buffer-function #'sprig--status-revert)
-  (tabulated-list-init-header))
+  (sprig--status-apply-format))
 
 (defun sprig--status-revert (&rest _)
   "Revert the navigator (the `g' / `revert-buffer' path), keeping previews."
@@ -2246,9 +2519,17 @@ Used from `kill-buffer-hook', which runs while the dying buffer is still
 live and listed; deferring lets it drop from the list first."
   (run-at-time 0 nil #'sprig--status-refresh))
 
+(defun sprig--status-id-at-point ()
+  "Return the session id of the row at point, reached from a preview line too.
+`tabulated-list-get-id' has it on a printed row; a preview line under a row
+carries it as a text property, so a verb keyed on point finds the same
+session whether point sits on the row or in its expanded preview."
+  (or (tabulated-list-get-id)
+      (get-text-property (line-beginning-position) 'sprig--status-preview-id)))
+
 (defun sprig--status-entry-at-point ()
   "Return the status plist for the row at point, or signal an error."
-  (let ((id (tabulated-list-get-id)))
+  (let ((id (sprig--status-id-at-point)))
     (or (and id sprig--status-index (gethash id sprig--status-index))
         (user-error "No Sprig session on this line"))))
 
@@ -2391,6 +2672,33 @@ Reuses an open owning buffer, or replays the stored log into a new one."
     (when (process-live-p sprig--process) (sprig--teardown-process)))
   (sprig--status-refresh))
 
+(defun sprig--status-sort-read-column (event)
+  "Return the column to sort by: the header EVENT clicked, else one prompted.
+On a header-line mouse click the column name rides the header text
+`tabulated-list' stamps on it; otherwise (a keypress) the user picks one."
+  (or (and (mouse-event-p event)
+           (let* ((pos (event-start event))
+                  (obj (posn-object pos)))
+             (and obj (get-text-property (cdr obj) 'tabulated-list-column-name
+                                         (car obj)))))
+      (completing-read "Sort by column: "
+                       (mapcar #'car (append tabulated-list-format nil))
+                       nil t nil nil (car sprig--status-sort))))
+
+(defun sprig-status-sort (&optional column)
+  "Sort the navigator within each host group by COLUMN, then re-render.
+Interactively, sort by the header column clicked, or prompt for one; choosing
+the column that is already active flips its direction.  `Time' and the status
+column default to descending (newest, busiest first), the text columns to
+ascending.  The groups stay apart: the sort is within each, so local and
+remote never intermix."
+  (interactive (list (sprig--status-sort-read-column last-command-event)))
+  (setq sprig--status-sort
+        (if (equal column (car sprig--status-sort))
+            (cons column (not (cdr sprig--status-sort)))
+          (cons column (and (member column '("Time" "S")) t))))
+  (sprig--status-render))
+
 ;; Defined here, after the connect / interrupt / disconnect verbs they list,
 ;; so every suffix command is known by the time the prefix is compiled.
 (transient-define-prefix sprig-status-dispatch ()
@@ -2424,17 +2732,18 @@ The review buffer's `a', acting on the session under point."
   "Fold the group under point, or preview the reply of the row under point.
 On a host heading (`local' or `remote HOST'), TAB collapses that whole
 group to its heading and expands it again, the way `magit' folds a
-section.  On a session row, it toggles an inline preview of the tail of
-that session's last reply, filled to `sprig-status-preview-max-lines'
-lines."
+section.  On a session row, it toggles an inline preview of the last
+exchange: your prompt and the agent's reply in full (see
+`sprig-status-preview-max-lines' to bound a long one)."
   (interactive)
-  (cond
-   ((get-text-property (line-beginning-position) 'sprig--status-heading)
-    (sprig--status-toggle-collapse (sprig--status-host-at-point)))
-   ((tabulated-list-get-id)
-    (sprig--status-toggle-id (tabulated-list-get-id))
-    (sprig--status-render))
-   (t (user-error "No Sprig session or host heading on this line"))))
+  (let ((id (sprig--status-id-at-point)))
+    (cond
+     ((get-text-property (line-beginning-position) 'sprig--status-heading)
+      (sprig--status-toggle-collapse (sprig--status-host-at-point)))
+     (id
+      (sprig--status-toggle-id id)
+      (sprig--status-render))
+     (t (user-error "No Sprig session or host heading on this line")))))
 
 (defun sprig-status-new (&optional local)
   "Start a fresh session on the host of the group point is in.
@@ -2553,6 +2862,14 @@ their behaviour picks up the new definitions."
   (dolist (file sprig--source-files)
     (load (expand-file-name (concat file ".el") sprig--source-directory) nil t))
   (sprig--resettle-review-buffers)
+  ;; The navigator's column format is fixed at mode init, so an open one keeps
+  ;; a stale header across a reload; re-apply it and repaint, keeping the
+  ;; buffer's fold, filter, and preview state.
+  (when-let ((buf (get-buffer sprig-status-buffer-name)))
+    (with-current-buffer buf
+      (when (derived-mode-p 'sprig-status-mode)
+        (sprig--status-apply-format)
+        (sprig--status-render))))
   (message "sprig: reloaded %d files from %s"
            (length sprig--source-files) sprig--source-directory))
 

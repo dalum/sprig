@@ -2055,6 +2055,305 @@ Return the log directory."
                 (should-not (string-match-p "Local one" text))))))
       (delete-directory root t))))
 
+;;; Inline preview: the last exchange
+
+(ert-deftest sprig-test-normalize-prose ()
+  ;; Each paragraph's inner line breaks collapse so it re-wraps, but the
+  ;; blank-line paragraph break is kept; empty in, nil out.
+  (should (equal (sprig--normalize-prose "one\ntwo\n\n  three   four ")
+                 "one two\n\nthree four"))
+  (should (null (sprig--normalize-prose "   \n\n  ")))
+  (should (null (sprig--normalize-prose nil))))
+
+(ert-deftest sprig-test-events-preview-last-exchange ()
+  ;; The preview is the last exchange: the last prompt, and the whole reply
+  ;; since it (all paragraphs), with the earlier turn left out.
+  (let ((p (sprig--events-preview
+            '((user "old question") (text "old answer")
+              (user "the new question") (text "para one\n\npara two")))))
+    (should (equal (plist-get p :prompt) "the new question"))
+    (should (equal (plist-get p :reply) "para one\n\npara two"))
+    (should-not (string-match-p "old answer" (plist-get p :reply)))))
+
+(ert-deftest sprig-test-events-preview-joins-reply-blocks ()
+  ;; A reply split across text blocks by a tool call is joined whole, not cut
+  ;; down to the final paragraph the way the old preview was.
+  (let ((p (sprig--events-preview
+            '((user "q") (text "before the tool")
+              (tool-call "t1" "Bash" nil) (text "after the tool")))))
+    (should (equal (plist-get p :reply) "before the tool\n\nafter the tool"))))
+
+(ert-deftest sprig-test-events-preview-falls-back-to-last-text ()
+  ;; The newest turn ended on a tool call with no prose of its own, so the
+  ;; reply falls back to the last assistant text anywhere: the preview shows
+  ;; the freshest prompt over the last thing the agent actually said.
+  (let ((p (sprig--events-preview
+            '((user "q1") (text "the only prose")
+              (user "q2") (tool-call "t1" "Bash" nil)))))
+    (should (equal (plist-get p :prompt) "q2"))
+    (should (equal (plist-get p :reply) "the only prose"))))
+
+(ert-deftest sprig-test-events-preview-empty ()
+  ;; Nothing to preview: no events, or events with no prose at all.
+  (should (null (sprig--events-preview nil)))
+  (should (null (sprig--events-preview '((tool-call "t" "Bash" nil))))))
+
+(ert-deftest sprig-test-status-preview-lines-caps-and-leads-with-prompt ()
+  ;; The rendered preview leads with the prompt in its own face, wraps the
+  ;; reply in the preview face, and caps prompt and reply together to the
+  ;; line budget, marking the cut.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/prev")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (reply (mapconcat
+                 (lambda (i) (format "Reply line %d with enough words to wrap." i))
+                 (number-sequence 1 8) "\n\n")))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-prev"
+           `(:type "user" :cwd ,proj
+             :message (:role "user" :content "my prompt here"))
+           '(:type "ai-title" :aiTitle "Prev")
+           `(:type "assistant" :cwd ,proj
+             :message (:role "assistant"
+                       :content ,(vector (list :type "text" :text reply)))))
+          (let* ((entry (car (sprig--scan-session-logs)))
+                 (sprig-status-preview-max-lines 5)
+                 (lines (sprig--status-preview-lines entry)))
+            (should (<= (length lines) 5))
+            ;; Leads with the prompt, in the prompt face.
+            (should (string-match-p "» my prompt here" (car lines)))
+            (should (eq (get-text-property 0 'face (car lines))
+                        'sprig-status-preview-prompt))
+            ;; The reply follows in the preview face.
+            (should (eq (get-text-property 0 'face (nth 1 lines))
+                        'sprig-status-preview))
+            ;; Capped, so the last line is marked with an ellipsis.
+            (should (string-match-p "…\\'" (car (last lines))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-preview-lines-uncapped-shows-whole-reply ()
+  ;; With the cap nil (the default), the whole reply shows: more lines than
+  ;; any small cap, and nothing cut with an ellipsis.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/full")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (reply (mapconcat
+                 (lambda (i) (format "Reply line %d with enough words to wrap." i))
+                 (number-sequence 1 8) "\n\n")))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-full"
+           `(:type "user" :cwd ,proj
+             :message (:role "user" :content "short prompt"))
+           '(:type "ai-title" :aiTitle "Full")
+           `(:type "assistant" :cwd ,proj
+             :message (:role "assistant"
+                       :content ,(vector (list :type "text" :text reply)))))
+          (let* ((entry (car (sprig--scan-session-logs)))
+                 (sprig-status-preview-max-lines nil)
+                 (lines (sprig--status-preview-lines entry)))
+            ;; The 8-paragraph reply wraps well past any small cap.
+            (should (> (length lines) 8))
+            ;; Nothing was cut: no line ends in an ellipsis.
+            (should-not (seq-some (lambda (l) (string-suffix-p "…" l)) lines))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-preview-lines-no-reply ()
+  ;; A session with nothing to show falls to the muted placeholder.
+  (should (equal (sprig--status-preview-lines '(:buffer nil :file nil))
+                 (list (propertize "     (no reply yet)"
+                                   'face 'sprig-status-preview)))))
+
+(ert-deftest sprig-test-tidy-prose ()
+  ;; Trims and squeezes blank runs, but keeps single line breaks so a list
+  ;; survives; empty in, nil out.
+  (should (equal (sprig--tidy-prose "\n- a\n- b\n\n\npara\n") "- a\n- b\n\npara"))
+  (should (null (sprig--tidy-prose "  \n\n ")))
+  (should (null (sprig--tidy-prose nil))))
+
+(ert-deftest sprig-test-format-time ()
+  ;; A parsable stamp formats to a short local time; junk and nil drop out.
+  (should (stringp (sprig--format-time "2026-08-03T10:00:00Z")))
+  (should (null (sprig--format-time "not a time")))
+  (should (null (sprig--format-time nil))))
+
+(ert-deftest sprig-test-format-tokens ()
+  ;; Context size shows compactly in thousands or millions.
+  (should (equal (sprig--format-tokens 134000) "134.0k"))
+  (should (equal (sprig--format-tokens 2500000) "2.5M")))
+
+(ert-deftest sprig-test-status-state-line ()
+  ;; The state line mirrors the review buffer: live states from the row's
+  ;; status, the turn's outcome and context from the model fields; nil when
+  ;; there is nothing to say.
+  (should (null (sprig--status-state-line '(:buffer nil) nil)))
+  (let ((l (sprig--status-state-line '(:status idle) '(:done t :context 134000))))
+    (should (string-match-p "✓  turn over" l))
+    (should (string-match-p "·" l))
+    (should (string-match-p "134.0k" l)))
+  (should (string-match-p "▶  working…"
+                          (sprig--status-state-line '(:status streaming) nil)))
+  (should (string-match-p "✗  turn failed"
+                          (sprig--status-state-line '(:status idle) '(:error t))))
+  (should (string-match-p "waiting on you"
+                          (sprig--status-state-line '(:status idle) '(:pending t)))))
+
+(ert-deftest sprig-test-events-preview-carries-state ()
+  ;; The preview surfaces the model's outcome and context for the state line.
+  (let ((p (sprig--events-preview
+            '((user "q") (text "a") (context 134000) (done 0.1 nil)))))
+    (should (eq (plist-get p :done) t))
+    (should (equal (plist-get p :context) 134000))))
+
+(ert-deftest sprig-test-events-preview-carries-time ()
+  ;; The preview surfaces the freshest block's stamp for the render to show.
+  (let ((p (sprig--events-preview
+            '((time "2026-08-03T10:00:00Z") (user "q") (text "an answer")))))
+    (should (equal (plist-get p :time) "2026-08-03T10:00:00Z"))))
+
+(ert-deftest sprig-test-status-reply-lines-fontifies-markdown ()
+  ;; With markdown on, the markup characters are dropped and the emphasised
+  ;; word carries a markdown face.
+  (skip-unless (require 'markdown-mode nil t))
+  (let* ((sprig-status-preview-markdown t)
+         (lines (sprig--status-reply-lines "Plain and **bold** words." 60))
+         (joined (mapconcat #'identity lines "\n")))
+    (should-not (string-match-p "\\*\\*" joined))
+    (should (string-match-p "Plain and bold words\\." joined))
+    (should (seq-some
+             (lambda (l)
+               (seq-some (lambda (i)
+                           (let ((f (get-text-property i 'face l)))
+                             (memq 'markdown-bold-face (if (listp f) f (list f)))))
+                         (number-sequence 0 (1- (length l)))))
+             lines))))
+
+(ert-deftest sprig-test-status-reply-lines-plain-fallback ()
+  ;; With markdown off, the raw markup is kept and every line is the muted
+  ;; preview face; the list is collapsed to prose.
+  (let* ((sprig-status-preview-markdown nil)
+         (lines (sprig--status-reply-lines "Plain and **bold** words." 60)))
+    (should (string-match-p "\\*\\*bold\\*\\*" (mapconcat #'identity lines "\n")))
+    (should (eq (get-text-property 0 'face (car lines)) 'sprig-status-preview))))
+
+(ert-deftest sprig-test-status-preview-lines-no-indented-blanks ()
+  ;; A paragraph gap stays a truly empty line, never an indented blank one a
+  ;; trailing-whitespace highlighter would flag.
+  (let ((preview '(:prompt "ask" :reply "First para.\n\nSecond para." :time nil)))
+    (cl-letf (((symbol-function 'sprig--entry-preview) (lambda (_) preview)))
+      (let ((lines (sprig--status-preview-lines '(:buffer nil :file nil))))
+        (should-not (seq-some (lambda (l) (string-match-p "\\`[ \t]+\\'" l)) lines))
+        (when (require 'markdown-mode nil t)
+          (should (member "" lines)))))))
+
+(ert-deftest sprig-test-format-time-value ()
+  ;; A time value formats to a short local string; today's clock, else dated.
+  (should (stringp (sprig--format-time-value (current-time))))
+  (should (null (sprig--format-time-value nil))))
+
+(ert-deftest sprig-test-status-row-shows-time-column ()
+  ;; The row carries the session's time in an outer `Time' column, so it is
+  ;; visible even with the preview collapsed.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/whenrow")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-one"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Whenish"))
+          (with-temp-buffer
+            (sprig-status-mode)
+            (sprig--status-render)
+            (goto-char (point-min))
+            (should (search-forward "Whenish" nil t))
+            (beginning-of-line)
+            ;; A freshly-written log dates from today, so the cell is a clock.
+            (let ((cell (aref (tabulated-list-get-entry) 4)))
+              (should (string-match-p "[0-9][0-9]:[0-9][0-9]" cell)))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-sort-rows-time-desc ()
+  ;; The default sort puts the latest Time first.
+  (let* ((sprig--status-sort '("Time" . t))
+         (rows (list '(:session "old" :mtime 100 :host nil)
+                     '(:session "new" :mtime 300 :host nil)
+                     '(:session "mid" :mtime 200 :host nil)))
+         (sorted (sprig--status-sort-rows rows)))
+    (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
+                   '("new" "mid" "old")))))
+
+(ert-deftest sprig-test-status-sort-rows-title-asc ()
+  ;; Sorting by Title is ascending and case-insensitive.
+  (let* ((sprig--status-sort '("Title"))
+         (rows (list '(:title "Banana") '(:title "apple") '(:title "Cherry")))
+         (sorted (sprig--status-sort-rows rows)))
+    (should (equal (mapcar (lambda (e) (plist-get e :title)) sorted)
+                   '("apple" "Banana" "Cherry")))))
+
+(ert-deftest sprig-test-status-sort-rows-fresh-session-tops ()
+  ;; A live session with no log yet (no mtime) sorts to the top, newest first.
+  (let* ((sprig--status-sort '("Time" . t))
+         (rows (list '(:session "stored" :mtime 500)
+                     '(:session "fresh")))
+         (sorted (sprig--status-sort-rows rows)))
+    (should (equal (plist-get (car sorted) :session) "fresh"))))
+
+(ert-deftest sprig-test-status-sort-command-flips-direction ()
+  ;; The command sets the sort, and a second call on the same column flips it;
+  ;; a text column defaults ascending, Time descending.
+  (with-temp-buffer
+    (sprig-status-mode)
+    (sprig--status-render)
+    (sprig-status-sort "Title")
+    (should (equal sprig--status-sort '("Title")))
+    (sprig-status-sort "Title")
+    (should (equal sprig--status-sort '("Title" . t)))
+    (sprig-status-sort "Time")
+    (should (equal sprig--status-sort '("Time" . t)))))
+
+(ert-deftest sprig-test-status-preview-line-resolves-the-row-session ()
+  ;; A verb keyed on point works from an expanded preview line: the line
+  ;; carries the row's id, so it resolves to the same session as the row.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/prevrow")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-one"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Rowed"))
+          (with-temp-buffer
+            (sprig-status-mode)
+            (sprig--status-render)
+            (goto-char (point-min))
+            (should (search-forward "Rowed" nil t))
+            (beginning-of-line)
+            (let ((id (tabulated-list-get-id)))
+              (should id)
+              (sprig--status-toggle-id id)
+              (sprig--status-render)
+              (goto-char (point-min))
+              (should (search-forward "Rowed" nil t))
+              (beginning-of-line)
+              ;; The line just below the row is the preview: it has no
+              ;; tabulated id of its own, yet resolves to the same session.
+              (forward-line 1)
+              (should-not (tabulated-list-get-id))
+              (should (equal (sprig--status-id-at-point) id))
+              (should (equal (plist-get (sprig--status-entry-at-point) :key)
+                             id)))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-log-ignored-p ()
   ;; The ignore list matches a log's encoded project directory name, read
   ;; from the path (no content), and is precise about boundaries.

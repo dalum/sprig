@@ -95,7 +95,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 ### Navigator
 
-`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), and a short session id. It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the tail of that session's last reply. `/` narrows the list to sessions whose project or title match a substring, and `L` lifts the cap to show every session.
+`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), a short session id, and the time it last ran (its log's mtime, so it stays visible with the preview collapsed). It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the session's last exchange: a state line first (what the turn is doing or how it ended, and the context in use, `✓  turn over  ·  134.0k`, mirroring the review buffer's own), then your last prompt as a lead line, then the agent's reply prose in full, so you can read what a session is doing without opening it. When `markdown-mode` is installed, the reply renders with its faces (bold, headings, lists, code) rather than raw markup, muted like the rest of the preview; set `sprig-status-preview-markdown` to nil to keep it plain. Set `sprig-status-preview-max-lines` to a number to bound a long reply. `/` narrows the list to sessions whose project or title match a substring, and `L` lifts the cap to show every session. Rows sort newest-first by `Time` within each group; `S` (or `sprig-status-sort`, or a click on a column header) sorts by another column, and repeating it flips the direction, shown as `↓Time` in the mode line.
 
 **Both hosts at once.** The list is grouped by the host a session runs on, under a foldable heading per group: `local`, and `remote you@your-server` when `sprig-remote` is set. Each host is scanned and capped on its own, so a busy one cannot crowd the other out, and neither is hidden behind a `setq`. `s` starts its session on the host of the group point is in, which is why a group with no sessions is still headed: the heading is the place you stand to start the first one there. Opening a row pins its review buffer to the host the row came from, since a session id only resumes on the host holding its log. `TAB` on a heading folds its whole group away (the count stays, so `▸ remote you@your-server (12)` tells you what is hidden) and unfolds it again, the way `magit` folds a section.
 
@@ -112,12 +112,13 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `n` / `p` | Move to the next / previous session, skipping headings and preview lines |
 | `RET` / `o` | Open the session's review buffer (replaying its log), on the host it ran on |
 | `s` | Start a fresh session on the group point is in, prompting for its working directory (`C-u s` forces it local wherever point sits) |
-| `TAB` | On a session row, toggle an inline preview of its last reply; on a host heading, fold or unfold that group |
+| `TAB` | On a session row, toggle an inline preview of its last exchange (your prompt and the agent's reply); on a host heading, fold or unfold that group |
 | `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session (its log is kept) |
 | `/` | Filter the list by project or title (empty clears) |
+| `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
 | `L` | Toggle the `sprig-status-max-sessions` cap (show all / newest) |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
@@ -198,7 +199,8 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `L` lifts it live) |
 | `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
 | `sprig-status-ignore-directories` | `nil` | Regexps matched against a session's encoded project directory; matches are hidden from the navigator (e.g. throwaway `/tmp` / SDK-probe runs) |
-| `sprig-status-preview-max-lines` | `3` | Lines shown in a navigator `TAB` inline reply preview |
+| `sprig-status-preview-max-lines` | `nil` | Line cap for a navigator `TAB` preview of a session's last exchange; `nil` shows the whole reply, a number bounds prompt and reply together |
+| `sprig-status-preview-markdown` | `t` | Fontify the navigator preview reply with `markdown-mode` faces when it is installed, dropping the raw markup |
 | `sprig-review-refresh-delay` | `0.1` | Seconds to coalesce structural events before re-rendering a review buffer |
 | `sprig-review-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
 | `sprig-review-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
