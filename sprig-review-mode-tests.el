@@ -165,6 +165,28 @@ timestamp, or the state line's rule."
       (should (equal "## H\n\n**bold** here"
                      (sprig-review--fontify-markdown "## H\n\n**bold** here"))))))
 
+(ert-deftest sprig-review-mode-test-refresh-delay-adapts-to-cost ()
+  ;; The coalescing wait is the floor on a cheap buffer, tracks the last
+  ;; render's cost between floor and ceiling, and is capped by the ceiling.
+  (let ((sprig-review-refresh-delay 0.1)
+        (sprig-review-refresh-delay-max 0.5))
+    (with-temp-buffer
+      (setq sprig-review--last-render-cost 0.0)
+      (should (= 0.1 (sprig-review--refresh-delay)))
+      (setq sprig-review--last-render-cost 0.25)
+      (should (= 0.25 (sprig-review--refresh-delay)))
+      (setq sprig-review--last-render-cost 2.0)
+      (should (= 0.5 (sprig-review--refresh-delay))))))
+
+(ert-deftest sprig-review-mode-test-refresh-records-render-cost ()
+  ;; A refresh times its own draw, so the next coalescing wait can widen.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig-review--events (reverse '((user "hi") (text "there") (done 0.1 nil)))
+          sprig-review--last-render-cost 0.0)
+    (sprig-review--refresh)
+    (should (> sprig-review--last-render-cost 0.0))))
+
 (ert-deftest sprig-review-mode-test-user-block-is-set-off ()
   (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
     (sprig-review-tests--rendered model nil

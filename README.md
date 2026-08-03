@@ -201,7 +201,8 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-status-ignore-directories` | `nil` | Regexps matched against a session's encoded project directory; matches are hidden from the navigator (e.g. throwaway `/tmp` / SDK-probe runs) |
 | `sprig-status-preview-max-lines` | `nil` | Line cap for a navigator `TAB` preview of a session's last exchange; `nil` shows the whole reply, a number bounds prompt and reply together |
 | `sprig-status-preview-markdown` | `t` | Fontify the navigator preview reply with `markdown-mode` faces when it is installed, dropping the raw markup |
-| `sprig-review-refresh-delay` | `0.1` | Seconds to coalesce structural events before re-rendering a review buffer |
+| `sprig-review-refresh-delay` | `0.1` | Floor, in seconds, for coalescing structural events before a re-render; widens toward the last render's cost on a big buffer |
+| `sprig-review-refresh-delay-max` | `0.5` | Ceiling, in seconds, on that adaptive coalescing delay; bounds how late a structural update can appear on a long history |
 | `sprig-review-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
 | `sprig-review-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |

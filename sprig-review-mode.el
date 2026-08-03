@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.14.0
+;; Version: 0.15.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1122,12 +1122,42 @@ META is an optional plist of display metadata (see
 ;; being one-shot.
 
 (defcustom sprig-review-refresh-delay 0.1
-  "Seconds to coalesce structural events before re-rendering the review buffer.
+  "Floor, in seconds, for coalescing structural events before a re-render.
 Batching them into one render at this cadence keeps a long conversation
 from re-rendering repeatedly.  Lower is more responsive but renders more
-often.  Streamed text does not wait on this; it appends in place."
+often.  Streamed text does not wait on this; it appends in place.  This is
+a floor: on a large buffer the wait widens toward the last render's own
+cost (see `sprig-review-refresh-delay-max'), so a heavy render does not
+fire again before the previous one has drawn."
   :type 'number
   :group 'sprig)
+
+(defcustom sprig-review-refresh-delay-max 0.5
+  "Ceiling, in seconds, on the adaptive coalescing delay.
+A full re-render is O(conversation), so on a long history the flat
+`sprig-review-refresh-delay' would arm the next render a tenth of a second
+after the last one finished, spending most of a busy turn rendering and
+leaving the buffer janky between draws.  Instead the wait widens to about
+the last render's measured cost, so at most half a turn goes on rendering
+and the rest stays responsive.  This bounds how late a structural update
+can appear, and thus how far the wait may widen."
+  :type 'number
+  :group 'sprig)
+
+(defvar-local sprig-review--last-render-cost 0.0
+  "Seconds the last full re-render took, driving the adaptive coalescing.
+Measured in `sprig-review--refresh' and read by `sprig-review--schedule',
+so a cheap buffer keeps the snappy floor while a costly one widens toward
+its own render time.  Nil-safe start of zero means the first render waits
+only the floor.")
+
+(defun sprig-review--refresh-delay ()
+  "Return the coalescing delay, widened toward the last render's cost.
+`sprig-review-refresh-delay' is the floor and `sprig-review-refresh-delay-max'
+the ceiling; between them the delay tracks `sprig-review--last-render-cost',
+so renders never stack up faster than they draw."
+  (min sprig-review-refresh-delay-max
+       (max sprig-review-refresh-delay sprig-review--last-render-cost)))
 
 (defun sprig-review--locate (pos)
   "Return a locator for POS that survives a re-render, or nil.
@@ -1172,7 +1202,12 @@ while a turn came in."
                                   (sprig-review--locate (window-start win))
                                   (window-start win)))
                           (get-buffer-window-list nil nil t))))
-    (sprig-review-render model sprig-review--meta)
+    (let ((t0 (current-time)))
+      (sprig-review-render model sprig-review--meta)
+      ;; Time the draw so the coalescing timer can widen toward it: a heavy
+      ;; render must not be re-armed before it has finished drawing.
+      (setq sprig-review--last-render-cost
+            (float-time (time-subtract (current-time) t0))))
     (goto-char (sprig-review--relocate locator pos))
     (pcase-dolist (`(,win ,point-loc ,point-pos ,start-loc ,start-pos) windows)
       (when (window-live-p win)
@@ -1211,7 +1246,7 @@ Called by the coalescing timer, and usable to force a render immediately."
   (setq sprig-review--dirty t)
   (unless sprig-review--timer
     (setq sprig-review--timer
-          (run-with-timer sprig-review-refresh-delay nil
+          (run-with-timer (sprig-review--refresh-delay) nil
                           #'sprig-review-flush (current-buffer)))))
 
 (defun sprig-review--stamp-arrival (event)
