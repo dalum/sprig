@@ -1782,6 +1782,260 @@ Return the log directory."
               (should (equal (plist-get e :title) "From log")))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-status-hosts ()
+  ;; The local machine is always a group; a configured remote adds a second,
+  ;; so the navigator lists both rather than only the configured default.
+  (let ((sprig-remote nil))
+    (should (equal (sprig--status-hosts) '(nil))))
+  (let ((sprig-remote "me@host"))
+    (should (equal (sprig--status-hosts) '(nil "me@host")))))
+
+(ert-deftest sprig-test-remote-override-value ()
+  ;; A string pins a session to that host; any other non-nil value (the
+  ;; interactive prefix included) pins it local; nil follows `sprig-remote'.
+  (should (equal (sprig--remote-override-value "me@host") "me@host"))
+  (should (null (sprig--remote-override-value t)))
+  (should (null (sprig--remote-override-value '(4))))
+  (should (eq (sprig--remote-override-value nil) 'inherit)))
+
+(ert-deftest sprig-test-status-collect-lists-both-hosts ()
+  ;; The navigator scans every host it lists, so a local session and a
+  ;; remote one both show, each tagged with the host it came from and keyed
+  ;; by the pair: an id is only unique on the host that issued it.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/localproj")
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-local"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local one"))
+          (cl-letf (((symbol-function 'sprig--remote-sh)
+                     (lambda (cmd)
+                       (cond
+                        ((string-match-p "find" cmd)
+                         "20.0\t/r/-p/sess-remote.jsonl\n")
+                        ((string-match-p "\\`for f in" cmd)
+                         (concat "\036/r/-p/sess-remote.jsonl\037"
+                                 "{\"cwd\":\"/home/me/p\","
+                                 "\"aiTitle\":\"Remote one\"}\n"))
+                        (t "")))))
+            (let* ((rows (sprig--status-collect))
+                   (local (seq-find (lambda (r)
+                                      (equal (plist-get r :session) "sess-local"))
+                                    rows))
+                   (remote (seq-find (lambda (r)
+                                       (equal (plist-get r :session) "sess-remote"))
+                                     rows)))
+              (should local)
+              (should remote)
+              (should (null (plist-get local :host)))
+              (should (equal (plist-get remote :host) "me@host"))
+              (should (equal (plist-get local :key) '(nil . "sess-local")))
+              (should (equal (plist-get remote :key) '("me@host" . "sess-remote")))
+              ;; Rows come back grouped, local first, for the render to head.
+              (should (equal (mapcar (lambda (r) (plist-get r :host)) rows)
+                             '(nil "me@host"))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-collect-same-id-on-two-hosts ()
+  ;; Two hosts can hand out the same session id and they are still two
+  ;; different sessions, so neither row may shadow the other.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/dup")
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "same-id"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "The local one"))
+          (cl-letf (((symbol-function 'sprig--remote-sh)
+                     (lambda (cmd)
+                       (cond
+                        ((string-match-p "find" cmd) "20.0\t/r/-p/same-id.jsonl\n")
+                        ((string-match-p "\\`for f in" cmd)
+                         (concat "\036/r/-p/same-id.jsonl\037"
+                                 "{\"cwd\":\"/home/me/p\","
+                                 "\"aiTitle\":\"The remote one\"}\n"))
+                        (t "")))))
+            (let ((rows (sprig--status-collect)))
+              (should (= 2 (length rows)))
+              (should (equal (mapcar (lambda (r) (plist-get r :title)) rows)
+                             '("The local one" "The remote one"))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-group-hosts-keeps-a-pinned-stray ()
+  ;; A review buffer pinned to a host that is no longer `sprig-remote' is
+  ;; still a live session you can steer, so it gets a group of its own
+  ;; after the two standing ones rather than being filed under theirs.
+  (let ((sprig-remote "me@host"))
+    (should (equal (sprig--status-group-hosts
+                    '((:host nil) (:host "me@host") (:host "old@host")))
+                   '(nil "me@host" "old@host")))))
+
+(ert-deftest sprig-test-status-sort-by-group ()
+  ;; Rows are ordered by their host's group; within a group the scan's
+  ;; newest-first order survives, since `sort' is stable.
+  (let ((rows '((:host "h" :session "r1") (:host nil :session "l1")
+                (:host "h" :session "r2") (:host nil :session "l2"))))
+    (should (equal (mapcar (lambda (r) (plist-get r :session))
+                           (sprig--status-sort-by-group rows '(nil "h")))
+                   '("l1" "l2" "r1" "r2")))))
+
+(ert-deftest sprig-test-status-heads-both-groups ()
+  ;; Both groups are headed, the empty one included: its heading is what
+  ;; you press `s' under to start the first session on that host.  A
+  ;; heading falls due when the host changes, not once per row, so a group
+  ;; holding several rows keeps all of them; and every line carries its
+  ;; group, so `s' knows the host wherever point sits.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/onlylocal")
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-one"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local one"))
+          (sprig-tests--make-session-log
+           root proj "sess-two"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local two"))
+          (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (with-temp-buffer
+              (sprig-status-mode)
+              (sprig--status-render)
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                ;; An expanded group heads with the open fold glyph.
+                (should (string-match-p "^▾ local (2)$" text))
+                ;; The host with nothing on it is headed all the same.
+                (should (string-match-p "^▾ remote me@host (none)$" text))
+                ;; Both local rows sit above the remote heading, not one.
+                (should (string-match-p
+                         "\\`▾ local (2)\n.*Local \\(?:one\\|two\\).*\n.*Local \\(?:one\\|two\\).*\n\
+▾ remote me@host (none)\n"
+                         text)))
+              ;; Every line answers with the host of the group it is in.
+              (dolist (probe '(("^▾ local (2)$" nil)
+                               ("^▾ remote me@host (none)$" "me@host")
+                               ("Local one" nil)
+                               ("Local two" nil)))
+                (goto-char (point-min))
+                (should (re-search-forward (car probe) nil t))
+                (beginning-of-line)
+                (should (equal (sprig--status-host-at-point) (cadr probe)))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-heads-an-empty-group-in-place ()
+  ;; An empty group is headed where it sorts, not swept to the end: `local'
+  ;; leads even when every session is on the remote host.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sprig--remote-sh)
+                   (lambda (cmd)
+                     (cond
+                      ((string-match-p "find" cmd) "20.0\t/r/-p/only-remote.jsonl\n")
+                      ((string-match-p "\\`for f in" cmd)
+                       (concat "\036/r/-p/only-remote.jsonl\037"
+                               "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Remote only\"}\n"))
+                      (t "")))))
+          (with-temp-buffer
+            (sprig-status-mode)
+            (sprig--status-render)
+            (should (string-match-p
+                     "\\`▾ local (none)\n▾ remote me@host (1)\n.*Remote only"
+                     (buffer-substring-no-properties (point-min) (point-max))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-open-pins-the-row-host ()
+  ;; Opening a row pins its buffer to the host the row was scanned on: a
+  ;; session id only resumes on the host holding its log, so a local row
+  ;; must not come back on `sprig-remote' nor a remote row run locally.
+  (let ((sprig-remote "me@host")
+        calls)
+    (cl-letf (((symbol-function 'sprig-review-session)
+               (lambda (&rest args) (push args calls) (current-buffer))))
+      (sprig--status-review-buffer '(:host "me@host" :dir "/p" :session "s1"))
+      (sprig--status-review-buffer '(:host nil :dir "/p" :session "s2"))
+      (should (equal (nth 2 (nth 1 calls)) "me@host"))
+      (should (eq (nth 2 (nth 0 calls)) t)))))
+
+(ert-deftest sprig-test-status-collapse-folds-a-group ()
+  ;; TAB on a heading folds its group to the heading alone: the rows stop
+  ;; printing, the fold glyph flips, and the count still shows the true
+  ;; number (the rows are hidden, not gone).  A second toggle unfolds them.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/onlylocal")
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-one"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local one"))
+          (sprig-tests--make-session-log
+           root proj "sess-two"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local two"))
+          (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (with-temp-buffer
+              (sprig-status-mode)
+              (sprig--status-render)
+              (should-not (sprig--status-collapsed-p nil))
+              ;; Fold the local group.
+              (sprig--status-toggle-collapse nil)
+              (should (sprig--status-collapsed-p nil))
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                ;; Folded: the glyph flips and the rows are gone, but the
+                ;; count still says 2.
+                (should (string-match-p "^▸ local (2)$" text))
+                (should-not (string-match-p "Local one" text))
+                (should-not (string-match-p "Local two" text)))
+              ;; Point landed on the folded heading, so a second TAB there
+              ;; unfolds it rather than acting on a stranded row.
+              (should (get-text-property (line-beginning-position)
+                                         'sprig--status-heading))
+              (should (null (sprig--status-host-at-point)))
+              (sprig--status-toggle-collapse nil)
+              (should-not (sprig--status-collapsed-p nil))
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-match-p "^▾ local (2)$" text))
+                (should (string-match-p "Local one" text))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-collapse-survives-a-refresh ()
+  ;; A background refresh reprints the list, and a collapsed group stays
+  ;; collapsed across it: the fold state is the navigator's, not the print's.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/onlylocal")
+         (sprig-remote "me@host")
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-one"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Local one"))
+          (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (with-temp-buffer
+              (sprig-status-mode)
+              (sprig--status-render)
+              (sprig--status-toggle-collapse nil)
+              ;; A plain re-render (the lifecycle refresh path).
+              (sprig--status-render)
+              (let ((text (buffer-substring-no-properties (point-min) (point-max))))
+                (should (string-match-p "^▸ local (1)$" text))
+                (should-not (string-match-p "Local one" text))))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-log-ignored-p ()
   ;; The ignore list matches a log's encoded project directory name, read
   ;; from the path (no content), and is precise about boundaries.

@@ -195,6 +195,9 @@ Example, hiding /tmp and everything under it:
 (defface sprig-status-preview '((t :inherit shadow :slant italic))
   "Face for the inline reply preview shown under an expanded navigator row.")
 
+(defface sprig-status-group '((t :inherit font-lock-keyword-face :weight bold))
+  "Face for a navigator group heading naming the host its rows run on.")
+
 ;;;; Buffer-local state
 
 (defvar-local sprig--process nil
@@ -264,8 +267,9 @@ records the session's directory here for `sprig--directory'.")
 The symbol `inherit' (the default) follows the global `sprig-remote';
 any other value overrides it for this buffer alone, including nil for a
 session forced to run locally while `sprig-remote' is set.  The transport
-reads it through `sprig--remote'.  The navigator scans one host and stays
-on the global `sprig-remote' throughout.")
+reads it through `sprig--remote'.  The navigator scans every host it
+lists (see `sprig--status-hosts') and pins each row's buffer to the host
+its log came from.")
 
 (defun sprig--remote ()
   "Effective SSH destination for this buffer's session, or nil for local.
@@ -275,6 +279,22 @@ that run in a session-owning buffer call this instead of reading the
 global directly, so a session can run local or remote independent of the
 configured default."
   (if (eq sprig--remote-override 'inherit) sprig-remote sprig--remote-override))
+
+(defun sprig--buffer-remote (buffer)
+  "Effective SSH destination for BUFFER's session, or nil for local.
+`sprig--remote' read from outside the buffer, for the navigator, which
+groups rows by the host their session runs on."
+  (let ((override (buffer-local-value 'sprig--remote-override buffer)))
+    (if (eq override 'inherit) sprig-remote override)))
+
+(defun sprig--remote-override-value (host)
+  "Return the `sprig--remote-override' HOST asks a new session to take.
+A string is an SSH destination to pin the session to; any other non-nil
+value pins it to the local machine; nil follows `sprig-remote' as it
+stands."
+  (cond ((stringp host) host)
+        (host nil)
+        (t 'inherit)))
 
 ;;;; Command construction
 
@@ -1082,15 +1102,17 @@ model via `sprig-review-consume'."
   (when (eq (car-safe event) 'done)
     (sprig--flush-queue)))
 
-(defun sprig--read-review-dir (&optional local)
-  "Prompt for a session working directory, returning the string.
-Unlike `sprig--read-working-directory' this records nothing in
-frontmatter; a session-owning review buffer keeps its directory in the
-buffer-local `sprig--working-dir' instead.  With a remote default the
-prompt is a free string (the path lives on the host); LOCAL non-nil, or
-no configured `sprig-remote', prompts against the local filesystem."
-  (if (and sprig-remote (not local))
-      (read-string "Working directory (remote, blank = login dir): ")
+(defun sprig--read-review-dir (&optional host)
+  "Prompt for a session working directory on HOST, returning the string.
+HOST is the resolved session host: nil for the local machine, else an SSH
+destination.  Unlike `sprig--read-working-directory' this records nothing
+in frontmatter; a session-owning review buffer keeps its directory in the
+buffer-local `sprig--working-dir' instead.  A remote host's prompt is a
+free string, since the path lives over there and this side cannot complete
+it; a local one prompts against the filesystem.  The prompt names the host
+so a navigator with a group per host says which one you are starting on."
+  (if host
+      (read-string (format "Working directory (%s, blank = login dir): " host))
     (read-directory-name "Working directory: ")))
 
 ;;;###autoload
@@ -1105,7 +1127,7 @@ unless NO-PROMPT."
   (setq sprig--sink #'sprig--review-sink
         sprig--connect-fn #'sprig-review-connect)
   (unless (or no-prompt sprig--session-id sprig--working-dir)
-    (setq sprig--working-dir (sprig--read-review-dir (null (sprig--remote)))))
+    (setq sprig--working-dir (sprig--read-review-dir (sprig--remote))))
   (sprig--spawn)
   (message "sprig: %s (%s%s)"
            (if sprig--session-id "resuming session" "new session")
@@ -1275,22 +1297,24 @@ back to killing the process; the session resumes on the next send."
         (message "sprig: interrupt timed out; killed the turn (resumes on next send)")))))
 
 ;;;###autoload
-(defun sprig-review-session (dir &optional session-id local fork)
+(defun sprig-review-session (dir &optional session-id host fork)
   "Open a review buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
 SESSION-ID, replay that stored session's log and resume it on the next
 send; without, the buffer starts empty and a send opens a fresh session.
-LOCAL non-nil (interactively, a prefix argument) forces the session to
-run on the local machine even when `sprig-remote' is set; its log then
-lives locally and it is driven from its own review buffer rather than the
-remote navigator's list.  FORK non-nil resumes SESSION-ID under an id of
-its own (see `sprig--fork-session'), so the replayed history is carried on
-in a session of its own and the parent is left untouched.  The review
-buffer is the only conversation surface."
+HOST pins where the session runs: a string is an SSH destination, any
+other non-nil value (interactively, a prefix argument) is the local
+machine even when `sprig-remote' is set, and nil follows `sprig-remote' as
+it stands.  Pinning is what the navigator opens a row with, since a
+session id is per-host and only resumes on the host holding its log.
+FORK non-nil resumes SESSION-ID under an id of its own (see
+`sprig--fork-session'), so the replayed history is carried on in a session
+of its own and the parent is left untouched.  The review buffer is the
+only conversation surface."
   (interactive
    (let ((local current-prefix-arg))
-     (list (sprig--read-review-dir local) nil local)))
+     (list (sprig--read-review-dir (unless local sprig-remote)) nil local)))
   (require 'sprig-review-mode)
   (let* ((label (format "*sprig-review: %s%s*"
                         (or session-id
@@ -1314,7 +1338,7 @@ buffer is the only conversation surface."
       (setq sprig--session-id session-id
             sprig--fork-session (and fork session-id t)
             sprig--working-dir dir
-            sprig--remote-override (if local nil 'inherit)
+            sprig--remote-override (sprig--remote-override-value host)
             sprig--sink #'sprig--review-sink
             sprig--connect-fn #'sprig-review-connect)
       (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
@@ -1520,6 +1544,15 @@ it is on you, so the navigator says so rather than showing it as busy."
 `L' in the navigator sets `sprig--status-show-all' to lift the cap;
 otherwise `sprig-status-max-sessions' bounds the newest-first scan."
   (and (not sprig--status-show-all) sprig-status-max-sessions))
+
+(defun sprig--status-hosts ()
+  "Return the hosts the navigator lists, in display order.
+Always the local machine (nil), plus `sprig-remote' when one is set.  Each
+becomes a group with a heading of its own, so both hosts' sessions show at
+once rather than only the configured default's, and each is scanned and
+capped independently.  The group point sits in is the host `s' starts a
+session on, which is the whole reason an empty group is still headed."
+  (if sprig-remote (list nil sprig-remote) (list nil)))
 
 (defun sprig--log-ignored-p (file)
   "Non-nil when log FILE's session is hidden per the ignore list.
@@ -1738,9 +1771,12 @@ EVENTS are in chronological order (the review model's input order)."
 (defun sprig--entry-preview (entry)
   "Return the inline reply preview for status ENTRY, or nil.
 From the open review buffer's events when ENTRY has one, else the stored
-session log's tail."
+session log's tail, read on the host that row's session ran on rather than
+the configured default: with a group per host the two are often not the
+same, and the wrong one has no such log."
   (let ((buf (plist-get entry :buffer))
-        (file (plist-get entry :file)))
+        (file (plist-get entry :file))
+        (sprig-remote (plist-get entry :host)))
     (cond
      ((buffer-live-p buf)
       (sprig--events-last-text
@@ -1753,21 +1789,29 @@ session log's tail."
 ;;; Collect open buffers and stored sessions into rows
 
 (defun sprig--status-collect ()
-  "Return status plists for all branches, deduped by session id.
-Each plist has :key, :buffer (or nil), :file (or nil), :dir (a real
-working directory or nil), :project (its display label), :title, :status,
-and :session.  An open session-owning review buffer wins over
-its stored log, carrying live status and a session with no log yet.  When
-`sprig--status-filter' is set, only rows matching it are returned."
+  "Return status plists for all branches, grouped by the host they run on.
+Each plist has :key, :host (nil for local, else an SSH destination),
+:buffer (or nil), :file (or nil), :dir (a real working directory or nil),
+:project (its display label), :title, :status, and :session.  An open
+session-owning review buffer wins over its stored log, carrying live
+status and a session with no log yet.
+
+The :key pairs the host with the session id, because an id is only unique
+on the host that issued it: two hosts can hand out the same one and they
+are still two different sessions.  Rows come back ordered by
+`sprig--status-group-hosts', so the render can head each group in turn.
+When `sprig--status-filter' is set, only rows matching it are returned; a
+group filtered down to nothing keeps its heading all the same."
   (let ((table (make-hash-table :test 'equal))
         (order '()))
     (dolist (buf (sprig--owning-review-buffers))
-      (let* ((id (buffer-local-value 'sprig--session-id buf))
-             (key (or id buf)))
+      (let* ((host (sprig--buffer-remote buf))
+             (id (buffer-local-value 'sprig--session-id buf))
+             (key (cons host (or id buf))))
         (unless (gethash key table)
           (push key order)
           (puthash key
-                   (list :key key :buffer buf :file nil
+                   (list :key key :host host :buffer buf :file nil
                          :dir (buffer-local-value 'sprig--working-dir buf)
                          :project (buffer-local-value 'sprig--working-dir buf)
                          ;; A manual retitle wins; else the replayed
@@ -1782,34 +1826,68 @@ its stored log, carrying live status and a session with no log yet.  When
                          :status (sprig--session-status buf)
                          :session id)
                    table))))
-    (dolist (e (sprig--scan-session-logs))
-      (let* ((key (plist-get e :session))
-             (existing (gethash key table)))
-        (cond
-         ((null existing)
-          (push key order)
-          (puthash key
-                   (list :key key :buffer nil :file (plist-get e :file)
-                         :dir (plist-get e :dir)
-                         :project (plist-get e :project)
-                         :title (plist-get e :title)
-                         :status 'disconnected
-                         :session (plist-get e :session))
-                   table))
-         ;; An owning buffer that could not title itself borrows the log's.
-         ((null (plist-get existing :title))
-          (puthash key (plist-put existing :title (plist-get e :title))
-                   table)))))
+    (dolist (host (sprig--status-hosts))
+      ;; The scan, and everything it reaches (the head slurp, the SSH round
+      ;; trips), keys off `sprig-remote', so the host is bound rather than
+      ;; threaded through every one of them: one host per pass, each with a
+      ;; cap of its own so a busy host cannot crowd the other out.
+      (dolist (e (let ((sprig-remote host)) (sprig--scan-session-logs)))
+        (let* ((key (cons host (plist-get e :session)))
+               (existing (gethash key table)))
+          (cond
+           ((null existing)
+            (push key order)
+            (puthash key
+                     (list :key key :host host :buffer nil
+                           :file (plist-get e :file)
+                           :dir (plist-get e :dir)
+                           :project (plist-get e :project)
+                           :title (plist-get e :title)
+                           :status 'disconnected
+                           :session (plist-get e :session))
+                     table))
+           ;; An owning buffer that could not title itself borrows the log's.
+           ((null (plist-get existing :title))
+            (puthash key (plist-put existing :title (plist-get e :title))
+                     table))))))
     (let ((rows (mapcar (lambda (k)
                           (let ((e (gethash k table)))
                             (if (plist-get e :title)
                                 e
                               (plist-put e :title "(untitled)"))))
                         (nreverse order))))
-      (if (and sprig--status-filter (not (string-empty-p sprig--status-filter)))
-          (seq-filter (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
-                      rows)
-        rows))))
+      (when (and sprig--status-filter (not (string-empty-p sprig--status-filter)))
+        (setq rows (seq-filter
+                    (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
+                    rows)))
+      (sprig--status-sort-by-group rows (sprig--status-group-hosts rows)))))
+
+(defun sprig--status-group-hosts (rows)
+  "Return the ordered group hosts for ROWS.
+`sprig--status-hosts' leads, so both groups head the list even when one of
+them has no rows.  Any other host a row actually came from follows: a
+review buffer pinned to a host that is no longer `sprig-remote' is still a
+live session you can steer, so it gets a group of its own rather than
+being filed under someone else's heading."
+  (let ((hosts (sprig--status-hosts)))
+    (dolist (row rows)
+      (let ((host (plist-get row :host)))
+        (unless (member host hosts)
+          (setq hosts (append hosts (list host))))))
+    hosts))
+
+(defun sprig--status-sort-by-group (rows hosts)
+  "Order ROWS by their host's position in HOSTS.
+`sort' is stable, so within a group the rows keep the newest-first order
+the scan gave them."
+  (let ((rank (make-hash-table :test 'equal))
+        (n 0))
+    (dolist (host hosts)
+      (puthash host n rank)
+      (setq n (1+ n)))
+    (sort (copy-sequence rows)
+          (lambda (a b) (< (gethash (plist-get a :host) rank 0)
+                           (gethash (plist-get b :host) rank 0))))))
 
 (defun sprig--entry-matches-filter (entry filter)
   "Non-nil if ENTRY's project label or title contains FILTER.
@@ -1833,31 +1911,42 @@ Matching is case-insensitive."
 (defvar-local sprig--status-index nil
   "Hash mapping the current render's entry ids to their status plists.")
 
+(defvar-local sprig--status-groups nil
+  "Ordered host groups of the current render, from `sprig--status-group-hosts'.
+The printed rows are in this order, so `sprig--status-decorate' can head
+each group by walking the two in step.")
+
 (defun sprig--status-entries ()
   "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
-The entry id is the entry's `:key' (its session id, else its buffer):
-stable across refreshes, so point and inline-preview state survive.  Stale
-ids are pruned from `sprig--status-expanded' so it never outlives its row."
+The entry id is the entry's `:key' (its host paired with its session id,
+else with its buffer): stable across refreshes, so point and inline-preview
+state survive.  Stale ids are pruned from `sprig--status-expanded' so it
+never outlives its row."
   (let ((index (make-hash-table :test 'equal))
+        (collected (sprig--status-collect))
         rows)
-    (dolist (e (sprig--status-collect))
+    (setq sprig--status-groups (sprig--status-group-hosts collected))
+    (dolist (e collected)
       (let* ((id (plist-get e :key))
              (status (plist-get e :status))
              (dir (plist-get e :project))
              (session (plist-get e :session))
              (glyph (propertize (or (alist-get status sprig--status-glyphs) "?")
                                 'face (sprig--status-face status))))
+        ;; Every row is indexed so its host's heading still counts it and a
+        ;; later unfold can find it; a collapsed host just prints none.
         (puthash id e index)
-        (push (list id
-                    (vector glyph
-                            (or (plist-get e :title) "")
-                            (if dir (file-name-nondirectory
-                                     (directory-file-name dir))
-                              "-")
-                            (if (and (stringp session) (> (length session) 0))
-                                (substring session 0 (min 8 (length session)))
-                              "-")))
-              rows)))
+        (unless (sprig--status-collapsed-p (plist-get e :host))
+          (push (list id
+                      (vector glyph
+                              (or (plist-get e :title) "")
+                              (if dir (file-name-nondirectory
+                                       (directory-file-name dir))
+                                "-")
+                              (if (and (stringp session) (> (length session) 0))
+                                  (substring session 0 (min 8 (length session)))
+                                "-")))
+                rows))))
     (setq sprig--status-index index)
     (setq mode-line-process
           (concat (and sprig--status-filter
@@ -1892,6 +1981,43 @@ phantom instead of the row."
       (progn (remhash id sprig--status-expanded) nil)
     (puthash id t sprig--status-expanded) t))
 
+;;; Collapsing a host group to its heading
+
+(defvar-local sprig--status-collapsed nil
+  "Hash set of hosts whose group is folded to its heading alone.
+A collapsed host keeps its rows in `sprig--status-index' (so its heading
+still counts them) but contributes none to `tabulated-list-entries', so
+they are simply not printed.  TAB on a heading toggles it.")
+
+(defun sprig--status-collapsed-p (host)
+  "Non-nil when HOST's group is collapsed to its heading."
+  (and sprig--status-collapsed (gethash host sprig--status-collapsed)))
+
+(defun sprig--status-toggle-collapse (host)
+  "Fold or unfold HOST's group, then re-render and land on its heading.
+Point is put back on the heading rather than left to `tabulated-list-print',
+whose row-restore has nothing to grab when the line under point is a
+heading and not a row."
+  (unless sprig--status-collapsed
+    (setq sprig--status-collapsed (make-hash-table :test 'equal)))
+  (if (gethash host sprig--status-collapsed)
+      (remhash host sprig--status-collapsed)
+    (puthash host t sprig--status-collapsed))
+  (sprig--status-render)
+  (sprig--status-goto-heading host))
+
+(defun sprig--status-goto-heading (host)
+  "Move point to HOST's group heading; return non-nil when one was found."
+  (goto-char (point-min))
+  (let (found)
+    (while (and (not found) (not (eobp)))
+      (if (and (get-text-property (line-beginning-position) 'sprig--status-heading)
+               (equal (sprig--status-host-at-point) host))
+          (setq found t)
+        (forward-line 1)))
+    (beginning-of-line)
+    found))
+
 (defun sprig--status-preview-lines (entry)
   "Return the propertized display lines for ENTRY's inline preview.
 The last reply's tail is filled to `sprig-status-preview-max-lines' and
@@ -1912,35 +2038,129 @@ indented; a row with no reply yet shows a single muted placeholder."
               (propertize (concat "     " l) 'face 'sprig-status-preview))
             lines)))
 
-(defun sprig--status-insert-previews ()
-  "Insert inline preview lines under each expanded row.
-Runs after `tabulated-list-print', which erases prior previews; the
-inserted lines carry no entry id, so navigation and the next reprint
-skip them cleanly."
-  (when (and sprig--status-expanded
-             (> (hash-table-count sprig--status-expanded) 0)
-             sprig--status-index)
-    (let ((inhibit-read-only t))
-      (save-excursion
-        (goto-char (point-min))
-        (while (not (eobp))
-          (let* ((id (tabulated-list-get-id))
-                 (entry (and id (gethash id sprig--status-expanded)
-                             (gethash id sprig--status-index))))
-            (when entry
-              (save-excursion
-                (end-of-line)
-                (insert "\n" (mapconcat #'identity
-                                        (sprig--status-preview-lines entry)
-                                        "\n")))))
-          (forward-line 1))))))
+;;; Host group headings
+
+(defun sprig--status-group-counts ()
+  "Hash of host -> how many rows the current render put in its group."
+  (let ((counts (make-hash-table :test 'equal)))
+    (when sprig--status-index
+      (maphash (lambda (_ entry)
+                 (let ((host (plist-get entry :host)))
+                   (puthash host (1+ (gethash host counts 0)) counts)))
+               sprig--status-index))
+    counts))
+
+(defun sprig--status-group-label (host count)
+  "Return the heading text for HOST's group, holding COUNT rows.
+A leading fold glyph shows the group's state (`▾' open, `▸' collapsed),
+the way `magit' heads a foldable section.  An empty group reads `none'
+rather than `0', since the point of heading it at all is that you can
+still press `s' under it."
+  (format "%s %s (%s)"
+          (if (sprig--status-collapsed-p host) "▸" "▾")
+          (if host (concat "remote " host) "local")
+          (if (zerop count) "none" count)))
+
+(defun sprig--status-stamp-group (from to host)
+  "Mark the text between FROM and TO as belonging to HOST's group.
+Every navigator line carries this, headings and rows and previews alike,
+so `sprig--status-host-at-point' is a property read rather than a search
+back up the buffer.  The value is a plist because nil is a real host (the
+local machine) and would be indistinguishable from an absent property."
+  (put-text-property from to 'sprig--status-group (list :host host)))
+
+(defun sprig--status-insert-group (host counts)
+  "Insert HOST's group heading at point, sized from the COUNTS table.
+The heading carries `sprig--status-heading', which is what tells TAB it is
+sitting on a foldable heading rather than a session row."
+  (let ((from (point)))
+    (insert (propertize (sprig--status-group-label host (gethash host counts 0))
+                        'face 'sprig-status-group)
+            "\n")
+    (sprig--status-stamp-group from (point) host)
+    (put-text-property from (point) 'sprig--status-heading t)))
+
+(defun sprig--status-decorate ()
+  "Head each host group and insert the expanded rows' inline previews.
+Runs after `tabulated-list-print', which erases both.  The printed rows
+are in `sprig--status-groups' order, so the two are walked in step: a
+heading falls due whenever a row's host advances past the group last
+headed, and the groups left over at the end are the empty ones, which are
+headed all the same because the heading is what you press `s' under.
+
+The inserted lines carry no entry id, so navigation and the next reprint
+skip them cleanly.  Point is held by a marker of insertion type t, so a
+heading inserted at the very position point was restored to leaves point
+on its row rather than stranding it on the heading."
+  (let ((inhibit-read-only t)
+        (home (copy-marker (point) t))
+        (pending (or sprig--status-groups (sprig--status-hosts)))
+        (counts (sprig--status-group-counts))
+        (headed 'none))
+    (unwind-protect
+        (progn
+          (goto-char (point-min))
+          (while (not (eobp))
+            (let* ((id (tabulated-list-get-id))
+                   (entry (and id sprig--status-index
+                               (gethash id sprig--status-index))))
+              (when entry
+                (let ((host (plist-get entry :host)))
+                  ;; A heading falls due only when the host changes, and
+                  ;; then every group that sorts before this row's is due
+                  ;; too: those are the empty ones, headed here so they
+                  ;; land in place rather than at the end of the buffer.
+                  (unless (equal headed host)
+                    (while (and pending (not (equal (car pending) host)))
+                      (sprig--status-insert-group (car pending) counts)
+                      (pop pending))
+                    (sprig--status-insert-group host counts)
+                    (when pending (pop pending))
+                    (setq headed host))
+                  (sprig--status-stamp-group (line-beginning-position)
+                                             (min (point-max)
+                                                  (1+ (line-end-position)))
+                                             host)
+                  (when (and sprig--status-expanded
+                             (gethash id sprig--status-expanded))
+                    (save-excursion
+                      (forward-line 1)
+                      (let ((from (point)))
+                        (insert (mapconcat #'identity
+                                           (sprig--status-preview-lines entry)
+                                           "\n")
+                                "\n")
+                        (sprig--status-stamp-group from (point) host)))))))
+            (forward-line 1))
+          ;; Whatever is left took no rows this render; head it anyway.
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
+          (while pending
+            (sprig--status-insert-group (car pending) counts)
+            (pop pending)))
+      (goto-char home)
+      (set-marker home nil))))
+
+(defun sprig--status-host-at-point ()
+  "Return the host of the group point is in, nil for the local machine.
+Read from the group property every decorated line carries; on the
+buffer's trailing empty line, from the nearest line above that has one."
+  (let ((group (or (get-text-property (line-beginning-position)
+                                      'sprig--status-group)
+                   (save-excursion
+                     (let (found)
+                       (while (and (not found) (zerop (forward-line -1)))
+                         (setq found (get-text-property (line-beginning-position)
+                                                        'sprig--status-group)))
+                       found)))))
+    (plist-get group :host)))
 
 (defun sprig--status-render ()
-  "Reprint the navigator and re-insert its inline previews.
-Every navigator refresh path routes through here so previews survive a
+  "Reprint the navigator, then head its groups and re-insert its previews.
+Every navigator refresh path routes through here so both survive a
 reprint; point is kept on its row by `tabulated-list-print'."
   (tabulated-list-print t)
-  (sprig--status-insert-previews))
+  (sprig--status-decorate))
 
 ;;; Major mode, verbs, and the entry command
 
@@ -2012,7 +2232,12 @@ owns the session, replaying its stored log."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf)
         buf
-      (sprig-review-session (plist-get entry :dir) (plist-get entry :session)))))
+      ;; Pinned to the host the row's log was scanned on, not to whatever
+      ;; `sprig-remote' happens to be: a session id only resumes on the
+      ;; host that issued it, and now that both hosts are listed the two
+      ;; are routinely different.
+      (sprig-review-session (plist-get entry :dir) (plist-get entry :session)
+                            (or (plist-get entry :host) t)))))
 
 (defun sprig--status-owning-buffer (entry)
   "Return ENTRY's open owning review buffer, or signal that it is not open."
@@ -2077,23 +2302,34 @@ Reuses an open owning buffer, or replays the stored log into a new one."
   (sprig--status-refresh))
 
 (defun sprig-status-toggle-preview ()
-  "Toggle an inline preview of the last reply for the row at point.
-Shows the tail of that session's last reply, filled to
-`sprig-status-preview-max-lines' lines; press again to hide it."
+  "Fold the group under point, or preview the reply of the row under point.
+On a host heading (`local' or `remote HOST'), TAB collapses that whole
+group to its heading and expands it again, the way `magit' folds a
+section.  On a session row, it toggles an inline preview of the tail of
+that session's last reply, filled to `sprig-status-preview-max-lines'
+lines."
   (interactive)
-  (let ((id (tabulated-list-get-id)))
-    (unless id (user-error "No Sprig session on this line"))
-    (sprig--status-toggle-id id)
-    (sprig--status-render)))
+  (cond
+   ((get-text-property (line-beginning-position) 'sprig--status-heading)
+    (sprig--status-toggle-collapse (sprig--status-host-at-point)))
+   ((tabulated-list-get-id)
+    (sprig--status-toggle-id (tabulated-list-get-id))
+    (sprig--status-render))
+   (t (user-error "No Sprig session or host heading on this line"))))
 
 (defun sprig-status-new (&optional local)
-  "Start a fresh session, prompting for its working directory.
-Opens a review buffer that owns the new session; it appears in the
-navigator and streams like any other.  With a prefix argument, LOCAL
-forces the session onto the local machine even when `sprig-remote' is
-set (its log then lives locally, off the remote navigator's list)."
+  "Start a fresh session on the host of the group point is in.
+Point under the `local' heading starts the session on this machine; under
+a `remote' one, on that host.  Which is why an empty group is still
+headed: the heading is the place you stand to start the first session
+there.  Prompts for the working directory, against the local filesystem
+for a local session and as a free string for a remote one.  Opens a review
+buffer that owns the new session; it appears under its own group and
+streams like any other.  With a prefix argument, LOCAL forces the session
+onto this machine wherever point happens to be."
   (interactive "P")
-  (sprig-review-session (sprig--read-review-dir local) nil local)
+  (let ((host (unless local (sprig--status-host-at-point))))
+    (sprig-review-session (sprig--read-review-dir host) nil (or host t)))
   (sprig--status-refresh))
 
 (defun sprig--status-project-candidates ()

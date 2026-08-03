@@ -1701,7 +1701,8 @@ this affects only what the navigator and header show for the open buffer."
   (setq sprig-review--meta (plist-put sprig-review--meta :title title))
   (sprig-review--refresh))
 
-(declare-function sprig-review-session "sprig" (dir &optional session-id local fork))
+(declare-function sprig-review-session "sprig" (dir &optional session-id host fork))
+(declare-function sprig--remote "sprig" ())
 
 (defun sprig-review-new ()
   "Start a fresh conversation in this session's directory (`s n').
@@ -1710,7 +1711,10 @@ own session, which is what you want when the next piece of work is
 unrelated rather than a continuation of this one.  Call
 `sprig-review-session' directly to be asked for a different directory."
   (interactive)
-  (sprig-review-session sprig--working-dir nil (null sprig--remote-override)))
+  ;; On this session's host, pinned: an unrelated piece of work still
+  ;; belongs where the work is, and a session started off a local `C-u s'
+  ;; must not quietly come back on `sprig-remote'.
+  (sprig-review-session sprig--working-dir nil (or (sprig--remote) t)))
 
 (defun sprig-review-fork ()
   "Fork this session into one of its own, leaving this one untouched (`s f').
@@ -1725,8 +1729,10 @@ replay of this history."
   (interactive)
   (unless sprig--session-id
     (user-error "This session has no id yet; send something first, then fork"))
+  ;; The fork resumes the parent's id, which only exists on the parent's
+  ;; host, so it is pinned there rather than left to follow `sprig-remote'.
   (sprig-review-session sprig--working-dir sprig--session-id
-                        (null sprig--remote-override) t)
+                        (or (sprig--remote) t) t)
   (message "sprig: forked; the branch starts at its first send"))
 
 (defun sprig-review-retry ()
