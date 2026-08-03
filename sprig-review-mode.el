@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.13.0
+;; Version: 0.14.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -623,15 +623,24 @@ a list either way.  Folds to its heading; TAB opens the checklist."
 (declare-function markdown-mode "markdown-mode" ())
 (declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
 
-(defun sprig-review--fontify-markdown (text)
-  "Return TEXT fontified with `markdown-mode', its markup characters hidden.
-Fontifies in a reusable hidden buffer and copies the propertized string,
-so the `*'/`#' markup carries an `invisible' property the review buffer's
-invisibility spec then hides (see `sprig-review-mode').  The copy's faces
-are adopted onto `font-lock-face', without which this buffer's font-lock
-would strip them (see `sprig-review--adopt-faces').  Returns TEXT
-unchanged when `sprig-review-fontify-markdown' is nil or markdown-mode is
-not installed."
+(defvar sprig-review--fontify-cache (make-hash-table :test 'equal :size 200)
+  "Memo of `sprig-review--fontify-markdown' results, keyed on raw TEXT.
+A settled prose block's text never changes, yet a full re-render rebuilds
+its fontified form identically every time; on a long conversation that
+markdown font-lock pass is over half the render cost.  Caching it turns
+the work from once-per-render-per-block into once-per-block.  The result
+strings carry text properties, but `insert' copies them into the buffer,
+so handing back the same object on a later render is safe.")
+
+(defvar sprig-review--fontify-cache-flag 'unset
+  "Value of `sprig-review-fontify-markdown' the cache was built under.
+Fontification output depends on the flag, so a change to it stales every
+entry; the cache is cleared when the flag no longer matches this.")
+
+(defun sprig-review--fontify-uncached (text)
+  "Fontify TEXT with `markdown-mode', its markup characters hidden.
+See `sprig-review--fontify-markdown' for the whys; this is the raw pass,
+without the memo."
   (if (and sprig-review-fontify-markdown
            (require 'markdown-mode nil t))
       (with-current-buffer (get-buffer-create " *sprig-review-markdown*")
@@ -647,6 +656,25 @@ not installed."
           (font-lock-ensure)
           (sprig-review--adopt-faces (buffer-string))))
     text))
+
+(defun sprig-review--fontify-markdown (text)
+  "Return TEXT fontified with `markdown-mode', its markup characters hidden.
+Fontifies in a reusable hidden buffer and copies the propertized string,
+so the `*'/`#' markup carries an `invisible' property the review buffer's
+invisibility spec then hides (see `sprig-review-mode').  The copy's faces
+are adopted onto `font-lock-face', without which this buffer's font-lock
+would strip them (see `sprig-review--adopt-faces').  Returns TEXT
+unchanged when `sprig-review-fontify-markdown' is nil or markdown-mode is
+not installed.  Memoised on TEXT (see `sprig-review--fontify-cache'),
+since a full re-render fontifies every settled block afresh though only
+the streaming block's text has moved."
+  (unless (eq sprig-review--fontify-cache-flag sprig-review-fontify-markdown)
+    (clrhash sprig-review--fontify-cache)
+    (setq sprig-review--fontify-cache-flag sprig-review-fontify-markdown))
+  (let ((hit (gethash text sprig-review--fontify-cache)))
+    (or hit
+        (puthash text (sprig-review--fontify-uncached text)
+                 sprig-review--fontify-cache))))
 
 (defun sprig-review--text-body (text)
   "Return TEXT with trailing newlines normalised to exactly one.

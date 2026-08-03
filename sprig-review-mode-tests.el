@@ -149,6 +149,22 @@ timestamp, or the state line's rule."
       (should (eq (face-at "^/tmp/x\\.el$") 'sprig-review-file))
       (should (eq (face-at "Title:") 'sprig-review-meta-key)))))
 
+(ert-deftest sprig-review-mode-test-fontify-is-memoised ()
+  ;; A settled block's text never changes, so a re-render must not fontify it
+  ;; afresh: the second call for the same text returns the cached object.
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset))
+    (let ((first (sprig-review--fontify-markdown "## H\n\n**bold** here"))
+          (again (sprig-review--fontify-markdown "## H\n\n**bold** here")))
+      (should (eq first again))
+      (should (= 1 (hash-table-count sprig-review--fontify-cache))))
+    ;; Toggling the flag stales the cache: the entry is dropped and rebuilt.
+    (let ((sprig-review-fontify-markdown nil))
+      (should (equal "## H\n\n**bold** here"
+                     (sprig-review--fontify-markdown "## H\n\n**bold** here"))))))
+
 (ert-deftest sprig-review-mode-test-user-block-is-set-off ()
   (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
     (sprig-review-tests--rendered model nil
