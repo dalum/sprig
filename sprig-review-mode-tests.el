@@ -1328,6 +1328,65 @@ the fold learns the id from the result rather than from the call."
     (setq sprig--session-id nil)
     (should-error (sprig-review-fork) :type 'user-error)))
 
+(ert-deftest sprig-review-mode-test-session-buffer-does-not-select ()
+  ;; The navigator builds a row's review buffer without displaying it, so a
+  ;; verb run from the list steers the session in the background.  Building it
+  ;; leaves the caller's buffer selected and pins the session to the host.
+  (let ((sprig-remote nil) buf)
+    (with-temp-buffer
+      (let ((origin (current-buffer)))
+        (setq buf (sprig--review-session-buffer "/tmp/sprig-undisp-probe/"
+                                                nil t nil))
+        (unwind-protect
+            (progn
+              (should (buffer-live-p buf))
+              (should-not (eq buf origin))
+              ;; Not selected: building it did not switch buffers.
+              (should (eq (current-buffer) origin))
+              (with-current-buffer buf
+                ;; host t forces local, so the override is nil (local).
+                (should (null sprig--remote-override))))
+          (when (buffer-live-p buf) (kill-buffer buf)))))))
+
+(ert-deftest sprig-review-mode-test-status-session-buffer-builds-when-closed ()
+  ;; A row whose session is not open has its review buffer built on demand,
+  ;; undisplayed; a row already open reuses its live buffer instead.
+  (let ((sprig-remote nil) built live)
+    (unwind-protect
+        (with-temp-buffer
+          (let ((origin (current-buffer)))
+            (setq built (sprig--status-session-buffer
+                         (list :buffer nil :host nil
+                               :dir "/tmp/sprig-build-probe/" :session nil)))
+            (should (buffer-live-p built))
+            (should (eq (current-buffer) origin))
+            ;; A live owning buffer is reused as-is, not rebuilt.
+            (setq live (sprig--review-session-buffer "/tmp/sprig-live-probe/"
+                                                     nil t nil))
+            (should (eq (sprig--status-session-buffer (list :buffer live))
+                        live))))
+      (dolist (b (list built live))
+        (when (buffer-live-p b) (kill-buffer b))))))
+
+(ert-deftest sprig-review-mode-test-status-steer-runs-in-the-target ()
+  ;; A navigator steer verb runs the review command in the row's own review
+  ;; buffer: it resolves the row's session and calls the command there, so a
+  ;; c c composes for that session and a c y answers it, from the list.
+  (let ((sprig-remote nil) target seen)
+    (unwind-protect
+        (progn
+          (setq target (sprig--review-session-buffer "/tmp/sprig-steer-probe/"
+                                                     nil t nil))
+          (cl-letf (((symbol-function 'sprig--status-entry-at-point)
+                     (lambda () (list :buffer target :host nil
+                                      :dir "/tmp/sprig-steer-probe/" :session nil)))
+                    ((symbol-function 'sprig--status-refresh) #'ignore)
+                    ((symbol-function 'sprig-review-accept)
+                     (lambda () (interactive) (setq seen (current-buffer)))))
+            (sprig-status-accept))
+          (should (eq seen target)))
+      (when (buffer-live-p target) (kill-buffer target)))))
+
 (ert-deftest sprig-review-mode-test-run-verb ()
   ;; `x' steers rather than sends, so asking for a command lands in the turn
   ;; you are watching instead of waiting it out.

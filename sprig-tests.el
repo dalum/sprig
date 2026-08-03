@@ -1967,6 +1967,25 @@ Return the log directory."
       (should (equal (nth 2 (nth 1 calls)) "me@host"))
       (should (eq (nth 2 (nth 0 calls)) t)))))
 
+(ert-deftest sprig-test-status-steer-verbs-are-commands ()
+  ;; The navigator's c / a dispatch runs the review buffer's own verbs on the
+  ;; session under point; each wrapper is a real command.
+  (dolist (v '(sprig-status-message sprig-status-queue sprig-status-drop-queue
+               sprig-status-accept sprig-status-decline sprig-status-message-plan
+               sprig-status-retry sprig-status-compact
+               sprig-status-answer sprig-status-answer-recommended
+               sprig-status-answer-skip
+               sprig-status-dispatch sprig-status-answer-dispatch))
+    (should (commandp v)))
+  ;; c and a raise the dispatch transients; connect (`c' before) moved to c o,
+  ;; and k / d stay as quick single keys.
+  (should (eq (lookup-key sprig-status-mode-map (kbd "c")) 'sprig-status-dispatch))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "a"))
+              'sprig-status-answer-dispatch))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "k")) 'sprig-status-interrupt))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "d"))
+              'sprig-status-disconnect)))
+
 (ert-deftest sprig-test-status-collapse-folds-a-group ()
   ;; TAB on a heading folds its group to the heading alone: the rows stop
   ;; printing, the fold glyph flips, and the count still shows the true

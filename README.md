@@ -76,12 +76,12 @@ With `use-package` and a local checkout:
 ## Usage
 
 1. `M-x sprig-status` opens the navigator, listing every stored session, newest first and grouped by the host it runs on (`local`, and `remote you@your-server` when `sprig-remote` is set); `/` narrows it to a project or title.
-2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history, on the host that row came from. `s` starts a fresh session on the host of the group point is in, prompting for its working directory; a prefix argument (`C-u s`, or `C-u M-x sprig-review-session`) forces that one session onto the local machine wherever point sits, prompting against the local filesystem. `M-x sprig-review-session` does the same directly.
+2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history, on the host that row came from. `s` starts a fresh session on the host of the group point is in, prompting for its working directory; a prefix argument (`C-u s`, or `C-u M-x sprig-review-session`) forces that one session onto the local machine wherever point sits, prompting against the local filesystem. `M-x sprig-review-session` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the review buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
 3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
 5. `c i` (or `k` in the navigator) interrupts a streaming turn. The CLI ends the turn cleanly and the session stays live, so the next send continues it with no resume; if the CLI does not honour the request within `sprig-interrupt-timeout`, Sprig falls back to killing the turn and the session resumes on the next send.
 
-The session lives on past the buffer: reopen it any time from the navigator, or resume it with `c` there. Nothing is saved by you, because the CLI's log already is the record.
+The session lives on past the buffer: reopen it any time from the navigator, or resume it with `c o` there. Nothing is saved by you, because the CLI's log already is the record.
 
 ### Commands
 
@@ -113,7 +113,8 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `RET` / `o` | Open the session's review buffer (replaying its log), on the host it ran on |
 | `s` | Start a fresh session on the group point is in, prompting for its working directory (`C-u s` forces it local wherever point sits) |
 | `TAB` | On a session row, toggle an inline preview of its last reply; on a host heading, fold or unfold that group |
-| `c` | Open the session and start or resume it |
+| `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
+| `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session (its log is kept) |
 | `/` | Filter the list by project or title (empty clears) |

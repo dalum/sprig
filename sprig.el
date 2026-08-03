@@ -43,6 +43,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'tabulated-list)
+(require 'transient)                     ; the navigator's c / a dispatch menus
 (require 'sprig-review)                  ; pure data layer; no magit-section
 (eval-when-compile (require 'let-alist))
 
@@ -999,6 +1000,18 @@ is visible without opening the header."
 (declare-function sprig-review-set-remote "sprig-review-mode" (remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
 (declare-function sprig-review-interrupt "sprig-review-mode" ())
+;; The review verbs the navigator's c / a dispatch runs on the row's session.
+(declare-function sprig-review-message "sprig-review-mode" (&optional plan queue))
+(declare-function sprig-review-queue "sprig-review-mode" ())
+(declare-function sprig-review-drop-queue "sprig-review-mode" ())
+(declare-function sprig-review-accept "sprig-review-mode" ())
+(declare-function sprig-review-decline "sprig-review-mode" ())
+(declare-function sprig-review-message-plan "sprig-review-mode" ())
+(declare-function sprig-review-retry "sprig-review-mode" ())
+(declare-function sprig-review-compact "sprig-review-mode" ())
+(declare-function sprig-review-answer "sprig-review-mode" ())
+(declare-function sprig-review-answer-recommended "sprig-review-mode" ())
+(declare-function sprig-review-answer-skip "sprig-review-mode" ())
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1296,25 +1309,13 @@ back to killing the process; the session resumes on the next send."
         (sprig--status-refresh)
         (message "sprig: interrupt timed out; killed the turn (resumes on next send)")))))
 
-;;;###autoload
-(defun sprig-review-session (dir &optional session-id host fork)
-  "Open a review buffer that owns a session in working directory DIR.
-DIR may be nil when it is unknown (a stored session whose log carried no
-cwd), in which case the session runs in the host's login directory.  With
-SESSION-ID, replay that stored session's log and resume it on the next
-send; without, the buffer starts empty and a send opens a fresh session.
-HOST pins where the session runs: a string is an SSH destination, any
-other non-nil value (interactively, a prefix argument) is the local
-machine even when `sprig-remote' is set, and nil follows `sprig-remote' as
-it stands.  Pinning is what the navigator opens a row with, since a
-session id is per-host and only resumes on the host holding its log.
-FORK non-nil resumes SESSION-ID under an id of its own (see
-`sprig--fork-session'), so the replayed history is carried on in a session
-of its own and the parent is left untouched.  The review buffer is the
-only conversation surface."
-  (interactive
-   (let ((local current-prefix-arg))
-     (list (sprig--read-review-dir (unless local sprig-remote)) nil local)))
+(defun sprig--review-session-buffer (dir session-id host fork)
+  "Build (or reuse) the review buffer owning DIR's session, and return it.
+The buffer is left undisplayed; see `sprig-review-session' for the DIR,
+SESSION-ID, HOST, and FORK arguments.  Splitting the build from the
+display lets the navigator steer a stored session's buffer into being
+without popping it up: a verb run from the list acts on the session
+in the background, and only the verb's own compose or answer buffer shows."
   (require 'sprig-review-mode)
   (let* ((label (format "*sprig-review: %s%s*"
                         (or session-id
@@ -1345,7 +1346,28 @@ only conversation surface."
              (events (and lines (sprig-review-session-events lines))))
         (sprig-review-seed events (list :project dir)))
       (sprig-review-set-remote (sprig--remote)))
-    (pop-to-buffer buffer)))
+    buffer))
+
+;;;###autoload
+(defun sprig-review-session (dir &optional session-id host fork)
+  "Open a review buffer that owns a session in working directory DIR.
+DIR may be nil when it is unknown (a stored session whose log carried no
+cwd), in which case the session runs in the host's login directory.  With
+SESSION-ID, replay that stored session's log and resume it on the next
+send; without, the buffer starts empty and a send opens a fresh session.
+HOST pins where the session runs: a string is an SSH destination, any
+other non-nil value (interactively, a prefix argument) is the local
+machine even when `sprig-remote' is set, and nil follows `sprig-remote' as
+it stands.  Pinning is what the navigator opens a row with, since a
+session id is per-host and only resumes on the host holding its log.
+FORK non-nil resumes SESSION-ID under an id of its own (see
+`sprig--fork-session'), so the replayed history is carried on in a session
+of its own and the parent is left untouched.  The review buffer is the
+only conversation surface."
+  (interactive
+   (let ((local current-prefix-arg))
+     (list (sprig--read-review-dir (unless local sprig-remote)) nil local)))
+  (pop-to-buffer (sprig--review-session-buffer dir session-id host fork)))
 
 (defun sprig--login-command ()
   "Command vector running `claude auth login', local or over SSH.
@@ -2175,7 +2197,11 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-new)
-(define-key sprig-status-mode-map (kbd "c")   #'sprig-status-connect)
+;; `c' and `a' mirror the review buffer's steering transients, each acting on
+;; the session under point (`c c' composes, `a a' answers, ...).  Connect,
+;; which `c' was, is now `c o'; `k' and `d' stay as quick single keys.
+(define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
+(define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
@@ -2184,9 +2210,10 @@ reprint; point is kept on its row by `tabulated-list-print'."
 
 (define-derived-mode sprig-status-mode tabulated-list-mode "Sprig-Status"
   "Major mode listing Sprig conversations and their live status.
-\\<sprig-status-mode-map>Open with \\[sprig-status-open], connect with
-\\[sprig-status-connect], interrupt with \\[sprig-status-interrupt],
-disconnect with \\[sprig-status-disconnect], refresh with \\[revert-buffer]."
+\\<sprig-status-mode-map>Open with \\[sprig-status-open], steer the session
+under point with \\[sprig-status-dispatch] (its `c c' composes, `c o'
+connects), answer its waiting question with \\[sprig-status-answer-dispatch],
+interrupt with \\[sprig-status-interrupt], refresh with \\[revert-buffer]."
   (setq tabulated-list-format
         [("S" 2 t)
          ("Title" 32 t)
@@ -2225,6 +2252,14 @@ live and listed; deferring lets it drop from the list first."
     (or (and id sprig--status-index (gethash id sprig--status-index))
         (user-error "No Sprig session on this line"))))
 
+(defun sprig--status-entry-host-arg (entry)
+  "Return the host argument that pins a session to ENTRY's host.
+Pinned to the host the row's log was scanned on, not to whatever
+`sprig-remote' happens to be: a session id only resumes on the host that
+issued it, and now that both hosts are listed the two are routinely
+different.  Local is the symbol t (force local), a remote is its string."
+  (or (plist-get entry :host) t))
+
 (defun sprig--status-review-buffer (entry)
   "Return the review buffer for ENTRY, opening it from the log if needed.
 An open owning buffer is reused; otherwise a review buffer is opened that
@@ -2232,18 +2267,73 @@ owns the session, replaying its stored log."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf)
         buf
-      ;; Pinned to the host the row's log was scanned on, not to whatever
-      ;; `sprig-remote' happens to be: a session id only resumes on the
-      ;; host that issued it, and now that both hosts are listed the two
-      ;; are routinely different.
       (sprig-review-session (plist-get entry :dir) (plist-get entry :session)
-                            (or (plist-get entry :host) t)))))
+                            (sprig--status-entry-host-arg entry)))))
+
+(defun sprig--status-session-buffer (entry)
+  "Return the review buffer for ENTRY, built undisplayed if it is not open.
+Like `sprig--status-review-buffer' but it never pops the buffer up: a verb
+run from the navigator steers the session in the background, and only the
+verb's own compose or answer buffer shows."
+  (let ((buf (plist-get entry :buffer)))
+    (if (buffer-live-p buf)
+        buf
+      (sprig--review-session-buffer (plist-get entry :dir)
+                                    (plist-get entry :session)
+                                    (sprig--status-entry-host-arg entry) nil))))
 
 (defun sprig--status-owning-buffer (entry)
   "Return ENTRY's open owning review buffer, or signal that it is not open."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf) buf
       (user-error "That session is not open (open it first)"))))
+
+(defun sprig--status-steer (command)
+  "Run review COMMAND on the session of the row at point, from the navigator.
+The row's review buffer is resolved (built undisplayed when the session is
+not already open) and COMMAND is called there, so a message composes,
+a question answers, or a turn is steered without first opening the buffer.
+COMMAND's own compose or answer buffer, if any, still pops up as usual.
+The navigator refreshes after, so a glyph that the verb moved is redrawn."
+  (let ((buf (sprig--status-session-buffer (sprig--status-entry-at-point))))
+    (with-current-buffer buf
+      (call-interactively command)))
+  (sprig--status-refresh))
+
+(defmacro sprig--status-define-steer (name command &optional doc)
+  "Define NAME as a navigator verb that steers the row's session with COMMAND.
+A thin wrapper so the navigator's `c' and `a' transients can offer the
+review buffer's own verbs, each acting on the session at point.  DOC is the
+command's docstring."
+  (declare (indent 2) (doc-string 3))
+  `(defun ,name ()
+     ,(or doc (format "Run `%s' on the session of the row at point." command))
+     (interactive)
+     (sprig--status-steer #',command)))
+
+(sprig--status-define-steer sprig-status-message sprig-review-message
+  "Compose a message and send it to the row's session (`c c').")
+(sprig--status-define-steer sprig-status-queue sprig-review-queue
+  "Compose a message and queue it for after the running turn (`c q').")
+(sprig--status-define-steer sprig-status-drop-queue sprig-review-drop-queue
+  "Drop the messages queued on the row's session (`c Q').")
+(sprig--status-define-steer sprig-status-accept sprig-review-accept
+  "Answer the row's session yes / accept (`c y').")
+(sprig--status-define-steer sprig-status-decline sprig-review-decline
+  "Answer the row's session no / decline (`c n').")
+(sprig--status-define-steer sprig-status-message-plan sprig-review-message-plan
+  "Compose a message for the row's session in plan mode (`c p').")
+(sprig--status-define-steer sprig-status-retry sprig-review-retry
+  "Resend the last turn of the row's session (`c r').")
+(sprig--status-define-steer sprig-status-compact sprig-review-compact
+  "Compact the context of the row's session (`c z').")
+(sprig--status-define-steer sprig-status-answer sprig-review-answer
+  "Answer the row's session's waiting question, one at a time (`a a').")
+(sprig--status-define-steer sprig-status-answer-recommended
+    sprig-review-answer-recommended
+  "Take every recommended option on the row's session's question (`a r').")
+(sprig--status-define-steer sprig-status-answer-skip sprig-review-answer-skip
+  "Skip the row's session's waiting question (`a s').")
 
 (defun sprig--status-goto-row (dir)
   "Move point DIR (+1 or -1) session rows, skipping inline preview lines.
@@ -2300,6 +2390,35 @@ Reuses an open owning buffer, or replays the stored log into a new one."
   (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
     (when (process-live-p sprig--process) (sprig--teardown-process)))
   (sprig--status-refresh))
+
+;; Defined here, after the connect / interrupt / disconnect verbs they list,
+;; so every suffix command is known by the time the prefix is compiled.
+(transient-define-prefix sprig-status-dispatch ()
+  "Steer the session on the row at point, without leaving the navigator.
+The same message verbs the review buffer's `c' offers, each acting on the
+session under point.  The change-touching verbs (reject, commit, run) are
+not here: they act on a diff section, which the navigator has none of."
+  [["Message"
+    ("c" "compose & send (steers a running turn)" sprig-status-message)
+    ("q" "compose & queue (after this turn)" sprig-status-queue)
+    ("Q" "drop the queued messages" sprig-status-drop-queue)
+    ("y" "yes / accept" sprig-status-accept)
+    ("n" "no / decline" sprig-status-decline)
+    ("p" "compose in plan mode" sprig-status-message-plan)
+    ("r" "resend last turn" sprig-status-retry)
+    ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)
+    ("z" "compact context" sprig-status-compact)]
+   ["Session"
+    ("o" "open & connect" sprig-status-connect)
+    ("d" "disconnect" sprig-status-disconnect)]])
+
+(transient-define-prefix sprig-status-answer-dispatch ()
+  "Answer the question the session on the row at point is waiting on.
+The review buffer's `a', acting on the session under point."
+  [["Answer"
+    ("a" "answer, one question at a time" sprig-status-answer)
+    ("r" "take every recommended option" sprig-status-answer-recommended)
+    ("s" "skip; go on unanswered" sprig-status-answer-skip)]])
 
 (defun sprig-status-toggle-preview ()
   "Fold the group under point, or preview the reply of the row under point.
