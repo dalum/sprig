@@ -2170,6 +2170,36 @@ Return the log directory."
             (should-not (seq-some (lambda (l) (string-suffix-p "…" l)) lines))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-status-scroll-anchor-round-trips-by-id ()
+  ;; The window scroll anchors key off row ids, so a row keeps its place
+  ;; across a reprint that shifts the lines above it.  Exercise the id
+  ;; helpers on a hand-built buffer (batch has no windows for the wrapper).
+  (with-temp-buffer
+    (insert (propertize "▾ local (2)\n" 'sprig--status-heading t))
+    (insert (propertize "row A\n" 'tabulated-list-id "a"))
+    (insert (propertize "     preview of A\n" 'sprig--status-preview-id "a"))
+    (insert (propertize "row B\n" 'tabulated-list-id "b"))
+    ;; A row and its preview line both report the id; a heading reports none.
+    (goto-char (point-min))
+    (should-not (sprig--status-id-at (point)))
+    (forward-line 1)
+    (should (equal (sprig--status-id-at (point)) "a"))
+    (forward-line 1)
+    (should (equal (sprig--status-id-at (point)) "a"))
+    (forward-line 1)
+    (should (equal (sprig--status-id-at (point)) "b"))
+    ;; The position lookup lands on the printed row, not its preview line.
+    (let ((pos-a (sprig--status-id-line-position "a")))
+      (should pos-a)
+      (should (equal (buffer-substring pos-a (+ pos-a 5)) "row A")))
+    (should-not (sprig--status-id-line-position "gone"))
+    ;; A window top on the heading anchors to the first row below it, one line
+    ;; down; a top already on a row anchors to it with no offset.
+    (should (equal (sprig--status-scroll-anchor (point-min)) '("a" . 1)))
+    (should (equal (sprig--status-scroll-anchor
+                    (sprig--status-id-line-position "b"))
+                   '("b" . 0)))))
+
 (ert-deftest sprig-test-status-preview-lines-no-reply ()
   ;; A session with nothing to show falls to the muted placeholder.
   (should (equal (sprig--status-preview-lines '(:buffer nil :file nil))

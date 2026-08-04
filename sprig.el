@@ -2473,12 +2473,87 @@ buffer's trailing empty line, from the nearest line above that has one."
                        found)))))
     (plist-get group :host)))
 
+(defun sprig--status-id-at (pos)
+  "Return the session id owning the line at POS, or nil.
+A printed row carries it as `tabulated-list-id'; a preview line under one
+carries it as `sprig--status-preview-id'.  nil on a group heading, a blank
+line, or in an empty buffer."
+  (save-excursion
+    (goto-char pos)
+    (let ((bol (line-beginning-position)))
+      (or (tabulated-list-get-id bol)
+          (get-text-property bol 'sprig--status-preview-id)))))
+
+(defun sprig--status-scroll-anchor (pos)
+  "Return (ID . DELTA) anchoring buffer POS to the nearest row at or below it.
+ID is the session of the first row whose line lies at or below POS's line;
+DELTA is how many lines POS's line sits above that row.  nil when no row
+lies below POS.  Used to pin a window's top edge to a row that survives a
+reprint even as rows above it come and go."
+  (save-excursion
+    (goto-char pos)
+    (beginning-of-line)
+    (let ((delta 0) id)
+      (while (and (not (setq id (sprig--status-id-at (point))))
+                  (zerop (forward-line 1)))
+        (setq delta (1+ delta)))
+      (and id (cons id delta)))))
+
+(defun sprig--status-id-line-position (id)
+  "Return the buffer position starting the row that owns ID, or nil.
+Rows precede their own preview lines, so the top-down scan lands on the
+printed row rather than one of its preview lines."
+  (save-excursion
+    (goto-char (point-min))
+    (let (found)
+      (while (and (not found) (not (eobp)))
+        (if (equal (sprig--status-id-at (point)) id)
+            (setq found (line-beginning-position))
+          (forward-line 1)))
+      found)))
+
+(defun sprig--status-window-anchors ()
+  "Snapshot the scroll and point anchors of every window showing the navigator.
+Returns a list of (WINDOW START-ANCHOR POINT-ID): START-ANCHOR pins the
+window's top edge (see `sprig--status-scroll-anchor'), POINT-ID the row
+under its point.  Both are ids, so `sprig--status-restore-window-anchor' can
+re-find them in the freshly printed buffer."
+  (mapcar (lambda (win)
+            (list win
+                  (sprig--status-scroll-anchor (window-start win))
+                  (sprig--status-id-at (window-point win))))
+          (get-buffer-window-list (current-buffer) nil t)))
+
+(defun sprig--status-restore-window-anchor (win start-anchor point-id)
+  "Restore WIN's point and scroll position from an id-keyed anchor.
+The row under point and the row at the top edge keep their places even as
+rows above them come and go across a reprint; a row that vanished is simply
+not restored, leaving that window to redisplay's own default."
+  (when (window-live-p win)
+    (when point-id
+      (let ((pos (sprig--status-id-line-position point-id)))
+        (when pos (set-window-point win pos))))
+    (when start-anchor
+      (let ((pos (sprig--status-id-line-position (car start-anchor))))
+        (when pos
+          (set-window-start
+           win (save-excursion
+                 (goto-char pos)
+                 (forward-line (- (cdr start-anchor)))
+                 (point))))))))
+
 (defun sprig--status-render ()
   "Reprint the navigator, then head its groups and re-insert its previews.
-Every navigator refresh path routes through here so both survive a
-reprint; point is kept on its row by `tabulated-list-print'."
-  (tabulated-list-print t)
-  (sprig--status-decorate))
+Every navigator refresh path routes through here so both survive a reprint.
+`tabulated-list-print' keeps point on its row by id; on top of that each
+window showing the navigator keeps its scroll position, anchored to the id
+of the row at its top edge, so a background refresh does not jump the view
+to the buffer's head."
+  (let ((anchors (sprig--status-window-anchors)))
+    (tabulated-list-print t)
+    (sprig--status-decorate)
+    (dolist (a anchors)
+      (apply #'sprig--status-restore-window-anchor a))))
 
 ;;; Major mode, verbs, and the entry command
 
