@@ -2586,9 +2586,10 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
 ;; Five transients mirror the review buffer's steering surface, each acting on
-;; the session under point: `s' starts (`s n' new, `s f' fork), `c' steers
-;; (`c c' composes), `a' answers, `d' removes (`d d' disconnects, `d D'
-;; deletes), and `l' switches the view (`l l' live-only, `l a' show all).
+;; the session under point: `s' starts (`s n' new, `s c' new-then-compose,
+;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
+;; `d' removes (`d d' disconnects, `d D' deletes), and `l' switches the view
+;; (`l l' live-only, `l a' show all).
 ;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
 ;; top-level, being the frequent ones.
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
@@ -2943,6 +2944,16 @@ exchange: your prompt and the agent's reply in full (see
       (sprig--status-render))
      (t (user-error "No Sprig session or host heading on this line")))))
 
+(defun sprig--status-new-session-args (local)
+  "Return (HOST . DEFAULT-DIR) for a fresh session started at point.
+HOST is the group point is in, unless LOCAL forces this machine.
+DEFAULT-DIR seeds the directory prompt from the session row at point when
+there is one, so a fresh session starts alongside it in the same place."
+  (let* ((host (unless local (sprig--status-host-at-point)))
+         (id (sprig--status-id-at-point))
+         (entry (and id sprig--status-index (gethash id sprig--status-index))))
+    (cons host (and entry (plist-get entry :dir)))))
+
 (defun sprig-status-new (&optional local)
   "Start a fresh session on the host of the group point is in.
 Point under the `local' heading starts the session on this machine; under
@@ -2956,12 +2967,41 @@ onto this machine wherever point happens to be.  When point is on a
 session row, its directory seeds the prompt, so `s n' on a session starts
 a fresh one alongside it in the same directory."
   (interactive "P")
-  (let* ((host (unless local (sprig--status-host-at-point)))
-         (id (sprig--status-id-at-point))
-         (entry (and id sprig--status-index (gethash id sprig--status-index)))
-         (default (and entry (plist-get entry :dir))))
-    (sprig-review-session (sprig--read-review-dir host default) nil (or host t)))
+  (let ((args (sprig--status-new-session-args local)))
+    (sprig-review-session (sprig--read-review-dir (car args) (cdr args))
+                          nil (or (car args) t)))
   (sprig--status-refresh))
+
+(defun sprig--status-new-message (local plan)
+  "Start a fresh session at point (like `s n') and open its first prompt.
+Rather than leaving you in the empty review buffer, this opens the compose
+buffer straight away, so the opening message is one prompt rather than an
+extra keystroke away.  LOCAL forces the session onto this machine; PLAN
+opens the compose buffer in plan mode.  A session row at point seeds the
+directory prompt, as with `s n'."
+  (let* ((args (sprig--status-new-session-args local))
+         (host (car args))
+         (buf (sprig--review-session-buffer
+               (sprig--read-review-dir host (cdr args)) nil (or host t) nil)))
+    (sprig--status-refresh)
+    (pop-to-buffer buf)
+    (with-current-buffer buf (sprig-review-message plan))))
+
+(defun sprig-status-new-message (&optional local)
+  "Start a fresh session and open a prompt for its first message (`s c').
+Like `s n', but drops you straight into the compose buffer instead of the
+empty review buffer.  With a prefix argument, LOCAL forces the session onto
+this machine; a session row at point seeds the directory prompt."
+  (interactive "P")
+  (sprig--status-new-message local nil))
+
+(defun sprig-status-new-message-plan (&optional local)
+  "Start a fresh session and compose its first message in plan mode (`s p').
+Like `s c', but the opening turn is sent in plan mode.  With a prefix
+argument, LOCAL forces the session onto this machine; a session row at
+point seeds the directory prompt."
+  (interactive "P")
+  (sprig--status-new-message local t))
 
 (defun sprig-status-fork ()
   "Fork the session on the current line into one of its own (`s f').
@@ -2985,10 +3025,14 @@ resumes the parent's id and that only exists there."
 (transient-define-prefix sprig-status-start ()
   "Start a session from the navigator.
 `s n' starts a fresh conversation on the group point is in (`C-u s n'
-forces it local, and a session row seeds the directory prompt); `s f'
-forks the session at point into one of its own."
+forces it local, and a session row seeds the directory prompt); `s c' does
+the same but drops you straight into a prompt for the first message, and
+`s p' into a plan-mode prompt; `s f' forks the session at point into one of
+its own."
   [["Start"
     ("n" "new conversation" sprig-status-new)
+    ("c" "new, then compose the first message" sprig-status-new-message)
+    ("p" "new, then compose in plan mode" sprig-status-new-message-plan)
     ("f" "fork the session at point" sprig-status-fork)]])
 
 (defun sprig--status-project-candidates ()

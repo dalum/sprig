@@ -1982,7 +1982,8 @@ Return the log directory."
                sprig-status-answer-skip
                sprig-status-dispatch sprig-status-answer-dispatch
                sprig-status-start sprig-status-remove sprig-status-view
-               sprig-status-new sprig-status-fork
+               sprig-status-new sprig-status-new-message
+               sprig-status-new-message-plan sprig-status-fork
                sprig-status-disconnect sprig-status-delete
                sprig-status-toggle-disconnected sprig-status-show-all))
     (should (commandp v)))
