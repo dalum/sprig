@@ -2487,12 +2487,13 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
-(define-key sprig-status-mode-map (kbd "s")   #'sprig-status-new)
-;; Four transients mirror the review buffer's steering surface, each acting on
-;; the session under point: `c' steers (`c c' composes), `a' answers, `d'
-;; removes (`d d' disconnects, `d D' deletes), and `l' switches the view
-;; (`l l' live-only, `l a' show all).  Interrupt is `c i'; connect is `c o'.
-;; `/' (filter) and `S' (sort) also stay top-level, being the frequent ones.
+;; Five transients mirror the review buffer's steering surface, each acting on
+;; the session under point: `s' starts (`s n' new, `s f' fork), `c' steers
+;; (`c c' composes), `a' answers, `d' removes (`d d' disconnects, `d D'
+;; deletes), and `l' switches the view (`l l' live-only, `l a' show all).
+;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
+;; top-level, being the frequent ones.
+(define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-remove)
@@ -2854,8 +2855,8 @@ for a local session and as a free string for a remote one.  Opens a review
 buffer that owns the new session; it appears under its own group and
 streams like any other.  With a prefix argument, LOCAL forces the session
 onto this machine wherever point happens to be.  When point is on a
-session row, its directory seeds the prompt, so `s' on a session starts a
-fresh one alongside it in the same directory."
+session row, its directory seeds the prompt, so `s n' on a session starts
+a fresh one alongside it in the same directory."
   (interactive "P")
   (let* ((host (unless local (sprig--status-host-at-point)))
          (id (sprig--status-id-at-point))
@@ -2863,6 +2864,34 @@ fresh one alongside it in the same directory."
          (default (and entry (plist-get entry :dir))))
     (sprig-review-session (sprig--read-review-dir host default) nil (or host t)))
   (sprig--status-refresh))
+
+(defun sprig-status-fork ()
+  "Fork the session on the current line into one of its own (`s f').
+The new buffer replays this session's history and carries it on under a
+session id of its own, so the two diverge from here; the parent's log is
+never written to again.  The CLI forks from the end of a session, so the
+branch starts where the conversation now stands, and the fork itself is
+only made on its first send.  Pinned to the parent's host, since the fork
+resumes the parent's id and that only exists there."
+  (interactive)
+  (let* ((entry (sprig--status-entry-at-point))
+         (id (plist-get entry :session)))
+    (unless id
+      (user-error "That session has no id yet; open and send it first, then fork"))
+    (sprig-review-session (plist-get entry :dir) id
+                          (sprig--status-entry-host-arg entry) t)
+    (message "sprig: forked; the branch starts at its first send"))
+  (sprig--status-refresh))
+
+;; Defined after the verbs it lists, as with `sprig-status-dispatch'.
+(transient-define-prefix sprig-status-start ()
+  "Start a session from the navigator.
+`s n' starts a fresh conversation on the group point is in (`C-u s n'
+forces it local, and a session row seeds the directory prompt); `s f'
+forks the session at point into one of its own."
+  [["Start"
+    ("n" "new conversation" sprig-status-new)
+    ("f" "fork the session at point" sprig-status-fork)]])
 
 (defun sprig--status-project-candidates ()
   "Distinct project directories among the rows in the current render."

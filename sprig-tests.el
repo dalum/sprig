@@ -1976,12 +1976,14 @@ Return the log directory."
                sprig-status-answer sprig-status-answer-recommended
                sprig-status-answer-skip
                sprig-status-dispatch sprig-status-answer-dispatch
-               sprig-status-remove sprig-status-view
+               sprig-status-start sprig-status-remove sprig-status-view
+               sprig-status-new sprig-status-fork
                sprig-status-disconnect sprig-status-delete
                sprig-status-toggle-disconnected sprig-status-show-all))
     (should (commandp v)))
-  ;; c / a / d / l each raise a dispatch transient; interrupt (`k' before) is
-  ;; now only `c i', and delete/show-all fold under the `d' / `l' prefixes.
+  ;; s / c / a / d / l each raise a dispatch transient; interrupt (`k' before)
+  ;; is now only `c i', and new/delete/show-all fold under their prefixes.
+  (should (eq (lookup-key sprig-status-mode-map (kbd "s")) 'sprig-status-start))
   (should (eq (lookup-key sprig-status-mode-map (kbd "c")) 'sprig-status-dispatch))
   (should (eq (lookup-key sprig-status-mode-map (kbd "a"))
               'sprig-status-answer-dispatch))
