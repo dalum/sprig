@@ -2081,13 +2081,14 @@ Return the log directory."
     (should (equal (plist-get p :reply) "para one\n\npara two"))
     (should-not (string-match-p "old answer" (plist-get p :reply)))))
 
-(ert-deftest sprig-test-events-preview-joins-reply-blocks ()
-  ;; A reply split across text blocks by a tool call is joined whole, not cut
-  ;; down to the final paragraph the way the old preview was.
+(ert-deftest sprig-test-events-preview-final-message-only ()
+  ;; A turn's running narration between tool calls is dropped: the preview is
+  ;; the final message alone, the last text block, not every block joined.
   (let ((p (sprig--events-preview
             '((user "q") (text "before the tool")
-              (tool-call "t1" "Bash" nil) (text "after the tool")))))
-    (should (equal (plist-get p :reply) "before the tool\n\nafter the tool"))))
+              (tool-call "t1" "Bash" nil) (text "the final message")))))
+    (should (equal (plist-get p :reply) "the final message"))
+    (should-not (string-match-p "before the tool" (plist-get p :reply)))))
 
 (ert-deftest sprig-test-events-preview-falls-back-to-last-text ()
   ;; The newest turn ended on a tool call with no prose of its own, so the
@@ -2174,6 +2175,34 @@ Return the log directory."
   (should (equal (sprig--status-preview-lines '(:buffer nil :file nil))
                  (list (propertize "     (no reply yet)"
                                    'face 'sprig-status-preview)))))
+
+(ert-deftest sprig-test-status-preview-lines-streaming-holds-back-reply ()
+  ;; While the turn streams the reply is held back: the prompt still leads,
+  ;; but the growing prose stays out until the turn settles.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/stream")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-stream"
+           `(:type "user" :cwd ,proj
+             :message (:role "user" :content "my prompt here"))
+           '(:type "ai-title" :aiTitle "Stream")
+           `(:type "assistant" :cwd ,proj
+             :message (:role "assistant"
+                       :content ,(vector (list :type "text"
+                                               :text "partial reply so far")))))
+          (let* ((entry (car (sprig--scan-session-logs)))
+                 (streaming (plist-put (copy-sequence entry) :status 'streaming))
+                 (lines (sprig--status-preview-lines streaming))
+                 (joined (string-join lines "\n")))
+            ;; The prompt still leads under the state line.
+            (should (string-match-p "» my prompt here" joined))
+            ;; The reply prose is held back until the turn settles.
+            (should-not (string-match-p "partial reply so far" joined))))
+      (delete-directory root t))))
 
 (ert-deftest sprig-test-tidy-prose ()
   ;; Trims and squeezes blank runs, but keeps single line breaks so a list

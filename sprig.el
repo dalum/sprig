@@ -1859,13 +1859,14 @@ be parsed."
 (defun sprig--events-preview (events)
   "Return a preview plist for EVENTS' conversation tail, or nil.
 The plist is (:prompt STR :reply STR :time ISO :context N :done BOOL :error
-BOOL :pending BOOL): the last user turn collapsed to a line, the agent's reply
-that answered it (every text block since that turn, structure kept for the
-markdown pass), the stamp of the freshest block, and the turn's outcome and
-context size for the preview's state line.  When the turn since your prompt
-carried no prose (it ended on a tool call or a question), or there is no user
-turn at all, the reply falls back to the last assistant text anywhere.  EVENTS
-are chronological (the review model's input order)."
+BOOL :pending BOOL): the last user turn collapsed to a line, the agent's final
+message that answered it (only the last text block of that turn, not the
+running narration between its tool calls, its structure kept for the markdown
+pass), the stamp of the freshest block, and the turn's outcome and context
+size for the preview's state line.  When the turn since your prompt carried no
+prose (it ended on a tool call or a question), or there is no user turn at
+all, the reply falls back to the last assistant text anywhere.  EVENTS are
+chronological (the review model's input order)."
   (let* ((model (ignore-errors (sprig-review-build events)))
          (blocks (and model (plist-get model :blocks))))
     (when blocks
@@ -1878,13 +1879,11 @@ are chronological (the review model's input order)."
                           (sprig--collapse-whitespace
                            (plist-get (nth last-user blocks) :text))))
              (reply (or (and last-user
-                             (sprig--tidy-prose
-                              (mapconcat
-                               (lambda (b) (plist-get b :text))
-                               (seq-filter
-                                (lambda (b) (eq (plist-get b :type) 'text))
-                                (nthcdr (1+ last-user) blocks))
-                               "\n\n")))
+                             (let ((final (seq-find
+                                           (lambda (b) (eq (plist-get b :type) 'text))
+                                           (reverse (nthcdr (1+ last-user) blocks)))))
+                               (and final (sprig--tidy-prose
+                                           (plist-get final :text)))))
                         (let ((last (seq-find
                                      (lambda (b) (eq (plist-get b :type) 'text))
                                      (reverse blocks))))
@@ -2308,10 +2307,16 @@ then the agent's reply prose wrapped to the window.  The exchange's time is not
 repeated here; it rides the row's own `Time' column, visible collapsed too.
 `sprig-status-preview-max-lines' bounds the prompt and reply together when it is
 a number; nil (the default) shows the whole reply.  A row with no reply yet
-shows a single muted placeholder."
+shows a single muted placeholder.
+
+While the turn is still streaming the reply is held back: the growing prose
+is noise until it settles, so only the prompt rides under the `working…' state
+line.  The reply appears once the turn is over, or the moment it needs you (a
+question or a plan), which is exactly when it is worth reading."
   (let* ((preview (sprig--entry-preview entry))
          (prompt (plist-get preview :prompt))
-         (reply (plist-get preview :reply))
+         (reply (and (not (eq (plist-get entry :status) 'streaming))
+                     (plist-get preview :reply)))
          (state (sprig--status-state-line entry preview))
          (width (max 24 (- (min 100 (window-width)) 6)))
          (lines '()))
