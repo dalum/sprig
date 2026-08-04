@@ -753,6 +753,21 @@ environment variable is resolved wherever the session runs."
     (unless (or (null v) (string-empty-p (string-trim v)))
       (string-trim v))))
 
+(defun sprig--sync-default-directory ()
+  "Point this buffer's `default-directory' at its session's working dir.
+So `C-x C-f' and friends from the buffer default to the session's own
+directory rather than to wherever the buffer happened to be created.  A
+remote session's dir lives on the SSH host, so it is named over TRAMP the
+way visiting a changed file is; a dir-less session (the login dir) keeps
+the inherited default."
+  (when-let* ((dir (sprig--directory)))
+    (let ((remote (sprig--remote)))
+      (setq default-directory
+            (file-name-as-directory
+             (if remote
+                 (format "/ssh:%s:%s" remote dir)
+               (expand-file-name dir)))))))
+
 ;;;; Session lifecycle
 
 (defun sprig--spawn ()
@@ -1159,7 +1174,8 @@ unless NO-PROMPT."
   (setq sprig--sink #'sprig--review-sink
         sprig--connect-fn #'sprig-review-connect)
   (unless (or no-prompt sprig--session-id sprig--working-dir)
-    (setq sprig--working-dir (sprig--read-review-dir (sprig--remote))))
+    (setq sprig--working-dir (sprig--read-review-dir (sprig--remote)))
+    (sprig--sync-default-directory))
   (sprig--spawn)
   (message "sprig: %s (%s%s)"
            (if sprig--session-id "resuming session" "new session")
@@ -1364,7 +1380,8 @@ in the background, and only the verb's own compose or answer buffer shows."
       (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
              (events (and lines (sprig-review-session-events lines))))
         (sprig-review-seed events (list :project dir)))
-      (sprig-review-set-remote (sprig--remote)))
+      (sprig-review-set-remote (sprig--remote))
+      (sprig--sync-default-directory))
     buffer))
 
 ;;;###autoload
