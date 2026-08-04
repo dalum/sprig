@@ -2330,20 +2330,27 @@ turn, and sent mid-turn, from the agent's next tool-call boundary."
 (defun sprig-review-plan-mode ()
   "Put the session into plan mode (`P p'): the agent plans, makes no edits.
 Sticky, like Claude Code's own: it stays until you leave it, whether by
-approving a plan or with `P d' / `P e', so a follow-up carries on planning
+approving a plan or with another `P', so a follow-up carries on planning
 rather than dropping out."
   (interactive)
   (sprig-review--set-mode "plan"))
+
+(defun sprig-review-auto-mode ()
+  "Put the session into auto mode (`P a'): the CLI's normal working mode.
+What the shift-tab cycle calls \"auto mode\": allowed tools run, the rest
+prompt.  It is where a session sits when it is not in one of the others."
+  (interactive)
+  (sprig-review--set-mode "auto"))
 
 (defun sprig-review-accept-edits-mode ()
   "Put the session into accept-edits mode (`P e'): file edits auto-approve."
   (interactive)
   (sprig-review--set-mode "acceptEdits"))
 
-(defun sprig-review-default-mode ()
-  "Return the session to default mode (`P d'): edits prompt for approval."
+(defun sprig-review-manual-mode ()
+  "Put the session into manual mode (`P m'): every tool call prompts."
   (interactive)
-  (sprig-review--set-mode "default"))
+  (sprig-review--set-mode "manual"))
 
 (defun sprig-review-bypass-mode ()
   "Put the session into bypass mode (`P b'): every tool call auto-approves.
@@ -2356,11 +2363,13 @@ all, so reach for it only where that is genuinely what you want."
   "Set the session's permission mode (`P').
 The mode is sticky: it holds until you change it here or the agent leaves
 plan mode on an approved plan.  This is how you enter or leave plan mode by
-hand, since a plain send no longer drops out of it on its own."
+hand, since a plain send no longer drops out of it on its own.  The keys
+name the CLI's own modes, the ones the shift-tab cycle steps through."
   [["Permission mode"
     ("p" "plan (agent plans, makes no edits)" sprig-review-plan-mode)
+    ("a" "auto (normal: allowed tools run, rest prompt)" sprig-review-auto-mode)
     ("e" "accept edits (auto-approve file edits)" sprig-review-accept-edits-mode)
-    ("d" "default (prompt for each edit)" sprig-review-default-mode)
+    ("m" "manual (prompt for every tool call)" sprig-review-manual-mode)
     ("b" "bypass (auto-approve everything, incl. shell)" sprig-review-bypass-mode)]])
 
 (transient-define-prefix sprig-review-session-dispatch ()
