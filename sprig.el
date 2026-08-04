@@ -1260,8 +1260,10 @@ that each say one thing."
 (defun sprig--review-deliver (text &optional mode)
   "Send TEXT as this review buffer's own next user turn, echoing it locally.
 Used when the review buffer owns the session.  MODE, when given, sets the
-permission mode first (e.g. \"plan\"); with none, a session left in plan
-mode is returned to \"auto\"."
+permission mode first (e.g. \"plan\").  With none, the mode is left as it
+stands: it is sticky, the way Claude Code's own is, so a follow-up carries
+on in plan mode rather than dropping out of it.  Leaving plan mode is its
+own gesture: approving an ExitPlanMode plan, or `P' to set the mode by hand."
   (sprig--ensure)
   ;; Reached with a turn running only from a verb that needs a turn of its
   ;; own, `c p' being the one: a plan turn sets the permission mode first, so
@@ -1269,10 +1271,8 @@ mode is returned to \"auto\"."
   ;; that can fold in steer (`c c'), or wait (`c q'), and never come here busy.
   (when sprig--busy
     (user-error "A turn is already in flight (say it with `c c', or wait with `c q')"))
-  (cond ((and mode (not (equal mode sprig--permission-mode)))
-         (sprig--set-permission-mode mode))
-        ((and (null mode) (equal sprig--permission-mode "plan"))
-         (sprig--set-permission-mode "auto")))
+  (when (and mode (not (equal mode sprig--permission-mode)))
+    (sprig--set-permission-mode mode))
   (setq sprig--busy t)
   (sprig--send-user text)
   (sprig-review-consume (list 'user text))

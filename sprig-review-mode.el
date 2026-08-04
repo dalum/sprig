@@ -49,6 +49,7 @@
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
 (declare-function sprig--session-log-file "sprig" ())
+(declare-function sprig--set-permission-mode "sprig" (mode))
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -59,6 +60,7 @@
 (defvar sprig--session-id)
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
+(defvar sprig--permission-mode)
 
 ;;;; Faces
 
@@ -1810,6 +1812,23 @@ unrelated rather than a continuation of this one.  Call
   ;; must not quietly come back on `sprig-remote'.
   (sprig-review-session sprig--working-dir nil (or (sprig--remote) t)))
 
+(defun sprig-review-new-message ()
+  "Start a fresh session and open a prompt for its first message (`s c').
+Like `s n' followed by `c c': a new session in this one's directory,
+dropped straight into the compose buffer instead of an empty review
+buffer.  `sprig-review-new' selects the new buffer, so the compose targets
+it."
+  (interactive)
+  (sprig-review-new)
+  (sprig-review-message))
+
+(defun sprig-review-new-message-plan ()
+  "Start a fresh session and compose its first message in plan mode (`s p').
+Like `s c', but the opening turn is composed in plan mode."
+  (interactive)
+  (sprig-review-new)
+  (sprig-review-message t))
+
 (defun sprig-review-fork ()
   "Fork this session into one of its own, leaving this one untouched (`s f').
 The fork replays this session's history and carries it on under a session
@@ -2298,12 +2317,53 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("C" "commit" sprig-review-commit)
     ("x" "run command / fenced block" sprig-review-run)]])
 
+(defun sprig-review--set-mode (mode)
+  "Switch this session's permission MODE, which must be live to be told.
+The mode is a session-level setting the CLI tracks and reports back, so
+there has to be a running session to set it on; it takes hold from the next
+turn, and sent mid-turn, from the agent's next tool-call boundary."
+  (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
+    (user-error "No live session to set the mode on; send a message first"))
+  (sprig--set-permission-mode mode)
+  (message "sprig: permission mode is now %s" mode))
+
+(defun sprig-review-plan-mode ()
+  "Put the session into plan mode (`P p'): the agent plans, makes no edits.
+Sticky, like Claude Code's own: it stays until you leave it, whether by
+approving a plan or with `P d' / `P e', so a follow-up carries on planning
+rather than dropping out."
+  (interactive)
+  (sprig-review--set-mode "plan"))
+
+(defun sprig-review-accept-edits-mode ()
+  "Put the session into accept-edits mode (`P e'): file edits auto-approve."
+  (interactive)
+  (sprig-review--set-mode "acceptEdits"))
+
+(defun sprig-review-default-mode ()
+  "Return the session to default mode (`P d'): edits prompt for approval."
+  (interactive)
+  (sprig-review--set-mode "default"))
+
+(transient-define-prefix sprig-review-permission-mode ()
+  "Set the session's permission mode (`P').
+The mode is sticky: it holds until you change it here or the agent leaves
+plan mode on an approved plan.  This is how you enter or leave plan mode by
+hand, since a plain send no longer drops out of it on its own."
+  [["Permission mode"
+    ("p" "plan (agent plans, makes no edits)" sprig-review-plan-mode)
+    ("e" "accept edits (auto-approve file edits)" sprig-review-accept-edits-mode)
+    ("d" "default (prompt for each edit)" sprig-review-default-mode)]])
+
 (transient-define-prefix sprig-review-session-dispatch ()
   "Start or fork a session from the review buffer.
 `c' steers the conversation this buffer already owns; `s' is where a
-session of its own begins."
+session of its own begins.  `s c' / `s p' start one and drop you straight
+into its first-message prompt (plan mode for `s p')."
   [["Session"
     ("n" "new conversation" sprig-review-new)
+    ("c" "new, then compose the first message" sprig-review-new-message)
+    ("p" "new, then compose in plan mode" sprig-review-new-message-plan)
     ("f" "fork this session" sprig-review-fork)]])
 
 ;;;; Verb keybindings
@@ -2313,6 +2373,7 @@ session of its own begins."
 (define-key sprig-review-mode-map (kbd "U")   #'sprig-review-unmark-all)
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
+(define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).
