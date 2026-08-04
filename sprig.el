@@ -1554,6 +1554,11 @@ Matched against a row's project directory and its title.")
   "When non-nil, the navigator lists every session.
 It lifts the `sprig-status-max-sessions' cap for its buffer.")
 
+(defvar-local sprig--status-hide-disconnected nil
+  "When non-nil, the navigator hides disconnected (`○') sessions.
+`l' toggles it, leaving a live-only view; the hidden sessions' logs are
+untouched and return on the next toggle.")
+
 ;;; Enumerating stored CLI sessions as branches (option A)
 ;;
 ;; A branch is a `claude' session; the CLI already stores each as a JSONL
@@ -1992,6 +1997,10 @@ group filtered down to nothing keeps its heading all the same."
         (setq rows (seq-filter
                     (lambda (e) (sprig--entry-matches-filter e sprig--status-filter))
                     rows)))
+      (when sprig--status-hide-disconnected
+        (setq rows (seq-remove
+                    (lambda (e) (eq (plist-get e :status) 'disconnected))
+                    rows)))
       (sprig--status-sort-by-group (sprig--status-sort-rows rows)
                                    (sprig--status-group-hosts rows)))))
 
@@ -2124,6 +2133,7 @@ never outlives its row."
           (concat (and sprig--status-filter
                        (format " /%s" sprig--status-filter))
                   (and sprig--status-show-all " [all]")
+                  (and sprig--status-hide-disconnected " [live]")
                   (when sprig--status-sort
                     (format " %s%s" (if (cdr sprig--status-sort) "↓" "↑")
                             (car sprig--status-sort)))))
@@ -2485,7 +2495,9 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
 (define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
+(define-key sprig-status-mode-map (kbd "D")   #'sprig-status-delete)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
+(define-key sprig-status-mode-map (kbd "l")   #'sprig-status-toggle-disconnected)
 (define-key sprig-status-mode-map (kbd "L")   #'sprig-status-show-all)
 (define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
 ;; The columns are unsortable to `tabulated-list', so a header click falls
@@ -2691,6 +2703,74 @@ Reuses an open owning buffer, or replays the stored log into a new one."
   (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
     (when (process-live-p sprig--process) (sprig--teardown-process)))
   (sprig--status-refresh))
+
+(defun sprig--delete-session-log (entry)
+  "Permanently delete ENTRY's stored session log and transcripts beside it.
+Runs on ENTRY's host: a local log is removed by path, a remote one over
+SSH.  The per-session `<id>/' directory of subagent transcripts sits
+beside the log and goes with it.  Signals when the log cannot be found."
+  (let ((host (plist-get entry :host))
+        (id (plist-get entry :session)))
+    (unless id (user-error "sprig: session has no stored log to delete"))
+    ;; Bind the host so every path helper below resolves against it: the
+    ;; navigator lists both hosts, so the row's host, not `sprig-remote', is
+    ;; the one whose log is deleted.
+    (let ((sprig-remote host))
+      (if host
+          (let* ((root (sprig--remote-dir-arg (sprig--projects-directory)))
+                 (name (shell-quote-argument (concat id ".jsonl")))
+                 (path (string-trim
+                        (sprig--remote-sh
+                         (format "find %s -name %s -print -quit" root name)))))
+            (when (string-empty-p path)
+              (user-error "sprig: no session log for %s on %s" id host))
+            (sprig--remote-sh
+             (format "rm -f %s && rm -rf %s"
+                     (shell-quote-argument path)
+                     (shell-quote-argument (file-name-sans-extension path)))))
+        (let ((file (car (directory-files-recursively
+                          (expand-file-name (sprig--projects-directory))
+                          (concat "\\`" (regexp-quote id) "\\.jsonl\\'")))))
+          (unless file (user-error "sprig: no session log for %s" id))
+          (delete-file file)
+          (let ((dir (file-name-sans-extension file)))
+            (when (file-directory-p dir) (delete-directory dir t))))))))
+
+(defun sprig-status-delete ()
+  "Permanently delete the session on the current line, log and all.
+Where `d' (disconnect) keeps the CLI's session log, this removes it, so
+the session is gone for good and does not return on the next refresh.  A
+live session is torn down and its buffer killed first, so nothing writes
+the log back.  Asks first, since there is no undo."
+  (interactive)
+  (let* ((entry (sprig--status-entry-at-point))
+         (title (plist-get entry :title))
+         (id (plist-get entry :session)))
+    (when (yes-or-no-p
+           (format "Permanently delete session %s (%s)? "
+                   (if (and title (not (string-empty-p title)))
+                       (format "%S" title) "untitled")
+                   (if id (substring id 0 (min 8 (length id))) "no log")))
+      (let ((buf (plist-get entry :buffer)))
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (when (process-live-p sprig--process) (sprig--teardown-process)))
+          (kill-buffer buf)))
+      (when id (sprig--delete-session-log entry))
+      (sprig--status-refresh)
+      (message "Deleted session %s"
+               (if (and title (not (string-empty-p title))) title (or id ""))))))
+
+(defun sprig-status-toggle-disconnected ()
+  "Toggle whether disconnected (`○') sessions are listed.
+Hiding them leaves a live-only view; the hidden sessions' logs are
+untouched and return on the next toggle."
+  (interactive)
+  (setq sprig--status-hide-disconnected (not sprig--status-hide-disconnected))
+  (sprig--status-render)
+  (message (if sprig--status-hide-disconnected
+               "Hiding disconnected sessions"
+             "Showing disconnected sessions")))
 
 (defun sprig--status-sort-read-column (event)
   "Return the column to sort by: the header EVENT clicked, else one prompted.

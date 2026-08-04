@@ -117,8 +117,10 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `k` | Interrupt the streaming session |
 | `d` | Disconnect the session (its log is kept) |
+| `D` | Delete the session permanently, log and all (asks first; no undo) |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
+| `l` | Toggle hiding disconnected (`○`) sessions, for a live-only view |
 | `L` | Toggle the `sprig-status-max-sessions` cap (show all / newest) |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
