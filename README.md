@@ -116,7 +116,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `d` | Remove the session at point: `d d` disconnect (its log is kept), `d D` delete permanently, log and all (asks first; no undo) |
-| `l` | Switch the view (pure display, nothing touched): `l l` live-only (hide disconnected `○`), `l a` show all (lift the cap), `l s` sort, `l /` filter |
+| `l` | Switch the view (pure display, nothing touched): `l l` toggle live-only (hide disconnected `○`), `l a` toggle show-all (lift the cap), `l s` sort, `l /` filter. Each toggle shows `[on]` in the popup while active |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
 | `g` | Refresh the list |

@@ -2908,14 +2908,29 @@ good.  Deleting asks first, since there is no undo."
     ("D" "delete (disconnect, then remove the log; no undo)"
      sprig-status-delete)]])
 
+(defun sprig--status-view-desc (label var)
+  "Describe a `sprig-status-view' toggle: LABEL, flagged `[on]' when VAR is set.
+VAR is read from the navigator buffer by name, since a transient's
+description runs with its own popup buffer current, not the navigator's."
+  (let* ((buf (get-buffer sprig-status-buffer-name))
+         (on (and buf (buffer-local-value var buf))))
+    (concat label (and on (propertize "  [on]" 'face 'transient-value)))))
+
 (transient-define-prefix sprig-status-view ()
   "Switch how the navigator lists its sessions.
-Pure view state; no session is touched.  `l l' hides disconnected
-sessions for a live-only view and `l a' lifts the newest-N cap; sort and
-filter are here too, and also stay on `S' and `/' as the frequent ones."
+Pure view state; no session is touched.  `l l' toggles a live-only view
+that hides disconnected sessions and `l a' toggles the newest-N cap; each
+shows `[on]' while active.  Sort and filter are here too, and also stay on
+`S' and `/' as the frequent ones."
   [["View"
-    ("l" "live-only (hide disconnected)" sprig-status-toggle-disconnected)
-    ("a" "show all (lift the cap)" sprig-status-show-all)
+    ("l" sprig-status-toggle-disconnected
+     :description (lambda () (sprig--status-view-desc
+                             "live-only (hide disconnected)"
+                             'sprig--status-hide-disconnected)))
+    ("a" sprig-status-show-all
+     :description (lambda () (sprig--status-view-desc
+                             "show all (lift the cap)"
+                             'sprig--status-show-all)))
     ("s" "sort by column" sprig-status-sort)
     ("/" "filter by project or title" sprig-status-filter)]])
 
