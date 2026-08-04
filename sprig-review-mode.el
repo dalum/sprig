@@ -620,8 +620,38 @@ a list either way.  Folds to its heading; TAB opens the checklist."
         (sprig-review--insert-todos items)))))
 
 (defvar markdown-hide-markup)
+(defvar markdown-mode-font-lock-keywords)
+(defvar markdown-regex-italic)
+(defvar markdown-regex-bold)
 (declare-function markdown-mode "markdown-mode" ())
 (declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
+
+(defun sprig-review--tame-markdown-faces ()
+  "Trim `markdown-mode' fontification down to what Claude's prose uses.
+Runs in the hidden fontify buffer (see `sprig-review--fontify-uncached')
+after the mode is on but before font-lock compiles its keywords.
+
+Two of the mode's defaults misfire on chat prose.  Declarative metadata
+fontification paints any leading `Key: value' lines as MultiMarkdown
+front matter, in `font-lock-string-face'; it normally only fires at a
+file's very top, but each prose block is fontified from position 1, so
+it fires on every message.  And the emphasis delimiters admit `_', so an
+underscore in an identifier like `some_var' or `__init__' turns the run
+italic or bold.  Claude emits `*italics*' and `**bold**' and never
+underscore emphasis, so drop the metadata keywords and pin the emphasis
+delimiters to `*'."
+  (setq-local markdown-mode-font-lock-keywords
+              (seq-remove
+               (lambda (kw)
+                 (memq (car-safe kw) '(markdown-match-declarative-metadata
+                                       markdown-match-pandoc-metadata)))
+               markdown-mode-font-lock-keywords))
+  (setq-local markdown-regex-italic
+              (replace-regexp-in-string
+               (regexp-quote "[*_]") "\\*" markdown-regex-italic nil t))
+  (setq-local markdown-regex-bold
+              (replace-regexp-in-string
+               (regexp-quote "\\*\\*\\|__") "\\*\\*" markdown-regex-bold nil t)))
 
 (defvar sprig-review--fontify-cache (make-hash-table :test 'equal :size 200)
   "Memo of `sprig-review--fontify-markdown' results, keyed on raw TEXT.
@@ -648,6 +678,7 @@ without the memo."
           (erase-buffer)
           (delay-mode-hooks (markdown-mode))
           (setq-local markdown-hide-markup t)
+          (sprig-review--tame-markdown-faces)
           ;; The toggle wires markup hiding fully (invisibility spec plus the
           ;; refontify hooks) where merely setting the flag may not.
           (when (fboundp 'markdown-toggle-markup-hiding)
