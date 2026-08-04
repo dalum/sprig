@@ -2345,6 +2345,13 @@ rather than dropping out."
   (interactive)
   (sprig-review--set-mode "default"))
 
+(defun sprig-review-bypass-mode ()
+  "Put the session into bypass mode (`P b'): every tool call auto-approves.
+The unguarded mode: file edits and shell commands run with no prompt at
+all, so reach for it only where that is genuinely what you want."
+  (interactive)
+  (sprig-review--set-mode "bypassPermissions"))
+
 (transient-define-prefix sprig-review-permission-mode ()
   "Set the session's permission mode (`P').
 The mode is sticky: it holds until you change it here or the agent leaves
@@ -2353,7 +2360,8 @@ hand, since a plain send no longer drops out of it on its own."
   [["Permission mode"
     ("p" "plan (agent plans, makes no edits)" sprig-review-plan-mode)
     ("e" "accept edits (auto-approve file edits)" sprig-review-accept-edits-mode)
-    ("d" "default (prompt for each edit)" sprig-review-default-mode)]])
+    ("d" "default (prompt for each edit)" sprig-review-default-mode)
+    ("b" "bypass (auto-approve everything, incl. shell)" sprig-review-bypass-mode)]])
 
 (transient-define-prefix sprig-review-session-dispatch ()
   "Start or fork a session from the review buffer.
