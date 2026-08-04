@@ -2488,17 +2488,16 @@ reprint; point is kept on its row by `tabulated-list-print'."
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-new)
-;; `c' and `a' mirror the review buffer's steering transients, each acting on
-;; the session under point (`c c' composes, `a a' answers, ...).  Connect,
-;; which `c' was, is now `c o'; `k' and `d' stay as quick single keys.
+;; Four transients mirror the review buffer's steering surface, each acting on
+;; the session under point: `c' steers (`c c' composes), `a' answers, `d'
+;; removes (`d d' disconnects, `d D' deletes), and `l' switches the view
+;; (`l l' live-only, `l a' show all).  Interrupt is `c i'; connect is `c o'.
+;; `/' (filter) and `S' (sort) also stay top-level, being the frequent ones.
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
-(define-key sprig-status-mode-map (kbd "k")   #'sprig-status-interrupt)
-(define-key sprig-status-mode-map (kbd "d")   #'sprig-status-disconnect)
-(define-key sprig-status-mode-map (kbd "D")   #'sprig-status-delete)
+(define-key sprig-status-mode-map (kbd "d")   #'sprig-status-remove)
+(define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
-(define-key sprig-status-mode-map (kbd "l")   #'sprig-status-toggle-disconnected)
-(define-key sprig-status-mode-map (kbd "L")   #'sprig-status-show-all)
 (define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
 ;; The columns are unsortable to `tabulated-list', so a header click falls
 ;; through to here rather than its native sort, which would break the groups.
@@ -2897,12 +2896,35 @@ listed; an empty string clears the filter."
                "Listing every session"
              (format "Listing the %s newest sessions" sprig-status-max-sessions))))
 
+;; Defined after the verbs they list, so every suffix command is known by the
+;; time the prefix is compiled (as with `sprig-status-dispatch').
+(transient-define-prefix sprig-status-remove ()
+  "Take the session on the row at point out of the navigator.
+`d d' disconnects the live process but keeps the CLI's log, so the session
+returns on the next refresh; `d D' also deletes the log, so it is gone for
+good.  Deleting asks first, since there is no undo."
+  [["Remove"
+    ("d" "disconnect (keep the log)" sprig-status-disconnect)
+    ("D" "delete (disconnect, then remove the log; no undo)"
+     sprig-status-delete)]])
+
+(transient-define-prefix sprig-status-view ()
+  "Switch how the navigator lists its sessions.
+Pure view state; no session is touched.  `l l' hides disconnected
+sessions for a live-only view and `l a' lifts the newest-N cap; sort and
+filter are here too, and also stay on `S' and `/' as the frequent ones."
+  [["View"
+    ("l" "live-only (hide disconnected)" sprig-status-toggle-disconnected)
+    ("a" "show all (lift the cap)" sprig-status-show-all)
+    ("s" "sort by column" sprig-status-sort)
+    ("/" "filter by project or title" sprig-status-filter)]])
+
 ;;;###autoload
 (defun sprig-status ()
   "Open the `*sprig-status*' navigator listing Sprig sessions.
 Lists every stored `claude' session on the host, newest first and capped
 to `sprig-status-max-sessions', plus any open review buffer that owns a
-live session.  Narrow with `/', lift the cap with `L'."
+live session.  Narrow with `/', lift the cap with `l a'."
   (interactive)
   (let ((buf (get-buffer-create sprig-status-buffer-name))
         (seed (and sprig-status-directories

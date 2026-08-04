@@ -1975,16 +1975,20 @@ Return the log directory."
                sprig-status-retry sprig-status-compact
                sprig-status-answer sprig-status-answer-recommended
                sprig-status-answer-skip
-               sprig-status-dispatch sprig-status-answer-dispatch))
+               sprig-status-dispatch sprig-status-answer-dispatch
+               sprig-status-remove sprig-status-view
+               sprig-status-disconnect sprig-status-delete
+               sprig-status-toggle-disconnected sprig-status-show-all))
     (should (commandp v)))
-  ;; c and a raise the dispatch transients; connect (`c' before) moved to c o,
-  ;; and k / d stay as quick single keys.
+  ;; c / a / d / l each raise a dispatch transient; interrupt (`k' before) is
+  ;; now only `c i', and delete/show-all fold under the `d' / `l' prefixes.
   (should (eq (lookup-key sprig-status-mode-map (kbd "c")) 'sprig-status-dispatch))
   (should (eq (lookup-key sprig-status-mode-map (kbd "a"))
               'sprig-status-answer-dispatch))
-  (should (eq (lookup-key sprig-status-mode-map (kbd "k")) 'sprig-status-interrupt))
-  (should (eq (lookup-key sprig-status-mode-map (kbd "d"))
-              'sprig-status-disconnect)))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "d")) 'sprig-status-remove))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "l")) 'sprig-status-view))
+  (should-not (lookup-key sprig-status-mode-map (kbd "k")))
+  (should-not (lookup-key sprig-status-mode-map (kbd "D"))))
 
 (ert-deftest sprig-test-status-collapse-folds-a-group ()
   ;; TAB on a heading folds its group to the heading alone: the rows stop
