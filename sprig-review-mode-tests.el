@@ -720,6 +720,52 @@ the fold learns the id from the result rather than from the call."
     (should (equal (cdar answered) "Rewrite it (Recommended), Patch it")))
   (kill-buffer "*sprig-answer*"))
 
+(ert-deftest sprig-review-mode-test-answer-buffer-other-settles ()
+  ;; `o' on a single-select question settles it on text of your own.
+  (let (answered)
+    (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+               (lambda (id _input answers) (setq answered (list id answers))))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'quit-window) #'ignore)
+              ((symbol-function 'read-string)
+               (lambda (&rest _) "Neither; extract a helper")))
+      (with-temp-buffer
+        (sprig-review-mode)
+        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-review-tests--dialog-input)))
+        (sprig-review-flush)
+        (sprig-review-answer)
+        (with-current-buffer "*sprig-answer*"
+          (sprig-answer-other))))
+    (should (equal (car answered) "req-1"))
+    (should (equal (cdar (cadr answered)) "Neither; extract a helper")))
+  (kill-buffer "*sprig-answer*"))
+
+(ert-deftest sprig-review-mode-test-answer-buffer-other-joins-multi ()
+  ;; `o' on a multi-select adds a typed answer beside a picked option, shown
+  ;; and taken together on C-c C-c.
+  (let (answered)
+    (cl-letf (((symbol-function 'sprig--review-answer-dialog)
+               (lambda (_id _input answers) (setq answered answers)))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'quit-window) #'ignore)
+              ((symbol-function 'read-string) (lambda (&rest _) "Do both")))
+      (with-temp-buffer
+        (sprig-review-mode)
+        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-review-tests--dialog-input t)))
+        (sprig-review-flush)
+        (sprig-review-answer)
+        (with-current-buffer "*sprig-answer*"
+          (setq last-command-event ?2)
+          (sprig-answer-pick-number)
+          (sprig-answer-other)
+          (should-not answered)          ; still just picked, not settled
+          (should (string-match-p "Do both  (your answer)" (buffer-string)))
+          (sprig-answer-confirm))))
+    (should (equal (cdar answered) "Patch it, Do both")))
+  (kill-buffer "*sprig-answer*"))
+
 (defun sprig-review-tests--permission-input ()
   "The request a Bash call wanting permission arrives as."
   '((subtype . "can_use_tool")

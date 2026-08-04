@@ -169,7 +169,7 @@ When the agent calls `AskUserQuestion` mid-turn, the question renders **in the b
 
 | Key | Does |
 |---|---|
-| `a a` | Answer, one question at a time, in `*sprig-answer*` (`RET` or `1`-`9` picks, `C-c C-c` skips one, `C-c C-k` skips the rest); on a plan, approve or reject |
+| `a a` | Answer, one question at a time, in `*sprig-answer*` (`RET` or `1`-`9` picks, `o` types an answer of your own, `C-c C-c` skips one, `C-c C-k` skips the rest); on a plan, approve or reject |
 | `a r` | Take the option each question recommends, without opening anything; on a plan, approve |
 | `a s` | Skip; the agent goes on unanswered |
 

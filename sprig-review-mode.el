@@ -2120,6 +2120,7 @@ wrong thing to make easy."
     (define-key map (kbd "SPC") #'sprig-answer-pick)
     (define-key map (kbd "n")   #'next-line)
     (define-key map (kbd "p")   #'previous-line)
+    (define-key map (kbd "o")   #'sprig-answer-other)
     (define-key map (kbd "C-c C-c") #'sprig-answer-confirm)
     (define-key map (kbd "C-c C-k") #'sprig-answer-cancel)
     (dotimes (i 9)
@@ -2130,7 +2131,9 @@ wrong thing to make easy."
 (define-derived-mode sprig-answer-mode special-mode "Sprig-Answer"
   "Answer one of the agent's questions.
 \\<sprig-answer-mode-map>\\[sprig-answer-pick] picks the option at point, \
-1-9 picks by number, \\[sprig-answer-cancel] cancels."
+1-9 picks by number.
+\\[sprig-answer-other] types an answer of your own; \\[sprig-answer-cancel] \
+cancels."
   (setq-local truncate-lines nil))
 
 (defun sprig-answer--question ()
@@ -2171,10 +2174,17 @@ wrong thing to make easy."
              (insert (propertize (concat "     " description "\n")
                                  'face 'sprig-review-meta-key))))))
      (sprig-answer--options))
+    ;; A typed answer (o) that is not one of the offered labels is picked
+    ;; too, so a multi-select shows it alongside the options it joins.
+    (dolist (custom (sprig-answer--custom-picks))
+      (insert (propertize "▸    " 'face 'sprig-review-dialog-picked)
+              (propertize custom 'face 'sprig-review-dialog-picked)
+              (propertize "  (your answer)" 'face 'sprig-review-meta-key)
+              "\n"))
     (insert "\n"
             (propertize (if multi
-                            "RET or 1-9 toggles · C-c C-c takes them · C-c C-k skips"
-                          "RET or 1-9 picks · C-c C-c skips this one · C-c C-k skips all")
+                            "RET or 1-9 toggles · o adds your own · C-c C-c takes them · C-c C-k skips"
+                          "RET or 1-9 picks · o types your own · C-c C-c skips this one · C-c C-k skips all")
                         'face 'sprig-review-meta-key)
             "\n")
     (goto-char (point-min))))
@@ -2237,6 +2247,23 @@ wrong thing to make easy."
                 (append sprig-answer--picked (list label))))
         (sprig-answer--render))
     (sprig-answer--settle label)))
+
+(defun sprig-answer--custom-picks ()
+  "Return the picked answers that are not one of the offered options."
+  (let ((labels (mapcar #'sprig-review--option-label (sprig-answer--options))))
+    (seq-remove (lambda (pick) (member pick labels)) sprig-answer--picked)))
+
+(defun sprig-answer-other ()
+  "Answer the question on screen with text of your own.
+The tool always allows an answer outside the offered options; this types
+one.  A single-select question settles on it at once; a multi-select adds
+it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
+\\[sprig-answer-confirm]."
+  (interactive)
+  (let ((text (string-trim (read-string "Your answer: "))))
+    (when (string-empty-p text)
+      (user-error "No answer typed"))
+    (sprig-answer--take text)))
 
 (defun sprig-answer-confirm ()
   "Take what is picked for this question, or skip it when nothing is."
