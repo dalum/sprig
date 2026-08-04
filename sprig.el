@@ -1149,7 +1149,7 @@ model via `sprig-review-consume'."
   (when (eq (car-safe event) 'done)
     (sprig--flush-queue)))
 
-(defun sprig--read-review-dir (&optional host)
+(defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
 HOST is the resolved session host: nil for the local machine, else an SSH
 destination.  Unlike `sprig--read-working-directory' this records nothing
@@ -1157,10 +1157,13 @@ in frontmatter; a session-owning review buffer keeps its directory in the
 buffer-local `sprig--working-dir' instead.  A remote host's prompt is a
 free string, since the path lives over there and this side cannot complete
 it; a local one prompts against the filesystem.  The prompt names the host
-so a navigator with a group per host says which one you are starting on."
+so a navigator with a group per host says which one you are starting on.
+DEFAULT, when non-nil, seeds the prompt so a fresh session starts in the
+same directory as the one it was launched from (see `sprig-status-new')."
   (if host
-      (read-string (format "Working directory (%s, blank = login dir): " host))
-    (read-directory-name "Working directory: ")))
+      (read-string (format "Working directory (%s, blank = login dir): " host)
+                   default)
+    (read-directory-name "Working directory: " default default)))
 
 ;;;###autoload
 (defun sprig-review-connect (&optional no-prompt)
@@ -2771,10 +2774,15 @@ there.  Prompts for the working directory, against the local filesystem
 for a local session and as a free string for a remote one.  Opens a review
 buffer that owns the new session; it appears under its own group and
 streams like any other.  With a prefix argument, LOCAL forces the session
-onto this machine wherever point happens to be."
+onto this machine wherever point happens to be.  When point is on a
+session row, its directory seeds the prompt, so `s' on a session starts a
+fresh one alongside it in the same directory."
   (interactive "P")
-  (let ((host (unless local (sprig--status-host-at-point))))
-    (sprig-review-session (sprig--read-review-dir host) nil (or host t)))
+  (let* ((host (unless local (sprig--status-host-at-point)))
+         (id (sprig--status-id-at-point))
+         (entry (and id sprig--status-index (gethash id sprig--status-index)))
+         (default (and entry (plist-get entry :dir))))
+    (sprig-review-session (sprig--read-review-dir host default) nil (or host t)))
   (sprig--status-refresh))
 
 (defun sprig--status-project-candidates ()
