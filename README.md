@@ -30,7 +30,7 @@ Because the whole protocol is plain stdio, running the session on a remote host 
 
 ## Install
 
-Put the three `.el` files on your `load-path`, then:
+Put the four `.el` files on your `load-path`, then:
 
 ```elisp
 (require 'sprig)
@@ -95,7 +95,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 ### Navigator
 
-`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), a short session id, and the time it last ran (its log's mtime, so it stays visible with the preview collapsed). It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the session's last exchange: a state line first (what the turn is doing or how it ended, and the context in use, `✓  turn over  ·  134.0k`, mirroring the review buffer's own), then your last prompt as a lead line, then the agent's final message, so you can read what a session is doing without opening it. The final message is the last block of prose the turn produced, not the running narration between its tool calls: that is the answer, the plan, or the question, and the rest is scaffolding you did not open the preview to read. While the turn is still streaming even that is held back, so an expanded row shows only the prompt under the `▶  working…` line; the message appears once the turn is over, or the moment it needs you (a question or a plan), which is when it is worth reading. When `markdown-mode` is installed, the reply renders with its faces (bold, headings, lists, code) rather than raw markup, muted like the rest of the preview; set `sprig-status-preview-markdown` to nil to keep it plain. Set `sprig-status-preview-max-lines` to a number to bound a long reply. `/` narrows the list to sessions whose project or title match a substring, and `l a` lifts the cap to show every session. Rows sort newest-first by `Time` within each group; `S` (or `sprig-status-sort`, or a click on a column header) sorts by another column, and repeating it flips the direction, shown as `↓Time` in the mode line.
+`M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's title (from the CLI's own `ai-title`), its project (from the session's own `cwd`), a short session id, and the time it last ran (its log's mtime, so it stays visible with the preview collapsed). It refreshes itself as sessions start, stream, and finish. Press `TAB` on a row to expand an inline preview of the session's last exchange: a state line first (what the turn is doing or how it ended, the permission mode when it is a notable one, and the context in use, `✓  turn over  ·  plan  ·  134.0k`, mirroring the review buffer's own), then your last prompt as a lead line, then the agent's final message, so you can read what a session is doing without opening it. The final message is the last block of prose the turn produced, not the running narration between its tool calls: that is the answer, the plan, or the question, and the rest is scaffolding you did not open the preview to read. While the turn is still streaming even that is held back, so an expanded row shows only the prompt under the `▶  working…` line; the message appears once the turn is over, or the moment it needs you (a question or a plan), which is when it is worth reading. When `markdown-mode` is installed, the reply renders with its faces (bold, headings, lists, code) rather than raw markup, muted like the rest of the preview; set `sprig-status-preview-markdown` to nil to keep it plain. Set `sprig-status-preview-max-lines` to a number to bound a long reply. `/` narrows the list to sessions whose project or title match a substring, and `l a` lifts the cap to show every session. Rows sort newest-first by `Time` within each group; `S` (or `sprig-status-sort`, or a click on a column header) sorts by another column, and repeating it flips the direction, shown as `↓Time` in the mode line.
 
 **Both hosts at once.** The list is grouped by the host a session runs on, under a foldable heading per group: `local`, and `remote you@your-server` when `sprig-remote` is set. Each host is scanned and capped on its own, so a busy one cannot crowd the other out, and neither is hidden behind a `setq`. `s n` starts its session on the host of the group point is in, which is why a group with no sessions is still headed: the heading is the place you stand to start the first one there. Opening a row pins its review buffer to the host the row came from, since a session id only resumes on the host holding its log. `TAB` on a heading folds its whole group away (the count stays, so `▸ remote you@your-server (12)` tells you what is hidden) and unfolds it again, the way `magit` folds a section.
 
@@ -110,17 +110,25 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | Key | Does |
 |---|---|
 | `n` / `p` | Move to the next / previous session, skipping headings and preview lines |
-| `RET` / `o` | Open the session's review buffer (replaying its log), on the host it ran on |
+| `RET` / `o` | Open the session's review buffer (replaying its log), on the host it ran on; on a note row, open the notes file at that note |
 | `s` | Start a session: `s n` a fresh conversation on the group point is in (`C-u s n` forces it local; a session row seeds the directory), `s c` the same but straight into a prompt for its first message, `s p` the same in plan mode, `s f` fork the session at point into one of its own |
 | `TAB` | On a session row, toggle an inline preview of its last exchange (your prompt and the agent's reply); on a host heading, fold or unfold that group |
 | `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
+| `P` | Set the permission mode of the session at point (open and live), the review buffer's `P` without leaving the list: `P p` plan, `P a` auto, `P e` accept edits, `P m` manual, `P b` bypass |
 | `d` | Remove the session at point: `d d` disconnect (its log is kept), `d D` delete permanently, log and all (asks first; no undo) |
 | `l` | Switch the view (pure display, nothing touched): `l l` toggle live-only (hide disconnected `○`), `l a` toggle show-all (lift the cap), `l s` sort, `l /` filter. Each toggle shows `[on]` in the popup while active |
+| `+` | Notes (a personal reminder list, its own group at the top when you have any): `+ +` jot a new note, `+ t` toggle the note at point done, `+ e` edit it, `+ d` delete it (asks first), `+ o` open the notes file |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
+
+### Notes
+
+A place to jot what you want to fix later or simply remember, without derailing a conversation. `+` is the notes transient, on both the navigator and the review buffer: `+ +` jots a note (a one-line minibuffer prompt), and in the navigator `+ t` / `+ e` / `+ d` toggle the note at point done, edit it, or delete it, and `+ o` opens the file. Notes are one global list, not tied to any session, and they show as their own foldable group at the top of the navigator (`▾ notes (2)`), listing the open ones; a note toggled done drops from the list but stays in the file. The group appears only when you have an open note, so an empty list leaves the navigator exactly as it was. `n` / `p` step onto note rows the way they step onto sessions.
+
+The list is a plain Org file, `sprig-notes-file` (default `~/.emacs.d/sprig-notes.org`), one `* TODO` / `* DONE` heading per note with a creation timestamp. This is the one file sprig writes to: everything else it shows is the CLI's own session log, which it never owns, but a personal reminder list is your artifact rather than a second copy of the conversation, so it lives in a file you can open, grep, sync, or drive with org-agenda. Edit it by hand any time; `g` in the navigator picks the changes up.
 
 ### Review buffer
 
@@ -152,6 +160,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `c` | Transient, listing every verb: `c c` compose & send (steering a running turn), `c q` compose & queue for after this turn, `c Q` drop the queued messages, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt (anything queued then goes), `c z` compact the context (`C-u c z` steers the summary), and `c k` / `c C` / `c x` for reject / commit / run |
 | `s` | Transient for starting a session of its own: `s n` new conversation, `s c` new then straight into a first-message prompt, `s p` the same in plan mode, `s f` fork this one |
 | `P` | Transient for the permission mode (the CLI's own modes, as the shift-tab cycle names them): `P p` plan (agent plans, makes no edits), `P a` auto (normal: allowed tools run, rest prompt), `P e` accept edits (auto-approve edits), `P m` manual (prompt for every call), `P b` bypass (auto-approve everything, incl. shell) |
+| `+` | Jot a personal note (`+ +`), the same reminders list the navigator manages; captured here it needs no session and ties to none |
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel. The mode is **sticky**, the way Claude Code's own is: a plain `c c` afterwards carries on in plan mode rather than dropping out of it, so steering a plan stays a plan. You leave plan mode deliberately, by approving an `ExitPlanMode` plan or with the `P` transient (`P a` back to auto, `P e` accept-edits), which is also how you set the mode by hand at any time. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
@@ -199,6 +208,7 @@ The choice rides back to the agent and the question settles in place, showing wh
 | `sprig-status-max-sessions` | `30` | Newest stored sessions the navigator lists at once (nil = no cap; `l a` lifts it live) |
 | `sprig-status-directories` | `nil` | Deprecated: when set, seeds the navigator's initial `/` filter with the first entry's project name |
 | `sprig-status-ignore-directories` | `nil` | Regexps matched against a session's encoded project directory; matches are hidden from the navigator (e.g. throwaway `/tmp` / SDK-probe runs) |
+| `sprig-notes-file` | `~/.emacs.d/sprig-notes.org` | Org file holding the personal notes (`+`); one global list, and the only file sprig writes to |
 | `sprig-status-preview-max-lines` | `nil` | Line cap for a navigator `TAB` preview of a session's last exchange; `nil` shows the whole reply, a number bounds prompt and reply together |
 | `sprig-status-preview-markdown` | `t` | Fontify the navigator preview reply with `markdown-mode` faces when it is installed, dropping the raw markup |
 | `sprig-review-refresh-delay` | `0.1` | Floor, in seconds, for coalescing structural events before a re-render; widens toward the last render's cost on a big buffer |

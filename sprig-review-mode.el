@@ -34,6 +34,7 @@
 (require 'eieio)
 (require 'transient)
 (require 'seq)
+(require 'sprig-notes)                   ; the `+' note-capture transient
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
@@ -2383,6 +2384,27 @@ into its first-message prompt (plan mode for `s p')."
     ("p" "new, then compose in plan mode" sprig-review-new-message-plan)
     ("f" "fork this session" sprig-review-fork)]])
 
+;;;; Notes
+
+(declare-function sprig--status-refresh "sprig" ())
+
+(defun sprig-review-note-capture ()
+  "Capture a personal note (`+ +').
+Notes are one global list, not tied to this session; the `sprig-status'
+navigator lists them and its own `+' transient manages them.  Refreshes the
+navigator when it is open, so a note jotted here shows there at once."
+  (interactive)
+  (sprig-notes-capture)
+  (when (fboundp 'sprig--status-refresh) (sprig--status-refresh)))
+
+;; Defined after the verb it lists, as with `sprig-review-dispatch'.
+(transient-define-prefix sprig-review-notes-dispatch ()
+  "Jot a personal note.
+`+ +' captures a note appended to `sprig-notes-file'; the navigator's own
+`+' transient toggles, edits and deletes the list."
+  [["Notes"
+    ("+" "capture a new note" sprig-review-note-capture)]])
+
 ;;;; Verb keybindings
 
 (define-key sprig-review-mode-map (kbd "SPC") #'sprig-review-toggle-mark)
@@ -2391,6 +2413,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
+(define-key sprig-review-mode-map (kbd "+")   #'sprig-review-notes-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

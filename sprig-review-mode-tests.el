@@ -1929,5 +1929,11 @@ tearing the process down; the turn's `done' does the clearing later."
             (should (timerp sprig--interrupt-timer)))
         (sprig--clear-interrupt)))))
 
+(ert-deftest sprig-review-mode-test-notes-capture-is-bound ()
+  "`+' in the review buffer is the note-capture transient, a real command."
+  (should (eq (lookup-key sprig-review-mode-map (kbd "+"))
+              'sprig-review-notes-dispatch))
+  (should (commandp 'sprig-review-note-capture)))
+
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here

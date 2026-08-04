@@ -46,6 +46,7 @@
 (require 'transient)                     ; the navigator's c / a dispatch menus
 (require 'iso8601)                       ; parse the log's own timestamps
 (require 'sprig-review)                  ; pure data layer; no magit-section
+(require 'sprig-notes)                   ; personal notes shown in the navigator
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
@@ -217,6 +218,11 @@ question the reply is answering rather than more of the reply.")
 
 (defface sprig-status-group '((t :inherit font-lock-keyword-face :weight bold))
   "Face for a navigator group heading naming the host its rows run on.")
+
+(defface sprig-status-mode '((t :inherit font-lock-keyword-face))
+  "Face for the permission mode shown in a navigator preview's state line.
+Coloured on its own terms, apart from the turn's state and the context, so
+`plan' reads as the mode it is and not as a warning about the turn.")
 
 ;;;; Buffer-local state
 
@@ -1046,6 +1052,11 @@ is visible without opening the header."
 (declare-function sprig-review-answer "sprig-review-mode" ())
 (declare-function sprig-review-answer-recommended "sprig-review-mode" ())
 (declare-function sprig-review-answer-skip "sprig-review-mode" ())
+(declare-function sprig-review-plan-mode "sprig-review-mode" ())
+(declare-function sprig-review-auto-mode "sprig-review-mode" ())
+(declare-function sprig-review-accept-edits-mode "sprig-review-mode" ())
+(declare-function sprig-review-manual-mode "sprig-review-mode" ())
+(declare-function sprig-review-bypass-mode "sprig-review-mode" ())
 
 (defun sprig--remote-sh (command)
   "Run shell COMMAND on the session host via SSH; return stdout.
@@ -1859,14 +1870,15 @@ be parsed."
 (defun sprig--events-preview (events)
   "Return a preview plist for EVENTS' conversation tail, or nil.
 The plist is (:prompt STR :reply STR :time ISO :context N :done BOOL :error
-BOOL :pending BOOL): the last user turn collapsed to a line, the agent's final
-message that answered it (only the last text block of that turn, not the
-running narration between its tool calls, its structure kept for the markdown
-pass), the stamp of the freshest block, and the turn's outcome and context
-size for the preview's state line.  When the turn since your prompt carried no
-prose (it ended on a tool call or a question), or there is no user turn at
-all, the reply falls back to the last assistant text anywhere.  EVENTS are
-chronological (the review model's input order)."
+BOOL :mode STR :pending BOOL): the last user turn collapsed to a line, the
+agent's final message that answered it (only the last text block of that
+turn, not the running narration between its tool calls, its structure kept
+for the markdown pass), the stamp of the freshest block, and the turn's
+outcome, context size, and permission mode for the preview's state line.
+When the turn since your prompt carried no prose (it ended on a tool call or
+a question), or there is no user turn at all, the reply falls back to the
+last assistant text anywhere.  EVENTS are chronological (the review model's
+input order)."
   (let* ((model (ignore-errors (sprig-review-build events)))
          (blocks (and model (plist-get model :blocks))))
     (when blocks
@@ -1893,11 +1905,13 @@ chronological (the review model's input order)."
               (ctx (plist-get model :context))
               (done (plist-get model :done))
               (err (plist-get model :error))
+              (mode (plist-get model :mode))
               (pending (and (sprig-review-pending-dialog model) t)))
-          (when (or prompt* reply ctx done err pending)
+          (when (or prompt* reply ctx done err pending mode)
             (list :prompt prompt* :reply reply
                   :time (plist-get (car (last blocks)) :time)
-                  :context ctx :done done :error err :pending pending)))))))
+                  :context ctx :done done :error err :mode mode
+                  :pending pending)))))))
 
 (defun sprig--entry-preview (entry)
   "Return the inline preview plist for status ENTRY, or nil.
@@ -2092,6 +2106,17 @@ Matching is case-insensitive."
 The printed rows are in this order, so `sprig--status-decorate' can head
 each group by walking the two in step.")
 
+(defconst sprig--status-notes-host 'sprig--notes
+  "Sentinel `host' for the notes group, folded like a real host group.
+Never a real SSH destination, so it never reaches `sprig--status-collect'
+or a session verb; it keys the notes group's fold state and stamps its
+lines so TAB folds them the way it folds a host group.")
+
+(defvar-local sprig--status-notes nil
+  "The open notes of the current render, cached for point resolution.
+Filled by `sprig--status-insert-notes' from `sprig-notes-file', so
+`sprig--status-note-at-point' can resolve the note a row stands for.")
+
 (defun sprig--status-entries ()
   "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
 The entry id is the entry's `:key' (its host paired with its session id,
@@ -2274,13 +2299,15 @@ prose and fills in the muted preview face."
 (defun sprig--status-state-line (entry preview)
   "Return the preview's leading state line for ENTRY, or nil.
 Mirrors the review buffer's state line: a glyph and word for what the turn
-is doing or how it ended, then the context in use.  The live streaming and
-waiting states come from ENTRY's own status, as the row glyph does; the
-turn's outcome and its context size come from PREVIEW's model fields.  nil
-when there is no status and no model at all (nothing to say)."
+is doing or how it ended, then the permission mode when it is a notable one,
+then the context in use.  The live streaming and waiting states come from
+ENTRY's own status, as the row glyph does; the turn's outcome, permission
+mode, and context size come from PREVIEW's model fields.  nil when there is
+no status and no model at all (nothing to say)."
   (let ((status (plist-get entry :status))
-        (ctx (plist-get preview :context)))
-    (when (or status ctx (plist-get preview :done) (plist-get preview :error)
+        (ctx (plist-get preview :context))
+        (mode (sprig--status-notable-mode (plist-get preview :mode))))
+    (when (or status ctx mode (plist-get preview :done) (plist-get preview :error)
               (plist-get preview :pending))
       (pcase-let
           ((`(,glyph ,text ,face)
@@ -2294,6 +2321,12 @@ when there is no status and no model at all (nothing to say)."
               '("◼" "interrupted" font-lock-comment-face))
              (t '("●" "idle" shadow)))))
         (concat (propertize (format "     %s  %s" glyph text) 'face face)
+                ;; The permission mode rides its own tag, coloured on its own
+                ;; terms rather than the turn's, the way the review buffer's
+                ;; mode line carries `[plan]'.  Only the notable modes show.
+                (when mode
+                  (concat (propertize "  ·  " 'face face)
+                          (propertize mode 'face 'sprig-status-mode)))
                 (when (and (numberp ctx) (> ctx 0))
                   (concat (propertize "  ·  " 'face face)
                           ;; Colour the count on its own terms, escalating past
@@ -2302,6 +2335,15 @@ when there is no status and no model at all (nothing to say)."
                           ;; turn's face.
                           (propertize (sprig--format-tokens ctx)
                                       'face (sprig--status-context-face ctx)))))))))
+
+(defun sprig--status-notable-mode (mode)
+  "Return MODE when it is worth flagging in the state line, else nil.
+The everyday modes (nil, and the CLI's own auto / default / manual) say
+nothing worth the space; plan and the auto-approving ones do, so only those
+show.  Mirrors the review header's own filter."
+  (and (stringp mode)
+       (not (member mode '("auto" "default" "manual")))
+       mode))
 
 (defun sprig--status-context-face (tokens)
   "Return the state-line face for TOKENS of context, escalating with size.
@@ -2411,6 +2453,61 @@ sitting on a foldable heading rather than a session row."
     (sprig--status-stamp-group from (point) host)
     (put-text-property from (point) 'sprig--status-heading t)))
 
+(defun sprig--status-note-row-string (note)
+  "Return the navigator display line for NOTE, no trailing newline.
+A checkbox glyph, the note's text, and its creation time, laid out to sit
+under the session rows above it.  A done note reads muted, though the group
+lists only open ones by default."
+  (let* ((done (eq (plist-get note :state) 'done))
+         (glyph (propertize (if done "☑" "☐")
+                            'face (if done 'sprig-status-preview 'default)))
+         (text (or (plist-get note :text) ""))
+         (time (sprig--format-time-value (plist-get note :time))))
+    (concat "  " glyph " "
+            (if done (propertize text 'face 'sprig-status-preview) text)
+            (and time (concat "  " (propertize time 'face 'sprig-status-preview))))))
+
+(defun sprig--status-insert-notes ()
+  "Insert the notes group (its heading and open-note rows) at point.
+Reads `sprig-notes-file' fresh and caches its open notes in
+`sprig--status-notes' so `sprig--status-note-at-point' can resolve a row.
+Only TODO notes are listed; a done note stays in the file (see `+ o').
+
+Unlike a host group, an empty notes group is not headed: a host with no
+sessions still heads because its heading is where you press `s' to start
+one there, but there is nothing to start on the notes group, so with no
+open notes it leaves the navigator exactly as it was.  With notes, the
+heading carries the notes sentinel as its host and `sprig--status-heading',
+so TAB folds the group the way it folds a host group; each row carries its
+note's id for point resolution."
+  (setq sprig--status-notes
+        (seq-filter (lambda (n) (eq (plist-get n :state) 'todo))
+                    (sprig-notes--notes (sprig-notes-read))))
+  (when sprig--status-notes
+    (let* ((host sprig--status-notes-host)
+           (from (point)))
+      (insert (propertize (format "%s notes (%s)"
+                                  (if (sprig--status-collapsed-p host) "▸" "▾")
+                                  (length sprig--status-notes))
+                          'face 'sprig-status-group)
+              "\n")
+      (sprig--status-stamp-group from (point) host)
+      (put-text-property from (point) 'sprig--status-heading t)
+      (unless (sprig--status-collapsed-p host)
+        (dolist (note sprig--status-notes)
+          (let ((rfrom (point)))
+            (insert (sprig--status-note-row-string note) "\n")
+            (sprig--status-stamp-group rfrom (point) host)
+            (put-text-property rfrom (point)
+                               'sprig--status-note (plist-get note :id))))))))
+
+(defun sprig--status-note-at-point ()
+  "Return the note plist for the note row at point, or nil.
+Reads the id a note row carries and looks it up in `sprig--status-notes',
+the way `sprig--status-id-at-point' resolves a session row."
+  (let ((id (get-text-property (line-beginning-position) 'sprig--status-note)))
+    (and id (sprig-notes--find sprig--status-notes id))))
+
 (defun sprig--status-decorate ()
   "Head each host group and insert the expanded rows' inline previews.
 Runs after `tabulated-list-print', which erases both.  The printed rows
@@ -2473,7 +2570,18 @@ on its row rather than stranding it on the heading."
           (unless (bolp) (insert "\n"))
           (while pending
             (sprig--status-insert-group (car pending) counts)
-            (pop pending)))
+            (pop pending))
+          ;; The notes group rides at the very top, above every host group, so
+          ;; your reminders are the first thing the navigator shows.  Inserted
+          ;; last, at point-min: the host walk above reads its `:host'
+          ;; bookkeeping from point-min down and is undisturbed by a block put
+          ;; there afterwards, and the id-less note lines are skipped by
+          ;; navigation and the next reprint the way the headings are.  The
+          ;; `home' marker has insertion type t, so this top insert advances it
+          ;; and point still lands on its row.
+          (save-excursion
+            (goto-char (point-min))
+            (sprig--status-insert-notes)))
       (goto-char home)
       (set-marker home nil))))
 
@@ -2585,16 +2693,20 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
-;; Five transients mirror the review buffer's steering surface, each acting on
+;; Transients mirror the review buffer's steering surface, each acting on
 ;; the session under point: `s' starts (`s n' new, `s c' new-then-compose,
 ;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
-;; `d' removes (`d d' disconnects, `d D' deletes), and `l' switches the view
-;; (`l l' live-only, `l a' show all).
+;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
+;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
+;; live-only, `l a' show all).  `+' jots and manages personal notes (`+ +'
+;; captures, `+ t' toggles done, `+ d' deletes), listed in their own group.
 ;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
 ;; top-level, being the frequent ones.
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
+(define-key sprig-status-mode-map (kbd "P")   #'sprig-status-permission-mode)
+(define-key sprig-status-mode-map (kbd "+")   #'sprig-status-notes-dispatch)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-remove)
 (define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
@@ -2625,7 +2737,9 @@ an already-open navigator, whose header is otherwise fixed at mode init."
 \\<sprig-status-mode-map>Open with \\[sprig-status-open], steer the session
 under point with \\[sprig-status-dispatch] (its `c c' composes, `c o'
 connects), answer its waiting question with \\[sprig-status-answer-dispatch],
-interrupt with \\[sprig-status-interrupt], refresh with \\[revert-buffer]."
+interrupt with \\[sprig-status-interrupt], jot and manage personal notes with
+\\[sprig-status-notes-dispatch] (its `+ +' captures), refresh with
+\\[revert-buffer]."
   (setq-local revert-buffer-function #'sprig--status-revert)
   (sprig--status-apply-format))
 
@@ -2746,14 +2860,28 @@ command's docstring."
   "Take every recommended option on the row's session's question (`a r').")
 (sprig--status-define-steer sprig-status-answer-skip sprig-review-answer-skip
   "Skip the row's session's waiting question (`a s').")
+(sprig--status-define-steer sprig-status-plan-mode sprig-review-plan-mode
+  "Put the row's session into plan mode (`P p').")
+(sprig--status-define-steer sprig-status-auto-mode sprig-review-auto-mode
+  "Put the row's session into auto mode (`P a').")
+(sprig--status-define-steer sprig-status-accept-edits-mode
+    sprig-review-accept-edits-mode
+  "Put the row's session into accept-edits mode (`P e').")
+(sprig--status-define-steer sprig-status-manual-mode sprig-review-manual-mode
+  "Put the row's session into manual mode (`P m').")
+(sprig--status-define-steer sprig-status-bypass-mode sprig-review-bypass-mode
+  "Put the row's session into bypass mode (`P b').")
 
 (defun sprig--status-goto-row (dir)
-  "Move point DIR (+1 or -1) session rows, skipping inline preview lines.
+  "Move point DIR (+1 or -1) session or note rows, skipping preview lines.
+A note row carries no session id but is still a landing place for the `+'
+verbs, so it counts; only the id-less inline preview lines are skipped.
 Return non-nil on success; leave point put when there is no further row."
   (let ((origin (point))
         found)
     (while (and (not found) (zerop (forward-line dir)))
-      (when (tabulated-list-get-id)
+      (when (or (tabulated-list-get-id)
+                (get-text-property (line-beginning-position) 'sprig--status-note))
         (setq found t)))
     (if found
         (progn (beginning-of-line) t)
@@ -2776,10 +2904,14 @@ N defaults to 1; a negative N moves to previous rows."
 
 (defun sprig-status-open ()
   "Open the review buffer for the session on the current line.
-Reuses an open owning buffer, or replays the stored log into a new one."
+Reuses an open owning buffer, or replays the stored log into a new one.
+On a note row, opens `sprig-notes-file' at that note instead, the way `+ o'
+does, since a note has no session to open."
   (interactive)
-  (pop-to-buffer (sprig--status-review-buffer (sprig--status-entry-at-point)))
-  (sprig--status-refresh))
+  (if (sprig--status-note-at-point)
+      (sprig-status-note-open)
+    (pop-to-buffer (sprig--status-review-buffer (sprig--status-entry-at-point)))
+    (sprig--status-refresh)))
 
 (defun sprig-status-connect ()
   "Open the session on the current line and start or resume it."
@@ -2927,6 +3059,82 @@ The review buffer's `a', acting on the session under point."
     ("r" "take every recommended option" sprig-status-answer-recommended)
     ("s" "skip; go on unanswered" sprig-status-answer-skip)]])
 
+(transient-define-prefix sprig-status-permission-mode ()
+  "Set the permission mode of the session on the row at point.
+The review buffer's `P', acting on the session under point; it must be open
+and live, since the mode is a session-level setting the CLI tracks."
+  [["Permission mode"
+    ("p" "plan (agent plans, makes no edits)" sprig-status-plan-mode)
+    ("a" "auto (normal: allowed tools run, rest prompt)" sprig-status-auto-mode)
+    ("e" "accept edits (auto-approve file edits)" sprig-status-accept-edits-mode)
+    ("m" "manual (prompt for every tool call)" sprig-status-manual-mode)
+    ("b" "bypass (auto-approve everything, incl. shell)" sprig-status-bypass-mode)]])
+
+;;; Notes
+
+(defun sprig--status-note-at-point-or-error ()
+  "Return the note at point, or signal that there is none."
+  (or (sprig--status-note-at-point)
+      (user-error "No note on this line")))
+
+(defun sprig-status-note-capture ()
+  "Capture a new note and refresh the list (`+ +').
+The note is global, not tied to any session; it lands in the notes group."
+  (interactive)
+  (sprig-notes-capture)
+  (sprig--status-refresh))
+
+(defun sprig-status-note-toggle ()
+  "Toggle the note at point between TODO and DONE (`+ t').
+A note toggled done drops from the list, but stays in `sprig-notes-file'."
+  (interactive)
+  (sprig-notes-toggle (sprig--status-note-at-point-or-error))
+  (sprig--status-refresh))
+
+(defun sprig-status-note-edit ()
+  "Edit the text of the note at point (`+ e')."
+  (interactive)
+  (let* ((note (sprig--status-note-at-point-or-error))
+         (text (string-trim (read-string "Note: " (plist-get note :text)))))
+    (when (string-empty-p text) (user-error "Empty note"))
+    (sprig-notes-edit note text)
+    (sprig--status-refresh)))
+
+(defun sprig-status-note-delete ()
+  "Delete the note at point from `sprig-notes-file', asking first (`+ d')."
+  (interactive)
+  (let ((note (sprig--status-note-at-point-or-error)))
+    (when (yes-or-no-p (format "Delete note %S? " (plist-get note :text)))
+      (sprig-notes-delete note)
+      (sprig--status-refresh))))
+
+(defun sprig-status-note-open ()
+  "Open `sprig-notes-file', at the note at point when there is one (`+ o').
+The one note verb that pops the Org file up, for editing the list by hand
+or reading the notes already ticked done."
+  (interactive)
+  (let ((note (sprig--status-note-at-point)))
+    (find-file sprig-notes-file)
+    (when note
+      (goto-char (point-min))
+      (when (search-forward (plist-get note :id) nil t)
+        (beginning-of-line)))))
+
+;; Defined after the verbs it lists, as with `sprig-status-dispatch'.
+(transient-define-prefix sprig-status-notes-dispatch ()
+  "Jot and manage personal notes from the navigator.
+`+ +' captures a new note (appended to `sprig-notes-file'); the rest act on
+the note at point: `+ t' toggles it done (dropping it from the list, but
+keeping it in the file), `+ e' edits its text, `+ d' deletes it (asks
+first), and `+ o' opens the notes file at it.  Notes are one global list,
+not tied to any session."
+  [["Notes"
+    ("+" "capture a new note" sprig-status-note-capture)
+    ("t" "toggle done" sprig-status-note-toggle)
+    ("e" "edit text" sprig-status-note-edit)
+    ("d" "delete (asks first)" sprig-status-note-delete)
+    ("o" "open the notes file" sprig-status-note-open)]])
+
 (defun sprig-status-toggle-preview ()
   "Fold the group under point, or preview the reply of the row under point.
 On a host heading (`local' or `remote HOST'), TAB collapses that whole
@@ -2942,6 +3150,8 @@ exchange: your prompt and the agent's reply in full (see
      (id
       (sprig--status-toggle-id id)
       (sprig--status-render))
+     ;; A note row has nothing to preview; leave point on it for a `+' verb.
+     ((get-text-property (line-beginning-position) 'sprig--status-note) nil)
      (t (user-error "No Sprig session or host heading on this line")))))
 
 (defun sprig--status-new-session-args (local)
@@ -2952,6 +3162,10 @@ there is one, so a fresh session starts alongside it in the same place."
   (let* ((host (unless local (sprig--status-host-at-point)))
          (id (sprig--status-id-at-point))
          (entry (and id sprig--status-index (gethash id sprig--status-index))))
+    ;; The notes group sits above the host groups but names no real host, so
+    ;; starting a session from inside it falls back to this machine rather
+    ;; than the sentinel.
+    (when (eq host sprig--status-notes-host) (setq host nil))
     (cons host (and entry (plist-get entry :dir)))))
 
 (defun sprig-status-new (&optional local)
@@ -3131,7 +3345,8 @@ live session.  Narrow with `/', lift the cap with `l a'."
                            (locate-library "sprig")))
   "Directory sprig's own source files were loaded from, for `sprig-reload'.")
 
-(defvar sprig--source-files '("sprig-review" "sprig" "sprig-review-mode")
+(defvar sprig--source-files
+  '("sprig-review" "sprig-notes" "sprig" "sprig-review-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()

@@ -19,6 +19,15 @@
 (require 'cl-lib)
 (require 'sprig)
 (require 'sprig-review)
+(require 'sprig-notes)
+
+;; Point the notes store at a path that does not exist, so a navigator render
+;; in any test sees no notes group unless that test creates one of its own
+;; (the notes-mutation tests bind their own file).  Otherwise a real
+;; `sprig-notes-file' on the machine running the suite would leak a `notes'
+;; group into the render tests, which assert on the buffer from its top.
+(setq sprig-notes-file
+      (expand-file-name (make-temp-name "sprig-tests-absent-notes-") "/tmp"))
 
 ;; Declared special so a test can dynamically bind the context thresholds,
 ;; which live in `sprig-review-mode' and are not loaded by this suite.
@@ -1980,7 +1989,11 @@ Return the log directory."
                sprig-status-retry sprig-status-compact
                sprig-status-answer sprig-status-answer-recommended
                sprig-status-answer-skip
+               sprig-status-plan-mode sprig-status-auto-mode
+               sprig-status-accept-edits-mode sprig-status-manual-mode
+               sprig-status-bypass-mode
                sprig-status-dispatch sprig-status-answer-dispatch
+               sprig-status-permission-mode
                sprig-status-start sprig-status-remove sprig-status-view
                sprig-status-new sprig-status-new-message
                sprig-status-new-message-plan sprig-status-fork
@@ -1995,6 +2008,8 @@ Return the log directory."
               'sprig-status-answer-dispatch))
   (should (eq (lookup-key sprig-status-mode-map (kbd "d")) 'sprig-status-remove))
   (should (eq (lookup-key sprig-status-mode-map (kbd "l")) 'sprig-status-view))
+  (should (eq (lookup-key sprig-status-mode-map (kbd "P"))
+              'sprig-status-permission-mode))
   (should-not (lookup-key sprig-status-mode-map (kbd "k")))
   (should-not (lookup-key sprig-status-mode-map (kbd "D"))))
 
@@ -2272,7 +2287,23 @@ Return the log directory."
   (should (string-match-p "✗  turn failed"
                           (sprig--status-state-line '(:status idle) '(:error t))))
   (should (string-match-p "waiting on you"
-                          (sprig--status-state-line '(:status idle) '(:pending t)))))
+                          (sprig--status-state-line '(:status idle) '(:pending t))))
+  ;; A notable permission mode rides the state line; an everyday one does not.
+  (let ((l (sprig--status-state-line '(:status idle) '(:done t :mode "plan"))))
+    (should (string-match-p "turn over" l))
+    (should (string-match-p "plan" l)))
+  (should-not (string-match-p
+               "auto"
+               (sprig--status-state-line '(:status idle) '(:done t :mode "auto")))))
+
+(ert-deftest sprig-test-status-notable-mode ()
+  ;; Only the modes worth flagging come back; the everyday ones are dropped.
+  (should (equal (sprig--status-notable-mode "plan") "plan"))
+  (should (equal (sprig--status-notable-mode "bypassPermissions") "bypassPermissions"))
+  (should-not (sprig--status-notable-mode "auto"))
+  (should-not (sprig--status-notable-mode "manual"))
+  (should-not (sprig--status-notable-mode "default"))
+  (should-not (sprig--status-notable-mode nil)))
 
 (ert-deftest sprig-test-status-context-face-escalates ()
   ;; The count colours on its own terms: plain when small, amber past the
@@ -2287,11 +2318,12 @@ Return the log directory."
   (should (eq (sprig--status-context-face 999999) 'sprig-review-context)))
 
 (ert-deftest sprig-test-events-preview-carries-state ()
-  ;; The preview surfaces the model's outcome and context for the state line.
+  ;; The preview surfaces the model's outcome, context, and mode for the line.
   (let ((p (sprig--events-preview
-            '((user "q") (text "a") (context 134000) (done 0.1 nil)))))
+            '((user "q") (text "a") (context 134000) (mode "plan") (done 0.1 nil)))))
     (should (eq (plist-get p :done) t))
-    (should (equal (plist-get p :context) 134000))))
+    (should (equal (plist-get p :context) 134000))
+    (should (equal (plist-get p :mode) "plan"))))
 
 (ert-deftest sprig-test-events-preview-carries-time ()
   ;; The preview surfaces the freshest block's stamp for the render to show.
@@ -2641,6 +2673,157 @@ Return the log directory."
           (should (eq (face-attribute face :slant nil t) 'unspecified))
           (should (eq (face-attribute face :weight nil t) 'bold)))
       (put face 'face-defface-spec nil))))
+
+;;; Notes (sprig-notes.el)
+
+(defconst sprig-test--notes-file
+  (concat "#+title: my reminders\n\n"
+          "* TODO Fix the flaky test [2026-08-04 Tue 14:03:12]\n"
+          "  a body line a human added\n"
+          "* DONE Bump the version [2026-08-01 Sat 09:12:00]\n")
+  "A canonical notes file: a preamble, a note with a body, and a done note.")
+
+(ert-deftest sprig-test-notes-roundtrip-is-exact ()
+  "Parse then serialize reproduces the file byte-for-byte, body and all."
+  (should (equal sprig-test--notes-file
+                 (sprig-notes--serialize
+                  (sprig-notes--parse-string sprig-test--notes-file)))))
+
+(ert-deftest sprig-test-notes-parse-fields ()
+  "Each note yields its text, state, id and parsed time; the preamble is kept."
+  (let* ((st (sprig-notes--parse-string sprig-test--notes-file))
+         (notes (sprig-notes--notes st))
+         (a (nth 0 notes))
+         (b (nth 1 notes)))
+    (should (equal (plist-get st :preamble) '("#+title: my reminders" "")))
+    (should (= 2 (length notes)))
+    (should (equal "Fix the flaky test" (plist-get a :text)))
+    (should (eq 'todo (plist-get a :state)))
+    (should (equal "[2026-08-04 Tue 14:03:12]" (plist-get a :id)))
+    (should (equal "2026-08-04 14:03:12"
+                   (format-time-string "%F %T" (plist-get a :time))))
+    (should (eq 'done (plist-get b :state)))
+    (should (equal "Bump the version" (plist-get b :text)))))
+
+(ert-deftest sprig-test-notes-find-by-id ()
+  "`sprig-notes--find' matches on id and returns nil when absent."
+  (let ((notes (sprig-notes--notes (sprig-notes--parse-string sprig-test--notes-file))))
+    (should (equal "Fix the flaky test"
+                   (plist-get (sprig-notes--find notes "[2026-08-04 Tue 14:03:12]")
+                              :text)))
+    (should-not (sprig-notes--find notes "[1999-01-01 Fri 00:00:00]"))
+    (should-not (sprig-notes--find notes nil))))
+
+(ert-deftest sprig-test-notes-unknown-heading-survives ()
+  "A non-note top-level heading round-trips verbatim and is not a note."
+  (let* ((s (concat "* Project ideas :tag:\n"
+                    "  - a nested bullet\n"
+                    "* TODO Real note [2026-08-04 Tue 14:03:12]\n"))
+         (st (sprig-notes--parse-string s)))
+    (should (equal s (sprig-notes--serialize st)))
+    (should (= 1 (length (sprig-notes--notes st))))
+    (should (equal "Real note" (plist-get (car (sprig-notes--notes st)) :text)))))
+
+(ert-deftest sprig-test-notes-now-id-bumps-on-collision ()
+  "A second id taken in the same second is bumped forward, so ids stay unique."
+  (let* ((first (sprig-notes--now-id nil))
+         (second (sprig-notes--now-id (list (car first)))))
+    (should-not (equal (car first) (car second)))
+    (should (time-less-p (cdr first) (cdr second)))))
+
+(ert-deftest sprig-test-notes-mid-text-bracket-is-not-the-id ()
+  "A bracket inside the text is kept as text; only a trailing one is the id."
+  (let* ((s "* TODO see [1] for details [2026-08-04 Tue 14:03:12]\n")
+         (note (car (sprig-notes--notes (sprig-notes--parse-string s)))))
+    (should (equal "see [1] for details" (plist-get note :text)))
+    (should (equal "[2026-08-04 Tue 14:03:12]" (plist-get note :id)))))
+
+(defmacro sprig-test--with-notes-file (initial &rest body)
+  "Bind `sprig-notes-file' to a fresh temp path holding INITIAL, run BODY.
+The path sits in a directory that does not exist yet, so a write must
+create it; the whole temp tree is removed afterwards."
+  (declare (indent 1))
+  `(let* ((dir (make-temp-file "sprig-notes-test" t))
+          (sprig-notes-file (expand-file-name "sub/notes.org" dir)))
+     (unwind-protect
+         (progn
+           (when ,initial
+             (make-directory (file-name-directory sprig-notes-file) t)
+             (with-temp-file sprig-notes-file (insert ,initial)))
+           ,@body)
+       (delete-directory dir t))))
+
+(defun sprig-test--notes-text ()
+  "Return the current text of the bound `sprig-notes-file'."
+  (with-temp-buffer (insert-file-contents sprig-notes-file) (buffer-string)))
+
+(ert-deftest sprig-test-notes-add-creates-file-and-parent ()
+  "Adding a note creates the (absent) parent directory and a well-formed note."
+  (sprig-test--with-notes-file nil
+    (let ((note (sprig-notes-add "Buy milk")))
+      (should (file-exists-p sprig-notes-file))
+      (should (eq 'todo (plist-get note :state)))
+      (let ((back (car (sprig-notes--notes (sprig-notes-read)))))
+        (should (equal "Buy milk" (plist-get back :text)))
+        (should (equal (plist-get note :id) (plist-get back :id)))))))
+
+(ert-deftest sprig-test-notes-toggle-flips-one-keeps-the-rest ()
+  "Toggling a note flips only its state, leaving its body and siblings intact."
+  (sprig-test--with-notes-file sprig-test--notes-file
+    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
+      (sprig-notes-toggle target)
+      (let ((notes (sprig-notes--notes (sprig-notes-read))))
+        (should (eq 'done (plist-get (nth 0 notes) :state)))
+        (should (eq 'done (plist-get (nth 1 notes) :state))))
+      ;; The human's body line under the toggled note is preserved.
+      (should (string-match-p "a body line a human added" (sprig-test--notes-text))))))
+
+(ert-deftest sprig-test-notes-edit-keeps-id-and-body ()
+  "Editing text preserves the note's id (its identity) and its body."
+  (sprig-test--with-notes-file sprig-test--notes-file
+    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
+      (sprig-notes-edit target "Fix the OTHER flaky test")
+      (let ((back (car (sprig-notes--notes (sprig-notes-read)))))
+        (should (equal "Fix the OTHER flaky test" (plist-get back :text)))
+        (should (equal (plist-get target :id) (plist-get back :id))))
+      (should (string-match-p "a body line a human added" (sprig-test--notes-text))))))
+
+(ert-deftest sprig-test-notes-delete-drops-only-the-target ()
+  "Deleting a note removes just its block; the sibling and preamble remain."
+  (sprig-test--with-notes-file sprig-test--notes-file
+    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
+      (sprig-notes-delete target)
+      (let ((notes (sprig-notes--notes (sprig-notes-read))))
+        (should (= 1 (length notes)))
+        (should (equal "Bump the version" (plist-get (car notes) :text))))
+      (let ((text (sprig-test--notes-text)))
+        (should (string-match-p "#\\+title: my reminders" text))
+        (should-not (string-match-p "Fix the flaky test" text))))))
+
+(ert-deftest sprig-test-notes-mutating-a-vanished-note-aborts ()
+  "A note deleted from the file out of band is not silently recreated."
+  (sprig-test--with-notes-file sprig-test--notes-file
+    (let ((ghost '(:id "[2000-01-01 Sat 00:00:00]" :text "gone" :state todo)))
+      (should-error (sprig-notes-toggle ghost) :type 'user-error)
+      (should-error (sprig-notes-delete ghost) :type 'user-error))))
+
+(ert-deftest sprig-test-notes-navigator-commands ()
+  "`+' is the notes transient and each note verb is a real command."
+  (should (eq (lookup-key sprig-status-mode-map (kbd "+"))
+              'sprig-status-notes-dispatch))
+  (dolist (c '(sprig-status-note-capture sprig-status-note-toggle
+               sprig-status-note-edit sprig-status-note-delete
+               sprig-status-note-open))
+    (should (commandp c))))
+
+(ert-deftest sprig-test-notes-row-string ()
+  "The navigator row shows the checkbox glyph for the state and the text."
+  (should (string-match-p
+           "☐ Fix it"
+           (sprig--status-note-row-string '(:state todo :text "Fix it" :time nil))))
+  (should (string-match-p
+           "☑ Done it"
+           (sprig--status-note-row-string '(:state done :text "Done it" :time nil)))))
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
