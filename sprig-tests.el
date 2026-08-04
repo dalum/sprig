@@ -20,6 +20,11 @@
 (require 'sprig)
 (require 'sprig-review)
 
+;; Declared special so a test can dynamically bind the context thresholds,
+;; which live in `sprig-review-mode' and are not loaded by this suite.
+(defvar sprig-context-large-tokens)
+(defvar sprig-context-huge-tokens)
+
 ;;;; Helpers
 
 ;; Small constructors for the CLI's stream-json line shapes.
@@ -2267,6 +2272,18 @@ Return the log directory."
                           (sprig--status-state-line '(:status idle) '(:error t))))
   (should (string-match-p "waiting on you"
                           (sprig--status-state-line '(:status idle) '(:pending t)))))
+
+(ert-deftest sprig-test-status-context-face-escalates ()
+  ;; The count colours on its own terms: plain when small, amber past the
+  ;; large mark, red past the very-large one, mirroring the review buffer.
+  (let ((sprig-context-large-tokens 150000)
+        (sprig-context-huge-tokens 200000))
+    (should (eq (sprig--status-context-face 50000) 'sprig-review-context))
+    (should (eq (sprig--status-context-face 158400) 'sprig-review-context-large))
+    (should (eq (sprig--status-context-face 250000) 'sprig-review-context-huge)))
+  ;; With the thresholds unbound (the review mode not loaded) there is nothing
+  ;; to escalate to, so even a big count stays in the plain face.
+  (should (eq (sprig--status-context-face 999999) 'sprig-review-context)))
 
 (ert-deftest sprig-test-events-preview-carries-state ()
   ;; The preview surfaces the model's outcome and context for the state line.

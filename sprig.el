@@ -207,7 +207,7 @@ Example, hiding /tmp and everything under it:
   (setq sprig-status-ignore-directories \\='(\"\\\\`-tmp\\\\(-\\\\|\\\\'\\\\)\"))"
   :type '(repeat regexp))
 
-(defface sprig-status-preview '((t :inherit shadow :slant italic))
+(defface sprig-status-preview '((t :inherit shadow))
   "Face for the inline reply preview shown under an expanded navigator row.")
 
 (defface sprig-status-preview-prompt '((t :inherit shadow :weight bold))
@@ -2296,8 +2296,26 @@ when there is no status and no model at all (nothing to say)."
         (concat (propertize (format "     %s  %s" glyph text) 'face face)
                 (when (and (numberp ctx) (> ctx 0))
                   (concat (propertize "  ·  " 'face face)
+                          ;; Colour the count on its own terms, escalating past
+                          ;; the large / very-large marks the way the review
+                          ;; buffer's state line does, rather than in the
+                          ;; turn's face.
                           (propertize (sprig--format-tokens ctx)
-                                      'face 'sprig-review-context))))))))
+                                      'face (sprig--status-context-face ctx)))))))))
+
+(defun sprig--status-context-face (tokens)
+  "Return the state-line face for TOKENS of context, escalating with size.
+Mirrors the review buffer's readout: plain while the context is small,
+amber past `sprig-context-large-tokens', red past `sprig-context-huge-tokens'.
+Those thresholds and the escalated faces belong to `sprig-review-mode'; when
+it is not loaded there is nothing to escalate to, so the count stays in the
+plain `sprig-review-context' face, exactly as the plain readout already does."
+  (let ((large (bound-and-true-p sprig-context-large-tokens))
+        (huge (bound-and-true-p sprig-context-huge-tokens)))
+    (cond
+     ((and huge (>= tokens huge)) 'sprig-review-context-huge)
+     ((and large (>= tokens large)) 'sprig-review-context-large)
+     (t 'sprig-review-context))))
 
 (defun sprig--status-preview-lines (entry)
   "Return the propertized display lines for ENTRY's inline preview.
