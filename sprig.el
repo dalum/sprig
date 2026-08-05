@@ -186,6 +186,15 @@ lines, cutting the reply with an ellipsis.  Set a number to keep a long
 reply from filling the list."
   :type '(choice (const :tag "Whole reply (no cap)" nil) integer))
 
+(defcustom sprig-status-live-refresh-interval 1.0
+  "Seconds to coalesce live navigator refreshes over, or nil to disable them.
+While a turn is in flight its context readout and status change with every
+event, but a full navigator render re-scans the session logs (over SSH for
+a remote host), so it cannot run per event.  A number keeps the open
+navigator current by rendering at most once per that many seconds during a
+turn; nil leaves it refreshing only at turn boundaries, as it did before."
+  :type '(choice (const :tag "Only at turn boundaries" nil) number))
+
 (defcustom sprig-status-preview-markdown t
   "When non-nil, fontify the navigator inline reply preview with markdown.
 The expanded reply is rendered with `markdown-mode' faces and its `*'/`#'
@@ -1150,11 +1159,20 @@ model via `sprig-review-consume'."
     (`(done ,_ ,_) (setq sprig--busy nil
                          sprig--compacting nil)
      (sprig--clear-interrupt)
+     ;; The turn is over: render the final state at once, dropping any
+     ;; coalesced mid-turn refresh still pending so it cannot fire a stale
+     ;; render a beat later.
+     (sprig--status-refresh-cancel)
      (sprig--status-refresh)))
   ;; A control-request is transport, not conversation: it carries no
   ;; renderable content, so it is answered above and not consumed.
   (unless (eq (car-safe event) 'control-request)
     (sprig-review-consume event))
+  ;; Keep the open navigator's live row current through the turn: its context
+  ;; readout and status move with the events, not only at `done'.  Coalesced,
+  ;; so a stream's burst of events makes one render, not one per event.
+  (unless (eq (car-safe event) 'done)
+    (sprig--status-refresh-soon))
   ;; The queue flushes after the `done' is consumed, never inside the pcase
   ;; above: the flush sends, and a send consumes a `user' event of its own,
   ;; which would then be folded in ahead of the `done' it was waiting for and
@@ -2809,6 +2827,33 @@ the navigator is not open."
 Used from `kill-buffer-hook', which runs while the dying buffer is still
 live and listed; deferring lets it drop from the list first."
   (run-at-time 0 nil #'sprig--status-refresh))
+
+(defvar sprig--status-refresh-timer nil
+  "Pending coalesced live-refresh timer for the navigator, or nil.
+One global timer, since the navigator is a single buffer; held here so a
+burst of stream events schedules just one render (see
+`sprig--status-refresh-soon').")
+
+(defun sprig--status-refresh-cancel ()
+  "Drop any pending coalesced navigator refresh."
+  (when sprig--status-refresh-timer
+    (cancel-timer sprig--status-refresh-timer)
+    (setq sprig--status-refresh-timer nil)))
+
+(defun sprig--status-refresh-soon ()
+  "Refresh the navigator soon, coalescing a burst of events into one render.
+A streaming turn fires many events a second and a full render re-scans the
+session logs (over SSH for a remote host), so this renders at most once per
+`sprig-status-live-refresh-interval' rather than once per event.  A no-op,
+and thus free, when that is nil or the navigator is not open."
+  (when (and sprig-status-live-refresh-interval
+             (null sprig--status-refresh-timer)
+             (get-buffer sprig-status-buffer-name))
+    (setq sprig--status-refresh-timer
+          (run-at-time sprig-status-live-refresh-interval nil
+                       (lambda ()
+                         (setq sprig--status-refresh-timer nil)
+                         (sprig--status-refresh))))))
 
 (defun sprig--status-id-at-point ()
   "Return the session id of the row at point, reached from a preview line too.

@@ -2351,6 +2351,37 @@ Return the log directory."
            "agent working…"
            (sprig--status-state-line '(:status idle) '(:done t :agent-running t)))))
 
+(ert-deftest sprig-test-status-refresh-soon-coalesces ()
+  ;; A burst of events schedules a single render; a second call while one is
+  ;; pending is folded in, not stacked.  Needs the navigator open, and nil
+  ;; interval keeps it off entirely.
+  (let ((sprig--status-refresh-timer nil))
+    (unwind-protect
+        (progn
+          ;; No navigator open: nothing scheduled, whatever the interval.
+          (let ((sprig-status-live-refresh-interval 1.0))
+            (sprig--status-refresh-soon)
+            (should-not sprig--status-refresh-timer))
+          (unwind-protect
+              (with-current-buffer (get-buffer-create sprig-status-buffer-name)
+                ;; Disabled by nil interval, even with the navigator open.
+                (let ((sprig-status-live-refresh-interval nil))
+                  (sprig--status-refresh-soon)
+                  (should-not sprig--status-refresh-timer))
+                ;; Enabled: one timer, and a second call coalesces onto it.
+                (let ((sprig-status-live-refresh-interval 1.0))
+                  (sprig--status-refresh-soon)
+                  (let ((first sprig--status-refresh-timer))
+                    (should first)
+                    (sprig--status-refresh-soon)
+                    (should (eq first sprig--status-refresh-timer)))))
+            (when (get-buffer sprig-status-buffer-name)
+              (kill-buffer sprig-status-buffer-name)))
+          ;; The cancel path clears the pending render.
+          (sprig--status-refresh-cancel)
+          (should-not sprig--status-refresh-timer))
+      (sprig--status-refresh-cancel))))
+
 (ert-deftest sprig-test-state-parts-shared-vocabulary ()
   ;; The one table the review buffer and the navigator both read, so their
   ;; state lines cannot drift.  An unknown state falls back to idle.
