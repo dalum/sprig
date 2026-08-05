@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.18.1
+;; Version: 0.19.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -242,6 +242,13 @@ stand out as needing you rather than blending in with the running rows."
 turn is streaming into this buffer, so consecutive `text' events extend
 that section without a full re-render.  Any structural event clears it.")
 
+(defvar-local sprig-review--stream-nl nil
+  "Non-nil when the deferred live stream so far ends on a newline.
+Lets `sprig-review-consume' spot a completed paragraph (a blank line) as it
+arrives split across `text' deltas, without rescanning the block, so it can
+schedule a render only when a paragraph lands (see
+`sprig-review-defer-live-prose').  Reset when the block settles.")
+
 (defvar-local sprig-review--streaming nil
   "Non-nil while a turn is streaming into this buffer.
 Two things hang off it.  The last text block opens as the live tail only
@@ -298,6 +305,18 @@ a live turn is dated when its first event reaches the buffer."
   "When non-nil, render user and assistant prose with `markdown-mode' faces.
 Markup characters (`*', `#', ...) are hidden.  Has no effect when
 `markdown-mode' is not installed."
+  :type 'boolean
+  :group 'sprig)
+
+(defcustom sprig-review-defer-live-prose t
+  "When non-nil, reveal a streaming reply a whole paragraph at a time.
+A live text block otherwise shows its half-typed last paragraph raw, which
+is markdown noise no one reads.  With this on, only the paragraphs that have
+completed are shown, fontified, and the one still being typed is withheld
+until it ends (a blank line) or the turn settles.  The paragraphs a live
+render draws fontify synchronously so none flash raw; opening a long buffer
+still fontifies off the critical path (see `sprig-review-fontify-async').
+Has no effect on the fast raw tail append, which it replaces."
   :type 'boolean
   :group 'sprig)
 
@@ -848,31 +867,120 @@ Without async, fontifies synchronously (`sprig-review--fontify-markdown')."
         (progn (sprig-review--fontify-enqueue text (current-buffer))
                text))))
 
+(defvar sprig-review--live-render nil
+  "Bound non-nil while the incremental tail splice draws a live turn.
+A live render fontifies prose synchronously so nothing shows raw (see
+`sprig-review--prose-for'); a cold full render of a long buffer leaves it
+nil, keeping the async path so opening one never blocks.  Dynamic, not
+buffer-local: it scopes a single `sprig-review--splice-tail' call.")
+
+(defun sprig-review--prose-for (text open)
+  "Return TEXT fontified for a prose section, sync or deferred by context.
+With `sprig-review-defer-live-prose', a live render (OPEN, the streaming
+block, or `sprig-review--live-render', the tail splice a settling turn
+drives) fontifies now, so no paragraph is shown raw; a cold full render
+keeps the async path (`sprig-review--prose').  Without it, always
+`sprig-review--prose'."
+  (if (and sprig-review-defer-live-prose (or open sprig-review--live-render))
+      (sprig-review--fontify-markdown text)
+    (sprig-review--prose text)))
+
+(defun sprig-review--completed-prose (text)
+  "Return the leading run of whole paragraphs in TEXT, or nil for none.
+A paragraph ends at a blank line outside a fenced code block; whatever
+follows the last such blank line is still being typed, so it is withheld.
+An open (unclosed) ``` fence withholds everything from its opening line,
+since where it ends is not yet known.  This is what the deferred live
+render shows (`sprig-review--insert-text'), so a half-typed paragraph or a
+half-written code block never appears."
+  (let ((lines (split-string text "\n" nil))
+        (pos 0) (cut 0) (in-fence nil) (fence-start 0))
+    (dolist (line lines)
+      (cond
+       ((string-match-p "\\`[ \t]*```" line)
+        (if in-fence
+            (setq in-fence nil)
+          (setq in-fence t fence-start pos)))
+       ((and (not in-fence) (string-match-p "\\`[ \t]*\\'" line))
+        (setq cut (min (length text) (+ pos (length line) 1)))))
+      (setq pos (+ pos (length line) 1)))
+    ;; A fence still open caps the cut at its opening line.
+    (when (and in-fence (< fence-start cut))
+      (setq cut fence-start))
+    (and (> cut 0) (substring text 0 cut))))
+
+(defun sprig-review--paragraph-landed-p (delta)
+  "Return non-nil when DELTA completes a paragraph in the deferred stream.
+A paragraph ends at a blank line, which a delta may split across two
+arrivals, so this threads the trailing-newline state in
+`sprig-review--stream-nl'.  It errs towards yes: fence-correctness is the
+render's job (`sprig-review--completed-prose'), and a false yes only costs a
+cheap tail redraw that draws nothing new.  A single newline (a soft wrap)
+does not count."
+  (prog1
+      (or (string-match-p "\n[ \t]*\n" delta)
+          (and sprig-review--stream-nl (string-match-p "\\`[ \t]*\n" delta)))
+    (when (> (length delta) 0)
+      (setq sprig-review--stream-nl
+            (and (string-match-p "\n[ \t]*\\'" delta) t)))))
+
 (defun sprig-review--text-body (text)
   "Return TEXT with trailing newlines normalised to exactly one.
 Trailing spaces are kept (a streamed delta may legitimately end in one),
 so this matches what the in-place append path produces."
   (concat (string-trim-right text "[\n]+") "\n"))
 
+(defun sprig-review--text-shown (block open)
+  "Return the prose string a text or user BLOCK draws this render, or nil.
+OPEN marks the live streaming block.  Deferring live prose, an open block
+shows only its completed paragraphs (nil until one lands); any other prose
+shows its whole text.  A whitespace-only block shows nil, so an empty block
+\(a `text-block' with nothing after it, a withheld live one) draws no body
+and, via `sprig-review--block-shown-p', pulls no separator blank around it."
+  (let ((text (or (plist-get block :text) "")))
+    (if (and open sprig-review-defer-live-prose
+             (eq (plist-get block :type) 'text))
+        (let ((done (sprig-review--completed-prose text)))
+          (and done (sprig-review--text-body done)))
+      (and (not (string-empty-p (string-trim text)))
+           (sprig-review--text-body text)))))
+
+(defun sprig-review--block-shown-p (block open)
+  "Non-nil when BLOCK puts visible text on screen this render.
+Only prose can come up empty (see `sprig-review--text-shown'); every other
+block always draws.  An empty block still draws its (zero-length) section,
+for block/section alignment, but is skipped by the separator rules."
+  (if (memq (plist-get block :type) '(text user))
+      (and (sprig-review--text-shown block open) t)
+    t))
+
 (defun sprig-review--insert-text (block &optional open)
   "Insert an assistant text BLOCK as bare prose.
 It carries no label: a user turn is the tinted one, so the agent's output
 is simply what is not tinted.  The section has no heading either, which
 costs it nothing but the ability to fold, and prose is what you came to
-read.  When OPEN, this is the live streaming block: render its text raw
-\(plus a trailing newline) and record the tail (`sprig-review--tail') just
-before that newline, so `sprig-review--append-streamed' and a later full
-refresh produce identical text.  A settled block is normalised for tidy
+read.  When OPEN, this is the live streaming block.  Normally it renders
+raw (plus a trailing newline) and records the tail (`sprig-review--tail')
+just before it, so `sprig-review--append-streamed' and a later full refresh
+produce identical text; it gains markdown faces once it settles.  With
+`sprig-review-defer-live-prose' it instead shows only its completed
+paragraphs, fontified, and sets no tail (see
+`sprig-review--completed-prose').  A settled block is normalised for tidy
 display."
   (magit-insert-section (sprig-text block)
-    (if open
+    (if (and open (not sprig-review-defer-live-prose))
         ;; The live block renders raw so the fast in-place append path and a
         ;; later full rebuild agree; it gains markdown faces once it settles.
         (progn
           (insert (plist-get block :text) "\n")
           (setq sprig-review--tail (copy-marker (1- (point)) t)))
-      (insert (sprig-review--prose
-               (sprig-review--text-body (plist-get block :text)))))))
+      ;; Deferred (or settled): draw only what is shown, fontified.  An open
+      ;; block shows its completed paragraphs and withholds the typing one; a
+      ;; whitespace-only block shows nothing.  Nothing shown means no tail and
+      ;; an empty section, which the separator rules then step over.
+      (let ((shown (sprig-review--text-shown block open)))
+        (when shown
+          (insert (sprig-review--prose-for shown open)))))))
 
 (defun sprig-review--insert-user (block)
   "Insert a user-turn BLOCK as prose carrying the `sprig-review-user' tint.
@@ -884,10 +992,11 @@ to confine it to, magit paints it over the whole section, which is what
 we want."
   (magit-insert-section (sprig-user block nil
                          :heading-highlight-face 'sprig-review-user-highlight)
-    (let ((beg (point)))
-      (insert (sprig-review--prose
-               (sprig-review--text-body (plist-get block :text))))
-      (sprig-review--add-face beg (point) 'sprig-review-user))))
+    (let ((beg (point))
+          (shown (sprig-review--text-shown block nil)))
+      (when shown
+        (insert (sprig-review--prose-for shown nil))
+        (sprig-review--add-face beg (point) 'sprig-review-user)))))
 
 (defun sprig-review--insert-thinking (block)
   "Insert a thinking BLOCK, folded by default since it is verbose."
@@ -1260,6 +1369,13 @@ the block's *last* section, rather than mapping blocks to sections by
 position, also handles a block that draws several top-level sections, as a
 multi-question dialog does.")
 
+(defvar-local sprig-review--rendered-streaming nil
+  "`sprig-review--streaming' as it stood at the last render.
+The last block renders differently open (streaming) than settled, most
+visibly under `sprig-review-defer-live-prose', yet the model is equal
+across the settling `done'.  So a change here forces the last block to
+redraw, without which its withheld final paragraph would never appear.")
+
 (defvar-local sprig-review--incremental-reason nil
   "Why the last refresh fell back to a full render, or nil if it did not.
 Set by `sprig-review--render-incremental' and logged when
@@ -1277,26 +1393,30 @@ identically."
   ;; never between two of those rows.  A turn's tool calls then sit as one
   ;; block with air around it, rather than as a ladder down the buffer.  The
   ;; line goes before the block rather than after, which would sit between the
-  ;; live text section's end and `sprig-review--tail'.
-  (when (and (not first)
-             (or (sprig-review--prose-block-p block)
-                 (sprig-review--prose-block-p prev)))
-    (insert "\n"))
-  ;; Held from before the block is drawn, so the stamp lands against its
-  ;; first line rather than against whatever follows it.
-  (let ((start (point)))
-    (pcase (plist-get block :type)
-      ('user     (sprig-review--insert-user block))
-      ;; The live tail is the last block, when it is text, and only while a
-      ;; turn is actually streaming in.
-      ('text     (sprig-review--insert-text
-                  block (and sprig-review--streaming (eq block last))))
-      ('thinking (sprig-review--insert-thinking block))
-      ('tool     (sprig-review--insert-tool block))
-      ('tasks    (sprig-review--insert-tasks block))
-      ('dialog   (sprig-review--insert-dialog block))
-      ('error    (sprig-review--insert-error block)))
-    (sprig-review--insert-margin start (plist-get block :time))))
+  ;; live text section's end and `sprig-review--tail'.  A block that shows
+  ;; nothing (a withheld live paragraph, an empty one) is stepped over: no
+  ;; blank to it, and PREV is the last block that actually drew (see
+  ;; `sprig-review--insert-blocks'), so it pulls no doubled air either.
+  (let ((open (and sprig-review--streaming (eq block last))))
+    (when (and (not first)
+               (sprig-review--block-shown-p block open)
+               (or (sprig-review--prose-block-p block)
+                   (and prev (sprig-review--prose-block-p prev))))
+      (insert "\n"))
+    ;; Held from before the block is drawn, so the stamp lands against its
+    ;; first line rather than against whatever follows it.
+    (let ((start (point)))
+      (pcase (plist-get block :type)
+        ('user     (sprig-review--insert-user block))
+        ;; The live tail is the last block, when it is text, and only while a
+        ;; turn is actually streaming in.
+        ('text     (sprig-review--insert-text block open))
+        ('thinking (sprig-review--insert-thinking block))
+        ('tool     (sprig-review--insert-tool block))
+        ('tasks    (sprig-review--insert-tasks block))
+        ('dialog   (sprig-review--insert-dialog block))
+        ('error    (sprig-review--insert-error block)))
+      (sprig-review--insert-margin start (plist-get block :time)))))
 
 (defun sprig-review-render (model &optional meta)
   "Render review MODEL into the current buffer as magit-sections.
@@ -1336,7 +1456,12 @@ seed the boundary blank line for the first of BLOCKS (see
   (let (sections)
     (dolist (block blocks)
       (sprig-review--insert-block block prev first last)
-      (setq first nil prev block)
+      ;; A block that showed nothing does not become the separator anchor:
+      ;; PREV stays the last block that drew, and FIRST is not yet spent, so
+      ;; the next real block sits against a real neighbour, not an empty one.
+      (when (sprig-review--block-shown-p
+             block (and sprig-review--streaming (eq block last)))
+        (setq first nil prev block))
       ;; The block's sections have just been appended to ROOT; its last is
       ;; the freshest child.
       (push (car (last (oref root children))) sections))
@@ -1362,7 +1487,8 @@ session change, or a reset)."
   "Store MODEL's blocks, header signature, and per-block SECTIONS as baseline."
   (setq sprig-review--rendered-blocks (plist-get model :blocks)
         sprig-review--rendered-header (sprig-review--header-signature model meta)
-        sprig-review--rendered-sections sections))
+        sprig-review--rendered-sections sections
+        sprig-review--rendered-streaming sprig-review--streaming))
 
 (defun sprig-review--common-prefix (a b)
   "Return the count of leading elements `equal' in lists A and B."
@@ -1414,7 +1540,11 @@ sections is handled correctly.  Returns t."
     ;; parent (non-nil) keeps `magit-insert-section' from starting a new root,
     ;; and the old root feeds fold inheritance.
     (let ((magit-insert-section--parent root)
-          (magit-insert-section--oldroot oldroot))
+          (magit-insert-section--oldroot oldroot)
+          ;; A tail splice is the live path: fontify its prose now, so a
+          ;; landing paragraph or a settling turn never shows raw (see
+          ;; `sprig-review--prose-for').
+          (sprig-review--live-render t))
       (setq new-sections
             (sprig-review--insert-blocks root (nthcdr k new-blocks) prev nil last))
       (when new-blocks (insert "\n"))
@@ -1466,6 +1596,15 @@ or when even the first block diverged.  The reason is recorded in
          ;; The model did not change, so the block diff alone would keep it.
          (floor (and fresh (sprig-review--fontify-floor new-blocks fresh)))
          (k (if floor (min k floor) k))
+         ;; The last block renders differently open than settled (see
+         ;; `sprig-review--rendered-streaming'), and the model is equal across
+         ;; the settling `done', so force the last block to redraw when the
+         ;; streaming state changed, or its withheld tail would never show.
+         (k (if (and new-blocks
+                     (not (eq sprig-review--streaming
+                              sprig-review--rendered-streaming)))
+                (min k (1- (length new-blocks)))
+              k))
          (reason
           (cond
            ((not sprig-review-incremental-render) 'disabled)
@@ -1729,27 +1868,39 @@ first `text' of a run, clears the tail and schedules a coalesced render
   ;; Track whether a turn is in flight, which decides both the live tail and
   ;; the running bar (see `sprig-review--streaming').  Any event the agent
   ;; produces means it is working; a `user' event is you, mid-turn or not, and
-  ;; says nothing either way.
-  (pcase (car event)
-    ((or 'text 'thinking 'tool-call) (setq sprig-review--streaming t))
-    ((or 'done 'error) (setq sprig-review--streaming nil))
-    ;; A dialog opening or settling flips the session's `waiting' status, so
-    ;; the navigator's `?' glyph appears and clears in step with it.
-    ((or 'dialog 'dialog-answer) (sprig--status-refresh))
-    (_ nil))
-  (if (and (eq (car event) 'text)
+  ;; says nothing either way.  The prior value tells the first `text' of a run
+  ;; from a later one, so a deferred stream still paints `working…' at once.
+  (let ((was-streaming sprig-review--streaming))
+    (pcase (car event)
+      ((or 'text 'thinking 'tool-call) (setq sprig-review--streaming t))
+      ((or 'done 'error) (setq sprig-review--streaming nil))
+      ;; A dialog opening or settling flips the session's `waiting' status, so
+      ;; the navigator's `?' glyph appears and clears in step with it.
+      ((or 'dialog 'dialog-answer) (sprig--status-refresh))
+      (_ nil))
+    (cond
+     ;; Fast path: extend the live raw tail in place (never set while deferring).
+     ((and (eq (car event) 'text)
            sprig-review--tail (marker-position sprig-review--tail))
-      (sprig-review--append-streamed (cadr event))
-    (unless (eq (car event) 'text)
-      (setq sprig-review--tail nil))
-    (sprig-review--schedule)))
+      (sprig-review--append-streamed (cadr event)))
+     ;; Deferring live prose: a `text' delta is withheld until its paragraph
+     ;; ends, so redraw only when one lands, not once per delta.  The first
+     ;; `text' of a run redraws regardless, to open the block and say `working'.
+     ((and sprig-review-defer-live-prose (eq (car event) 'text))
+      (let ((landed (sprig-review--paragraph-landed-p (cadr event))))
+        (when (or (not was-streaming) landed)
+          (sprig-review--schedule))))
+     (t
+      (unless (eq (car event) 'text)
+        (setq sprig-review--tail nil sprig-review--stream-nl nil))
+      (sprig-review--schedule)))))
 
 (defun sprig-review-reset (&optional meta)
   "Drop this review buffer's accumulated events and render empty.
 With META, replace the header metadata plist."
   (sprig-review--cancel-timer)
   (setq sprig-review--events nil sprig-review--dirty nil
-        sprig-review--streaming nil)
+        sprig-review--streaming nil sprig-review--stream-nl nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
@@ -1760,7 +1911,7 @@ Use this to replay history before the live sink appends more, so a later
 history is settled, so it renders with no live tail."
   (sprig-review--cancel-timer)
   (setq sprig-review--events (reverse events) sprig-review--dirty nil
-        sprig-review--streaming nil)
+        sprig-review--streaming nil sprig-review--stream-nl nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 

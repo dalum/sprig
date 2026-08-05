@@ -891,7 +891,9 @@ the fold learns the id from the result rather than from the call."
                               (sprig-review-tests--permission-input))
                         (list 'dialog "req-1" "ask_user_question"
                               (sprig-review-tests--dialog-input))))
-    (with-temp-buffer
+    ;; A live tail below the dialog, so bind off the paragraph deferral.
+    (let ((sprig-review-defer-live-prose nil))
+     (with-temp-buffer
       (sprig-review-mode)
       (sprig-review-consume '(text "before"))
       (sprig-review-consume dialog)
@@ -910,7 +912,7 @@ the fold learns the id from the result rather than from the call."
         (dotimes (_ 6)
           (ignore-errors (magit-section-backward))
           (push (oref (magit-current-section) type) seen))
-        (should (memq 'sprig-headers seen))))))
+        (should (memq 'sprig-headers seen)))))))
 
 (ert-deftest sprig-review-mode-test-diffstat-is-coloured ()
   ;; The counts are what a folded edit tells you about its size.
@@ -1004,38 +1006,41 @@ the fold learns the id from the result rather than from the call."
 ;;;; Live sink
 
 (ert-deftest sprig-review-mode-test-consume-incremental ()
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(session "s1"))
-    (sprig-review-consume '(text "Hel"))
-    (sprig-review-consume '(text "lo"))
-    (sprig-review-flush)
-    ;; Text accumulates; no tool yet.
-    (should (string-match-p "Hello" (buffer-string)))
-    (should-not (string-match-p "^Edit  " (buffer-string)))
-    (let ((input (json-serialize (list :file_path "x" :old_string "a"
-                                       :new_string "b"))))
-      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
-      (sprig-review-consume '(tool-result "t1" nil "ok")))
-    (sprig-review-consume '(done 0.02 nil))
-    (sprig-review-flush)
-    (let ((s (buffer-string)))
-      (should (string-match-p "Hello" s))
-      (should (string-match-p "^Edit  " s))
-      ;; The tool folds by default, so neither its diff nor its result is drawn.
-      (should-not (string-match-p "↳ result" s))
-      (should-not (string-match-p "ok" s))
-      ;; Cost lands on the header, which the incremental tail draw keeps in
-      ;; place, so it lags here on purpose (see
-      ;; `sprig-review--header-signature'); a full render picks it up.
-      (should-not (string-match-p "\\$0\\.02" s)))))
+  ;; The incremental append with streamed text visible mid-stream: the raw
+  ;; fast path, so bind the paragraph deferral off.
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(session "s1"))
+      (sprig-review-consume '(text "Hel"))
+      (sprig-review-consume '(text "lo"))
+      (sprig-review-flush)
+      ;; Text accumulates; no tool yet.
+      (should (string-match-p "Hello" (buffer-string)))
+      (should-not (string-match-p "^Edit  " (buffer-string)))
+      (let ((input (json-serialize (list :file_path "x" :old_string "a"
+                                         :new_string "b"))))
+        (sprig-review-consume (list 'tool-call "t1" "Edit" input))
+        (sprig-review-consume '(tool-result "t1" nil "ok")))
+      (sprig-review-consume '(done 0.02 nil))
+      (sprig-review-flush)
+      (let ((s (buffer-string)))
+        (should (string-match-p "Hello" s))
+        (should (string-match-p "^Edit  " s))
+        ;; The tool folds by default, so neither its diff nor result is drawn.
+        (should-not (string-match-p "↳ result" s))
+        (should-not (string-match-p "ok" s))
+        ;; Cost lands on the header, which the incremental tail draw keeps in
+        ;; place, so it lags here on purpose (see
+        ;; `sprig-review--header-signature'); a full render picks it up.
+        (should-not (string-match-p "\\$0\\.02" s))))))
 
 (ert-deftest sprig-review-mode-test-incremental-keeps-prefix ()
   ;; A structural event that only appends redraws the tail, not the whole
   ;; buffer: the first block's section object survives across the flush.
   (with-temp-buffer
     (sprig-review-mode)
-    (sprig-review-consume '(text "first"))
+    (sprig-review-consume '(text "first\n\n"))   ; a whole paragraph, so it shows
     (sprig-review-flush)
     (goto-char (point-min))
     (should (re-search-forward "first" nil t))
@@ -1049,26 +1054,122 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "second" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-incremental-state-only ()
-  ;; A refresh that changes only the state line (no new block) must take the
-  ;; tail path and redraw just that line, not fall back to a full render: the
-  ;; first block's section object survives the flush.
+  ;; A refresh that changes only the state line (no block change, no settle)
+  ;; must take the tail path, not fall back to a full render: the block's
+  ;; section object survives the flush.
   (with-temp-buffer
     (sprig-review-mode)
-    (sprig-review-consume '(text "body"))
-    (sprig-review-consume '(text " more"))
+    (sprig-review-consume '(text "body\n\n"))   ; a whole paragraph, so it shows
     (sprig-review-flush)
     (should (string-match-p "working" (buffer-string)))
     (goto-char (point-min))
     (should (re-search-forward "body" nil t))
     (let ((before (magit-current-section)))
-      ;; `done' adds no block; it flips the state line streaming -> over.
-      (sprig-review-consume '(done 0.01 nil))
+      ;; A context update touches the state line only: no block, still working.
+      (sprig-review-consume '(context 1000))
       (sprig-review-flush)
       (goto-char (point-min))
       (should (re-search-forward "body" nil t))
       (should (eq (magit-current-section) before))
-      (should-not (string-match-p "working" (buffer-string)))
       (should (null sprig-review--incremental-reason)))))
+
+(ert-deftest sprig-review-mode-test-incremental-settle-redraws-last ()
+  ;; Deferring live prose, the last block shows only completed paragraphs while
+  ;; it streams and its whole text once settled.  The model is equal across the
+  ;; settling `done', so the splice must redraw the last block from the
+  ;; streaming-state change, or its withheld final paragraph never appears.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(user "go"))
+    (sprig-review-consume '(text "one\n\ntwo"))   ; para one shows, two withheld
+    (sprig-review-flush)
+    (should (string-match-p "one" (buffer-string)))
+    (should-not (string-match-p "two" (buffer-string)))
+    (goto-char (point-min))
+    (should (re-search-forward "go" nil t))
+    (let ((before (magit-current-section)))       ; the user block's section
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      (should (null sprig-review--incremental-reason))  ; still incremental
+      (should (string-match-p "two" (buffer-string)))   ; withheld tail now shows
+      (goto-char (point-min))
+      (should (re-search-forward "go" nil t))
+      (should (eq (magit-current-section) before)))))  ; earlier block untouched
+
+(ert-deftest sprig-review-mode-test-completed-prose ()
+  ;; Whole paragraphs are handed over; the paragraph still being typed, and an
+  ;; unclosed code fence, are withheld.
+  (should (null (sprig-review--completed-prose "")))
+  (should (null (sprig-review--completed-prose "still typing")))
+  (should (equal "done\n\n" (sprig-review--completed-prose "done\n\ntyping")))
+  (should (equal "one\n\ntwo\n\n"
+                 (sprig-review--completed-prose "one\n\ntwo\n\nthree")))
+  ;; A closed fence with a blank line after it is complete.
+  (should (equal "```\ncode\n```\n\n"
+                 (sprig-review--completed-prose "```\ncode\n```\n\nnext")))
+  ;; An open fence withholds from its opening line, keeping the prose above it.
+  (should (equal "intro\n\n"
+                 (sprig-review--completed-prose "intro\n\n```\ncode")))
+  ;; A blank line inside an open fence is not a paragraph break.
+  (should (null (sprig-review--completed-prose "```\na\n\nb"))))
+
+(ert-deftest sprig-review-mode-test-withheld-block-adds-no-blank ()
+  ;; A withheld live paragraph draws an empty section; it must not leave a
+  ;; doubled blank line between the tool rows around it, nor before the state
+  ;; line.  Two identical tool rows with a half-typed narration between them
+  ;; is the shape that showed the doubling.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'tool-call "t1" "Bash"
+                                (json-serialize (list :command "ls"))))
+    (sprig-review-consume '(tool-result "t1" nil "ok"))
+    ;; A half-typed narration (no blank line yet): withheld, so it shows
+    ;; nothing and is the live last block.
+    (sprig-review-consume '(text "still typing"))
+    (sprig-review-flush)
+    (should-not (string-match-p "still typing" (buffer-string)))
+    ;; No run of three or more newlines anywhere: at most one blank line.
+    (should-not (string-match-p "\n\n\n" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-defer-withholds-partial-paragraph ()
+  ;; A half-typed paragraph is not shown, and a delta that does not end one
+  ;; schedules no redraw (so mid-paragraph tokens cost nothing).
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "half a "))   ; first text: opens, schedules
+    (sprig-review-flush)
+    (should-not (string-match-p "half a" (buffer-string)))
+    (sprig-review--cancel-timer)
+    (setq sprig-review--dirty nil)
+    ;; A further mid-paragraph delta is withheld and schedules nothing.
+    (sprig-review-consume '(text "sentence"))
+    (should-not sprig-review--dirty)
+    (should (null sprig-review--timer))))
+
+(ert-deftest sprig-review-mode-test-defer-fontifies-completed-paragraph ()
+  ;; Deferring live prose, a completed paragraph is fontified synchronously
+  ;; though the async worker is on, so it never flashes raw; the still-typing
+  ;; paragraph after it is withheld.
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review-fontify-async t)
+        (sprig-review-defer-live-prose t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset)
+        (sprig-review--fontify-queue nil)
+        (sprig-review--fontify-queued (make-hash-table :test 'equal))
+        (sprig-review--fontify-buffers nil)
+        (sprig-review--fontify-timer nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "**bold** here\n\nstill typing"))
+      (sprig-review-flush)
+      ;; Fontified now, not queued for the idle worker.
+      (should (null sprig-review--fontify-queue))
+      (should (> (hash-table-count sprig-review--fontify-cache) 0))
+      (goto-char (point-min))
+      (should (re-search-forward "bold" nil t))
+      (should-not (string-match-p "still typing" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-incremental-multi-section-block ()
   ;; A dialog with two questions draws two top-level sections but is one
@@ -1090,7 +1191,7 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "Second?" (buffer-string)))
       ;; A later block appends; the multi-section dialog stays put in the
       ;; prefix and the tail path handles it.
-      (sprig-review-consume '(text "afterwards"))
+      (sprig-review-consume '(text "afterwards\n\n"))   ; whole para, shows
       (sprig-review-flush)
       (should (null sprig-review--incremental-reason))
       (let ((s (buffer-string)))
@@ -1252,7 +1353,7 @@ the fold learns the id from the result rather than from the call."
 (ert-deftest sprig-review-mode-test-reset ()
   (with-temp-buffer
     (sprig-review-mode)
-    (sprig-review-consume '(text "gone"))
+    (sprig-review-consume '(text "gone\n\n"))   ; a whole paragraph, so it shows
     (sprig-review-flush)
     (should (string-match-p "gone" (buffer-string)))
     ;; reset renders synchronously, no flush needed.
@@ -1261,59 +1362,65 @@ the fold learns the id from the result rather than from the call."
     (should (string-match-p "Fresh" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-consume-debounces ()
-  (with-temp-buffer
-    (sprig-review-mode)
-    ;; The first text of a run defers (no tail yet) until a flush.
-    (sprig-review-consume '(text "a"))
-    (sprig-review-consume '(text "b"))
-    (should-not (string-match-p "ab" (buffer-string)))
-    (sprig-review-flush)
-    (should (string-match-p "ab" (buffer-string)))))
+  ;; The raw fast-append path (deferring live prose off): the first text of a
+  ;; run holds until a flush, then appends in place.
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      ;; The first text of a run defers (no tail yet) until a flush.
+      (sprig-review-consume '(text "a"))
+      (sprig-review-consume '(text "b"))
+      (should-not (string-match-p "ab" (buffer-string)))
+      (sprig-review-flush)
+      (should (string-match-p "ab" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-text-fast-path ()
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "Hel"))
-    (sprig-review-flush)                 ; establishes the tail
-    (should (string-match-p "Hel" (buffer-string)))
-    ;; A further delta now appends in place, with no flush and no timer.
-    (should (null sprig-review--timer))
-    (sprig-review-consume '(text "lo"))
-    (should (null sprig-review--timer))
-    (should (string-match-p "Hello" (buffer-string)))
-    ;; A structural event rebuilds from the model to the same text.
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
-    (should (string-match-p "Hello" (buffer-string)))))
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "Hel"))
+      (sprig-review-flush)                 ; establishes the tail
+      (should (string-match-p "Hel" (buffer-string)))
+      ;; A further delta now appends in place, with no flush and no timer.
+      (should (null sprig-review--timer))
+      (sprig-review-consume '(text "lo"))
+      (should (null sprig-review--timer))
+      (should (string-match-p "Hello" (buffer-string)))
+      ;; A structural event rebuilds from the model to the same text.
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      (should (string-match-p "Hello" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-text-fast-path-newlines ()
   ;; The in-place append and a full rebuild must agree across a newline
   ;; boundary in the streamed text.
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "line1\n"))
-    (sprig-review-flush)
-    (sprig-review-consume '(text "line2"))   ; fast append after a newline
-    (should (string-match-p "line1\nline2" (buffer-string)))
-    ;; Force a rebuild from the model; it must contain the same.
-    (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
-    (sprig-review-flush)
-    (should (string-match-p "line1\nline2" (buffer-string)))))
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "line1\n"))
+      (sprig-review-flush)
+      (sprig-review-consume '(text "line2"))   ; fast append after a newline
+      (should (string-match-p "line1\nline2" (buffer-string)))
+      ;; Force a rebuild from the model; it must contain the same.
+      (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
+      (sprig-review-flush)
+      (should (string-match-p "line1\nline2" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-off-screen-flush-defers ()
   ;; The coalesced timer path skips the O(conversation) redraw for a buffer
   ;; shown in no window (a temp buffer never is), leaving it dirty; an explicit
   ;; flush, and being shown, still draw it.
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "hi"))            ; first text: defers, dirty
-    (should sprig-review--dirty)
-    (sprig-review--flush-if-shown (current-buffer)) ; no window: draw nothing
-    (should sprig-review--dirty)
-    (should-not (string-match-p "hi" (buffer-string)))
-    (sprig-review-flush)                            ; explicit: draws it
-    (should-not sprig-review--dirty)
-    (should (string-match-p "hi" (buffer-string)))))
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "hi"))            ; first text: defers, dirty
+      (should sprig-review--dirty)
+      (sprig-review--flush-if-shown (current-buffer)) ; no window: draw nothing
+      (should sprig-review--dirty)
+      (should-not (string-match-p "hi" (buffer-string)))
+      (sprig-review-flush)                            ; explicit: draws it
+      (should-not sprig-review--dirty)
+      (should (string-match-p "hi" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-replayed-text-is-not-a-live-tail ()
   ;; A stored session log carries no `done' event, so the last text block must
@@ -1327,19 +1434,20 @@ the fold learns the id from the result rather than from the call."
     (should (string-match-p "the answer" (buffer-string)))))
 
 (ert-deftest sprig-review-mode-test-tail-follows-streaming ()
-  (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "partial"))
-    (sprig-review-flush)
-    ;; Mid-turn: the block is live, so it takes appends in place.
-    (should sprig-review--streaming)
-    (should sprig-review--tail)
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
-    ;; The turn settled, so the block re-renders as prose, with no tail.
-    (should-not sprig-review--streaming)
-    (should-not sprig-review--tail)
-    (should (string-match-p "partial" (buffer-string)))))
+  (let ((sprig-review-defer-live-prose nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "partial"))
+      (sprig-review-flush)
+      ;; Mid-turn: the block is live, so it takes appends in place.
+      (should sprig-review--streaming)
+      (should sprig-review--tail)
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      ;; The turn settled, so the block re-renders as prose, with no tail.
+      (should-not sprig-review--streaming)
+      (should-not sprig-review--tail)
+      (should (string-match-p "partial" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
   (let ((model (sprig-review-build
