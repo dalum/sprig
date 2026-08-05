@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.15.0
+;; Version: 0.16.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -370,26 +370,34 @@ shell's home expansion, so quote only the part after any `~' prefix."
                 (if (string-empty-p rest) "" (shell-quote-argument rest))))
     (shell-quote-argument dir)))
 
+(defun sprig--wrap-command (args dir remote-host)
+  "Wrap ARGS (a `claude' argv, program first) for a local or REMOTE-HOST run.
+Locally ARGS is returned as is; the working directory is set by the caller
+binding `default-directory'.  For a remote host the argv is shell-quoted and
+prefixed with an optional `env CLAUDE_CONFIG_DIR=' and a `cd DIR && exec',
+then handed to SSH.  Shared by the session command and the side-question
+one-shot, so both reach a remote box the same way."
+  (if remote-host
+      (let ((remote (mapconcat #'shell-quote-argument args " ")))
+        (when sprig-config-directory
+          (setq remote (concat "env CLAUDE_CONFIG_DIR="
+                               (sprig--remote-dir-arg sprig-config-directory)
+                               " " remote)))
+        (when dir
+          (setq remote (concat "cd " (sprig--remote-dir-arg dir)
+                               " && exec " remote)))
+        (append (list sprig-ssh-program)
+                sprig-ssh-args
+                (list remote-host remote)))
+    args))
+
 (defun sprig--command ()
   "Full command vector for `make-process', local or via SSH.
 A local session's working directory is set by `sprig--spawn' binding
 `default-directory'; a remote session's is set here by prefixing a `cd'."
-  (let ((args (cons sprig-program (sprig--base-args)))
-        (dir (sprig--directory))
-        (remote-host (sprig--remote)))
-    (if remote-host
-        (let ((remote (mapconcat #'shell-quote-argument args " ")))
-          (when sprig-config-directory
-            (setq remote (concat "env CLAUDE_CONFIG_DIR="
-                                 (sprig--remote-dir-arg sprig-config-directory)
-                                 " " remote)))
-          (when dir
-            (setq remote (concat "cd " (sprig--remote-dir-arg dir)
-                                 " && exec " remote)))
-          (append (list sprig-ssh-program)
-                  sprig-ssh-args
-                  (list remote-host remote)))
-      args)))
+  (sprig--wrap-command (cons sprig-program (sprig--base-args))
+                       (sprig--directory)
+                       (sprig--remote)))
 
 ;;;; Transport and sink
 ;;
@@ -1060,6 +1068,7 @@ is visible without opening the header."
 (declare-function sprig-review-message-plan "sprig-review-mode" ())
 (declare-function sprig-review-retry "sprig-review-mode" ())
 (declare-function sprig-review-compact "sprig-review-mode" ())
+(declare-function sprig-review-btw "sprig-review-mode" (question))
 (declare-function sprig-review-answer "sprig-review-mode" ())
 (declare-function sprig-review-answer-recommended "sprig-review-mode" ())
 (declare-function sprig-review-answer-skip "sprig-review-mode" ())
@@ -1179,6 +1188,170 @@ model via `sprig-review-consume'."
   ;; read as though it had been sent into the turn it queued behind.
   (when (eq (car-safe event) 'done)
     (sprig--flush-queue)))
+
+;;;; Side questions ("by the way")
+;;
+;; A side question is a throwaway one-shot: `claude -p ... --resume ID
+;; --fork-session --no-session-persistence'.  It forks the session so it sees
+;; the whole conversation, but persistence is off, so it writes no log and
+;; never touches the parent (the CLI's own `/btw', reproduced from outside the
+;; interactive app).  It runs in its own process, so it neither opens a turn
+;; nor waits on one: it streams its answer into `*sprig-btw*' while the real
+;; session carries on untouched.  The one thing a `--resume' fork cannot see is
+;; the turn still streaming (the log is not written until the turn ends), so
+;; when one is in flight its live text is added to the question by the caller.
+
+(defvar sprig--btw-process nil
+  "The running side-question process, or nil.
+One at a time, so a second `c b' does not interleave its answer with the
+first in the shared `*sprig-btw*' buffer.")
+
+(define-derived-mode sprig-btw-mode special-mode "sprig-btw"
+  "Major mode for the `*sprig-btw*' side-question buffer.")
+
+(defun sprig--btw-args (id)
+  "The `claude' argument list for a side question against session ID.
+Resumes ID and forks with persistence off: the side turn sees the
+conversation but writes no log and leaves the parent untouched.  Unlike a
+real session it routes no permission prompts to us (there is no review
+buffer to answer them in), so a tool needing approval simply auto-denies
+and the turn answers from what it has."
+  (append
+   (list "-p"
+         "--input-format" "stream-json"
+         "--output-format" "stream-json"
+         "--include-partial-messages"
+         "--verbose"
+         "--resume" id
+         "--fork-session"
+         "--no-session-persistence")
+   (when sprig-model (list "--model" sprig-model))
+   (when sprig-system-prompt
+     (list "--append-system-prompt" sprig-system-prompt))
+   sprig-extra-args))
+
+(defun sprig--btw-command (id dir remote-host)
+  "Full command for a side question against session ID, in DIR on REMOTE-HOST.
+A `--resume' is scoped to the cwd's project, so the one-shot must run in the
+session's own DIR, exactly as its session process does."
+  (sprig--wrap-command (cons sprig-program (sprig--btw-args id))
+                       dir remote-host))
+
+(defun sprig--btw-compose (question context tail)
+  "Assemble the side-question message from QUESTION, marked CONTEXT and TAIL.
+TAIL is the in-flight turn's note (or nil), CONTEXT the marked sections (or
+nil).  The instruction keeps it a question: a side turn should answer, not
+edit."
+  (string-join
+   (delq nil
+         (list tail
+               (when context
+                 (format "Regarding these marked sections:\n\n%s" context))
+               (format "Side question (just answer briefly; do not edit any \
+files): %s" question)))
+   "\n\n"))
+
+(defun sprig--btw-consume (event)
+  "Sink for the `*sprig-btw*' buffer: stream a side question's answer in.
+Runs in that buffer (see `sprig--handle'), appending assistant text as it
+arrives and closing the entry when the turn ends."
+  (let ((inhibit-read-only t))
+    (pcase event
+      (`(text ,s)
+       (goto-char (point-max))
+       (insert s)
+       (dolist (win (get-buffer-window-list (current-buffer) nil t))
+         (set-window-point win (point-max))))
+      (`(done ,_ ,err)
+       (goto-char (point-max))
+       (insert (if err "\n\n[the side question failed]\n" "\n")))
+      (`(error ,m)
+       (goto-char (point-max))
+       (insert (format "\n\n[error] %s\n" m)))
+      (_ nil))))
+
+(defun sprig--btw-display (question)
+  "Show `*sprig-btw*' with a fresh QUESTION heading, returning the buffer.
+Repeat questions append under their own heading, echoing the CLI's own
+running `/btw' side panel."
+  (let ((buf (get-buffer-create "*sprig-btw*")))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'sprig-btw-mode) (sprig-btw-mode))
+      (setq-local sprig--sink #'sprig--btw-consume)
+      (let ((inhibit-read-only t))
+        (goto-char (point-max))
+        (unless (bobp) (insert "\n\n"))
+        (insert (propertize (format "btw: %s" question) 'face '(:inherit bold))
+                "\n\n")))
+    ;; Reuse an existing window the way `sprig-status' does, rather than
+    ;; carving out a dedicated side window of its own.
+    (pop-to-buffer buf)
+    buf))
+
+(defun sprig--btw-sentinel (proc _event)
+  "Clear the side-question process and its stderr when PROC ends."
+  (when (memq (process-status proc) '(exit signal))
+    (when (eq proc sprig--btw-process) (setq sprig--btw-process nil))
+    (let ((stderr (process-get proc :stderr-proc)))
+      (when (process-live-p stderr) (delete-process stderr)))))
+
+(defun sprig--btw-spawn (command dir remote-host buffer)
+  "Start a side-question process running COMMAND, streaming into BUFFER.
+DIR/REMOTE-HOST mirror the session; a local cwd and CLAUDE_CONFIG_DIR are
+bound here the way `sprig--spawn' does.  BUFFER is the `*sprig-btw*' sink;
+the reused transport filter dispatches to its buffer-local `sprig--sink'."
+  (let* ((default-directory
+          (if (and dir (not remote-host))
+              (file-name-as-directory (expand-file-name dir))
+            default-directory))
+         (process-environment
+          (if (and sprig-config-directory (not remote-host))
+              (cons (concat "CLAUDE_CONFIG_DIR="
+                            (expand-file-name sprig-config-directory))
+                    process-environment)
+            process-environment))
+         (stderr (sprig--make-stderr))
+         (proc (make-process
+                :name "sprig-btw"
+                :buffer nil
+                :command command
+                :connection-type 'pipe
+                :coding 'utf-8-unix
+                :noquery t
+                :stderr stderr
+                :filter #'sprig--filter
+                :sentinel #'sprig--btw-sentinel)))
+    (process-put proc :conv-buffer buffer)
+    (process-put proc :stderr-proc stderr)
+    proc))
+
+(defun sprig--btw-send (proc text)
+  "Write TEXT to PROC as the one user message, then close its stdin.
+The one-shot processes the message and exits on EOF, which is what makes it
+a single side turn rather than a live session."
+  (process-send-string
+   proc
+   (concat (json-serialize
+            `(:type "user"
+              :message (:role "user"
+                        :content [(:type "text" :text ,text)])))
+           "\n"))
+  (process-send-eof proc))
+
+(defun sprig--btw-ask (id dir remote-host question context tail)
+  "Fire a side QUESTION against session ID in DIR on REMOTE-HOST.
+CONTEXT is any marked-section text, TAIL the in-flight turn note; both may
+be nil.  Streams the answer into `*sprig-btw*'.  The one-at-a-time guard is
+`sprig--btw-process'."
+  (when (process-live-p sprig--btw-process)
+    (user-error "A side question is already running; wait for it to finish"))
+  (let* ((text (sprig--btw-compose question context tail))
+         (command (sprig--btw-command id dir remote-host))
+         (buffer (sprig--btw-display question)))
+    (setq sprig--btw-process (sprig--btw-spawn command dir remote-host buffer))
+    (sprig--btw-send sprig--btw-process text)
+    (message "sprig: side question sent (%s)"
+             (if remote-host "remote" "local"))))
 
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
@@ -2944,6 +3117,8 @@ command's docstring."
   "Resend the last turn of the row's session (`c r').")
 (sprig--status-define-steer sprig-status-compact sprig-review-compact
   "Compact the context of the row's session (`c z').")
+(sprig--status-define-steer sprig-status-btw sprig-review-btw
+  "Ask a side question about the row's session, disturbing nothing (`c b').")
 (sprig--status-define-steer sprig-status-answer sprig-review-answer
   "Answer the row's session's waiting question, one at a time (`a a').")
 (sprig--status-define-steer sprig-status-answer-recommended
@@ -3137,7 +3312,8 @@ not here: they act on a diff section, which the navigator has none of."
     ("p" "compose in plan mode" sprig-status-message-plan)
     ("r" "resend last turn" sprig-status-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)
-    ("z" "compact context" sprig-status-compact)]
+    ("z" "compact context" sprig-status-compact)
+    ("b" "by the way: side question (writes no log)" sprig-status-btw)]
    ["Session"
     ("o" "open & connect" sprig-status-connect)
     ("d" "disconnect" sprig-status-disconnect)]])

@@ -113,7 +113,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `RET` / `o` | Open the session's review buffer (replaying its log), on the host it ran on; on a note row, open the notes file at that note |
 | `s` | Start a session: `s n` a fresh conversation on the group point is in (`C-u s n` forces it local; a session row seeds the directory), `s c` the same but straight into a prompt for its first message, `s p` the same in plan mode, `s f` fork the session at point into one of its own |
 | `TAB` | On a session row, toggle an inline preview of its last exchange (your prompt and the agent's reply); on a host heading, fold or unfold that group |
-| `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
+| `c` | Steer the session at point, the review buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c p` plan mode, `c r` resend, `c i` interrupt, `c z` compact, `c b` a side question (writes no log), `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `P` | Set the permission mode of the session at point (open and live), the review buffer's `P` without leaving the list: `P p` plan, `P a` auto, `P e` accept edits, `P m` manual, `P b` bypass |
 | `d` | Remove the session at point: `d d` disconnect (its log is kept), `d D` delete permanently, log and all (asks first; no undo) |
@@ -157,7 +157,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute). Steers, so it lands in a turn already running |
 | `C` | Commit: ask the agent to commit the current changes |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
-| `c` | Transient, listing every verb: `c c` compose & send (steering a running turn), `c q` compose & queue for after this turn, `c Q` drop the queued messages, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt (anything queued then goes), `c z` compact the context (`C-u c z` steers the summary), and `c k` / `c C` / `c x` for reject / commit / run |
+| `c` | Transient, listing every verb: `c c` compose & send (steering a running turn), `c q` compose & queue for after this turn, `c Q` drop the queued messages, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c r` resend last turn, `c i` interrupt (anything queued then goes), `c z` compact the context (`C-u c z` steers the summary), `c b` a side question that leaves the turn and the log alone (see [Side questions](#side-questions)), and `c k` / `c C` / `c x` for reject / commit / run |
 | `s` | Transient for starting a session of its own: `s n` new conversation, `s c` new then straight into a first-message prompt, `s p` the same in plan mode, `s f` fork this one |
 | `P` | Transient for the permission mode (the CLI's own modes, as the shift-tab cycle names them): `P p` plan (agent plans, makes no edits), `P a` auto (normal: allowed tools run, rest prompt), `P e` accept edits (auto-approve edits), `P m` manual (prompt for every call), `P b` bypass (auto-approve everything, incl. shell) |
 | `+` | Jot a personal note (`+ +`), the same reminders list the navigator manages; captured here it needs no session and ties to none |
@@ -187,6 +187,14 @@ The choice rides back to the agent and the question settles in place, showing wh
 **A plan** (`ExitPlanMode`) comes the same way, and renders in full, fontified: `a a` approves or rejects it (a rejection reads the feedback the agent plans again against), `a r` approves. Approving used to be a `y-or-n-p` naming the plan's first line, over a buffer that rendered the plan nowhere at all.
 
 **A tool wanting permission** comes the same way too, showing what it wants to run: `a a` allows or denies it, `a s` denies. `a r` refuses to touch it, one keypress allowing an unread call being the wrong thing to make easy. Set `sprig-permission-function` to `always` to skip the asking, or to `sprig-permission-prompt` for the old minibuffer prompt, which blocks. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
+
+### Side questions
+
+`c b` asks a quick side question about the session without disturbing it, the way Claude Code's own `/btw` does. It opens a compose buffer the way `c c` does (`C-c C-c` asks it, `C-c C-k` cancels); asking fires a throwaway one-shot that **forks the session** (so the question sees the whole conversation), streams the answer into a `*sprig-btw*` buffer, and vanishes. It is a separate process, so it neither opens a turn nor waits on one: you can ask while a turn is streaming, and the real session carries on untouched. It also works from the navigator (`c b` on the row at point), so you can ask about a session without opening it.
+
+**It writes no log.** The fork runs with the CLI's `--no-session-persistence`, so nothing is saved to disk and no stray row appears in the navigator; the parent session's own log is never touched either. Any sections you marked ride along as context, exactly as `c c` attaches them.
+
+The one honest limit is mid-turn. A `--resume` fork sees the conversation only up to the last saved turn, because the CLI does not flush the in-flight turn to the log until it ends. So when a turn is streaming, Sprig adds that turn's live text to the question itself, from its own model, which is what lets a mid-turn side question see what the agent is doing now. The settled history keeps its real turn structure; only the in-flight tail is added as text rather than as its own turns. One side question runs at a time.
 
 ## Options
 
@@ -234,7 +242,7 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 
 ## Status / caveats
 
-- v0.12.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
+- v0.16.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
 - The host is per-session: `sprig-remote` is the default for a session started outside the navigator, and inside it the group point is in decides. The navigator lists both hosts, so a local session no longer drops off the list once its review buffer is closed. Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another, which is why opening a row pins its buffer to the host the row came from. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt is graceful: `c i` asks the CLI to end the turn cleanly (an `interrupt` control request) and keeps the session live, so the next send continues it with no resume. If the CLI refuses the request (an error receipt) or does not honour it within `sprig-interrupt-timeout` seconds, Sprig falls back to killing the process, and the session resumes on the next send.

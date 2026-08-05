@@ -773,6 +773,67 @@ agent's own work."
 claude"
                  payload))))))
 
+(ert-deftest sprig-test-btw-args ()
+  ;; A side question resumes and forks the session so it sees the whole
+  ;; conversation, but turns persistence off, so it writes no log and leaves
+  ;; the parent untouched.  It carries the model, but routes no permission
+  ;; prompts to us (there is no review buffer to answer them in).
+  (let ((sprig-model "claude-x") (sprig-system-prompt "be brief")
+        (sprig-extra-args '("--foo")))
+    (let ((args (sprig--btw-args "sess-1")))
+      (should (member "--resume" args))
+      (should (member "sess-1" args))
+      (should (member "--fork-session" args))
+      (should (member "--no-session-persistence" args))
+      (should (member "--model" args))
+      (should (member "claude-x" args))
+      (should (member "--append-system-prompt" args))
+      (should (member "--foo" args))
+      ;; No stdio permission routing: the one-shot must never block on a
+      ;; control request we are not there to answer.
+      (should-not (member "--permission-prompt-tool" args))
+      (should (member "stream-json" args))))
+  ;; Nothing optional set: still forks with persistence off.
+  (let ((sprig-model nil) (sprig-system-prompt nil) (sprig-extra-args nil))
+    (let ((args (sprig--btw-args "sess-2")))
+      (should (member "--no-session-persistence" args))
+      (should-not (member "--model" args)))))
+
+(ert-deftest sprig-test-btw-command-local ()
+  (let ((sprig-program "claude") (sprig-model nil) (sprig-system-prompt nil)
+        (sprig-extra-args nil))
+    (let ((cmd (sprig--btw-command "sess-1" nil nil)))
+      (should (equal (car cmd) "claude"))
+      (should (member "--no-session-persistence" cmd))
+      (should (member "sess-1" cmd)))))
+
+(ert-deftest sprig-test-btw-command-remote ()
+  ;; A `--resume' is scoped to the cwd's project, so the one-shot cds into the
+  ;; session's own dir on the remote host before it execs, exactly as the
+  ;; session command does.
+  (let ((sprig-program "claude") (sprig-ssh-program "ssh")
+        (sprig-ssh-args '("-T" "-A")) (sprig-model nil)
+        (sprig-system-prompt nil) (sprig-extra-args nil)
+        (sprig-config-directory nil))
+    (let ((cmd (sprig--btw-command "sess-1" "~/proj" "me@host")))
+      (should (equal (car cmd) "ssh"))
+      (should (member "me@host" cmd))
+      (let ((payload (car (last cmd))))
+        (should (string-prefix-p "cd ~/proj && exec claude" payload))
+        (should (string-match-p "--no-session-persistence" payload))))))
+
+(ert-deftest sprig-test-btw-compose ()
+  ;; The message leads with the in-flight-turn note (when a turn is live),
+  ;; then the marked context, then the question framed as a question.
+  (let ((msg (sprig--btw-compose "why?" "the diff" "agent is mid-turn")))
+    (should (string-prefix-p "agent is mid-turn" msg))
+    (should (string-match-p "Regarding these marked sections:\n\nthe diff" msg))
+    (should (string-match-p "Side question.*why\\?" msg)))
+  ;; No context and no live turn: just the framed question.
+  (let ((msg (sprig--btw-compose "why?" nil nil)))
+    (should (string-match-p "Side question.*why\\?" msg))
+    (should-not (string-match-p "Regarding" msg))))
+
 (ert-deftest sprig-test-projects-directory ()
   ;; nil config dir falls back to the CLI default; a set one uses its
   ;; `projects/' subdir, keeping a leading tilde for the session host.

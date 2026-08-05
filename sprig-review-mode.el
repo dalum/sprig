@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.15.0
+;; Version: 0.16.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -64,6 +64,7 @@
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
 (defvar sprig--permission-mode)
+(defvar sprig--btw-process)
 
 ;;;; Faces
 
@@ -1927,6 +1928,10 @@ On a diff hunk, best-effort move point to the first changed line."
   "Non-nil when the composed message waits for the in-flight turn to end.
 Nil is the ordinary `c c', which speaks now: it steers a running turn, and
 sends outright when none is running.")
+(defvar-local sprig-review--compose-btw nil
+  "Non-nil when the composed text is a side question (`c b'), not a message.
+Sent as a throwaway one-shot that leaves the turn and the log alone, rather
+than as a turn in the conversation.")
 
 (defvar sprig-review-compose-mode-map
   (let ((map (make-sparse-keymap)))
@@ -1973,7 +1978,8 @@ hold it until the running turn ends (`c q')."
       (setq sprig-review--compose-target review
             sprig-review--compose-context context
             sprig-review--compose-mode (and plan "plan")
-            sprig-review--compose-queue queue))
+            sprig-review--compose-queue queue
+            sprig-review--compose-btw nil))
     (pop-to-buffer buf)
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
@@ -2005,6 +2011,56 @@ purpose (see `sprig--review-drop-queue')."
   (interactive)
   (sprig--review-drop-queue))
 
+(declare-function sprig--btw-ask "sprig"
+                  (id dir remote-host question context tail))
+(declare-function sprig--events-preview "sprig" (events))
+(declare-function sprig--directory "sprig" ())
+(declare-function sprig--remote "sprig" ())
+
+(defun sprig-review--btw-tail ()
+  "Return a note about the in-flight turn for a side question, or nil.
+A `--resume' fork sees the conversation only up to the last saved turn, so
+when a turn is still streaming its text is added here from the live model.
+This is what lets a side question asked mid-turn see what the agent is doing
+now, the way the CLI's in-process `/btw' does."
+  (when (and sprig-review--streaming sprig-review--events)
+    (let* ((preview (sprig--events-preview (reverse sprig-review--events)))
+           (reply (and preview (plist-get preview :reply))))
+      (if (and reply (not (string-empty-p (string-trim reply))))
+          (format "The agent is mid-turn right now, and this is not yet in the \
+saved transcript.  Its latest output so far is:\n\n%s" reply)
+        "The agent is mid-turn right now (nothing not yet saved has any prose \
+to show)."))))
+
+(defun sprig-review-btw ()
+  "Compose a side question about this session, disturbing nothing (`c b').
+Opens a compose buffer the way `c c' does; `C-c C-c' asks it.  A throwaway
+one-shot then forks the session (so the question sees the whole
+conversation), answers into `*sprig-btw*', and vanishes without writing a
+log or touching the running turn.  Any marked sections ride along as
+context, and a turn in flight adds its live text, so a mid-turn question
+sees what the agent is doing now.  It is the review buffer's stand-in for
+the CLI's own `/btw'."
+  (interactive)
+  (unless sprig--session-id
+    (user-error "No session yet to ask about; send a message first"))
+  (let ((review (current-buffer))
+        (context (sprig-review--marked-context))
+        (buf (get-buffer-create "*sprig-message*")))
+    (with-current-buffer buf
+      (sprig-review-compose-mode)
+      (erase-buffer)
+      (setq sprig-review--compose-target review
+            sprig-review--compose-context context
+            sprig-review--compose-mode nil
+            sprig-review--compose-queue nil
+            sprig-review--compose-btw t))
+    (pop-to-buffer buf)
+    (message "%sby the way: C-c C-c to ask, C-c C-k to cancel"
+             (if context (format "%d section(s) attached.  "
+                                 (length (sprig-review--marked-sections)))
+               ""))))
+
 (defun sprig-review-compose-send ()
   "Send the composed message (with any attached context) to the conversation."
   (interactive)
@@ -2013,21 +2069,39 @@ purpose (see `sprig--review-drop-queue')."
          (review sprig-review--compose-target)
          (context sprig-review--compose-context)
          (mode sprig-review--compose-mode)
-         (queue sprig-review--compose-queue))
+         (queue sprig-review--compose-queue)
+         (btw sprig-review--compose-btw))
     (when (string-empty-p text) (user-error "Empty message"))
     (unless (buffer-live-p review) (user-error "The review buffer is gone"))
-    (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
-                     text)))
-      ;; Send before quitting, never after: `quit-window' kills this buffer,
-      ;; so a send that signals (a plan turn refused because one is already in
-      ;; flight) would take the composed prose down with it, leaving an error
-      ;; where the message used to be.  Signal first and the buffer survives,
-      ;; still holding the text, to send again or save.
-      (with-current-buffer review
-        (cond (queue (sprig-review--queue message))
-              (mode (sprig-review--send message mode))
-              (t (sprig-review--steer message)))))
-    (quit-window t)))
+    (if btw
+        ;; A side question is its own throwaway process, so it never folds
+        ;; into a turn: the whole composed text is the question, marked
+        ;; sections ride as context, and a turn in flight adds its live tail.
+        ;; The one-at-a-time guard is checked here, before `quit-window' kills
+        ;; this buffer, so a refusal leaves the text to try again.
+        (let (id dir remote tail)
+          (when (process-live-p sprig--btw-process)
+            (user-error
+             "A side question is already running; wait for it to finish"))
+          (with-current-buffer review
+            (setq id sprig--session-id
+                  dir (sprig--directory)
+                  remote (sprig--remote)
+                  tail (sprig-review--btw-tail)))
+          (quit-window t)
+          (sprig--btw-ask id dir remote text context tail))
+      (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
+                       text)))
+        ;; Send before quitting, never after: `quit-window' kills this buffer,
+        ;; so a send that signals (a plan turn refused because one is already in
+        ;; flight) would take the composed prose down with it, leaving an error
+        ;; where the message used to be.  Signal first and the buffer survives,
+        ;; still holding the text, to send again or save.
+        (with-current-buffer review
+          (cond (queue (sprig-review--queue message))
+                (mode (sprig-review--send message mode))
+                (t (sprig-review--steer message))))
+        (quit-window t)))))
 
 (defun sprig-review-compose-abort ()
   "Cancel the message compose."
@@ -2330,7 +2404,8 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("p" "compose in plan mode" sprig-review-message-plan)
     ("r" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-review-interrupt)
-    ("z" "compact context" sprig-review-compact)]
+    ("z" "compact context" sprig-review-compact)
+    ("b" "by the way: side question (writes no log)" sprig-review-btw)]
    ["Changes (agent instructions)"
     ("k" "reject / undo" sprig-review-reject)
     ("C" "commit" sprig-review-commit)
