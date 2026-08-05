@@ -1112,6 +1112,56 @@ the fold learns the id from the result rather than from the call."
       (sprig-review-flush)
       (should (string-match-p "\\$0\\.02" (buffer-string))))))
 
+(ert-deftest sprig-review-mode-test-async-fontify-repaints-settled-block ()
+  ;; Regression: the idle fontifier caches a settled prose block's faces
+  ;; without changing the model, so the `equal' block diff keeps the block in
+  ;; the untouched prefix and the tail redraw alone would leave it raw.  The
+  ;; drain names the freshly-cached block (`sprig-review--fontify-fresh'),
+  ;; which pulls the redraw boundary back to it so it gains its faces on the
+  ;; incremental path.  Before the fix the block stayed literal until a manual
+  ;; full refresh (`g').
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review-fontify-async t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset)
+        (sprig-review--fontify-queue nil)
+        (sprig-review--fontify-queued (make-hash-table :test 'equal))
+        (sprig-review--fontify-buffers nil)
+        (sprig-review--fontify-timer nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      ;; A folded tool row first, so the settled prose sits at block index 1:
+      ;; the redraw can keep the tool in the prefix and splice from the prose.
+      ;; An index-0 prose block would fall to a full render, which repaints
+      ;; too but does not exercise this path.
+      (let ((input (json-serialize (list :file_path "x" :old_string "a"
+                                         :new_string "b"))))
+        (sprig-review-consume (list 'tool-call "t1" "Edit" input))
+        (sprig-review-consume '(tool-result "t1" nil "ok")))
+      (sprig-review-consume '(text "**bold** here"))
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      ;; Drawn raw (async, uncached) and queued for the idle worker.
+      (should (member "**bold** here\n" sprig-review--fontify-queue))
+      (let ((before (buffer-substring (point-min) (point-max))))
+        ;; Stand in for the idle drain: cache the block and name it fresh, as
+        ;; the drain does before repainting the buffer it settled in.
+        (puthash "**bold** here\n"
+                 (sprig-review--fontify-uncached "**bold** here\n")
+                 sprig-review--fontify-cache)
+        (let ((fresh (make-hash-table :test 'equal)))
+          (puthash "**bold** here\n" t fresh)
+          (setq sprig-review--fontify-fresh fresh))
+        (sprig-review--refresh)
+        ;; The tail path kept the prefix tool and redrew the prose; the faces
+        ;; landed, so the propertised text changed though no event arrived.
+        (should (null sprig-review--incremental-reason))
+        (should-not (equal-including-properties
+                     before (buffer-substring (point-min) (point-max))))
+        ;; The carrier is spent, so a later ordinary refresh does not re-splice.
+        (should (null sprig-review--fontify-fresh))))))
+
 (ert-deftest sprig-review-mode-test-consume-preserves-point ()
   (with-temp-buffer
     (sprig-review-mode)

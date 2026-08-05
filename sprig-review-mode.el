@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.18.0
+;; Version: 0.18.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -774,6 +774,14 @@ fontifying the whole conversation in one uninterruptible burst.")
   "Review buffers to repaint once the current deferred-fontify batch lands.")
 (defvar sprig-review--fontify-timer nil
   "Pending idle timer draining `sprig-review--fontify-queue', or nil.")
+(defvar-local sprig-review--fontify-fresh nil
+  "A set of block texts the idle fontifier just cached, for one repaint.
+Deferred fontification changes how a settled prose block looks without
+changing the model, so the `equal' block diff cannot see it and would keep
+the block in the untouched prefix, leaving it painted raw.  The drain
+\(`sprig-review--fontify-drain') sets this before its repaint and
+`sprig-review--render-incremental' reads and clears it, redrawing from the
+earliest block it names so the block gains its faces.")
 
 (defun sprig-review--fontify-arm ()
   "Arm the idle timer that drains the deferred-fontify queue, once."
@@ -800,22 +808,29 @@ Runs on the idle timer.  Fontifies up to `sprig-review-fontify-batch' blocks,
 repaints the shown review buffers that were waiting (a repaint re-queues any
 block still un-fontified, and re-arms), and re-arms while the queue holds more."
   (setq sprig-review--fontify-timer nil)
-  (let ((budget sprig-review-fontify-batch) (did nil))
+  (let ((budget sprig-review-fontify-batch)
+        (fresh (make-hash-table :test 'equal))
+        (any nil))
     (while (and sprig-review--fontify-queue (> budget 0))
       (let ((text (pop sprig-review--fontify-queue)))
         (remhash text sprig-review--fontify-queued)
         (unless (gethash text sprig-review--fontify-cache)
           (puthash text (sprig-review--fontify-uncached text)
                    sprig-review--fontify-cache)
-          (setq did t))
+          (puthash text t fresh)
+          (setq any t))
         (setq budget (1- budget))))
     (let ((buffers (prog1 sprig-review--fontify-buffers
                      (setq sprig-review--fontify-buffers nil))))
-      (when did
+      (when any
         (dolist (buf buffers)
           (when (and (buffer-live-p buf) (get-buffer-window buf t))
             (with-current-buffer buf
               (when (derived-mode-p 'sprig-review-mode)
+                ;; Name the blocks that just gained faces so the incremental
+                ;; render redraws from the earliest of them, rather than
+                ;; keeping them all in the prefix and leaving them raw.
+                (setq sprig-review--fontify-fresh fresh)
                 (sprig-review--refresh)))))))
     (when sprig-review--fontify-queue
       (sprig-review--fontify-arm))))
@@ -1410,6 +1425,23 @@ sections is handled correctly.  Returns t."
     (sprig-review--record-baseline model meta (append kept-sections new-sections)))
   t)
 
+(defun sprig-review--fontify-floor (blocks fresh)
+  "Return the index of the first prose BLOCK whose text is in FRESH, or nil.
+FRESH is the set of texts the idle fontifier just cached
+\(`sprig-review--fontify-fresh').  A rendered `text' or `user' block whose
+key is in it is currently painted raw, so the tail redraw must start no
+later than there for it to gain its faces.  Only those two types reach the
+fontify cache (`sprig-review--prose'), so only they can match."
+  (let ((i 0) (floor nil))
+    (while (and blocks (not floor))
+      (let ((block (car blocks)))
+        (when (and (memq (plist-get block :type) '(text user))
+                   (gethash (sprig-review--text-body (plist-get block :text))
+                            fresh))
+          (setq floor i)))
+      (setq i (1+ i) blocks (cdr blocks)))
+    floor))
+
 (defun sprig-review--render-incremental (model meta)
   "Redraw only the changed tail of the buffer, or return nil to fall back.
 Diffs MODEL's blocks against the last render's (`sprig-review--rendered-blocks')
@@ -1425,6 +1457,15 @@ or when even the first block diverged.  The reason is recorded in
          (old-blocks sprig-review--rendered-blocks)
          (new-blocks (plist-get model :blocks))
          (k (sprig-review--common-prefix old-blocks new-blocks))
+         ;; Read-and-clear: a fontify repaint gets exactly one shot at the
+         ;; boundary, and a later ordinary refresh must not re-apply it.
+         (fresh (prog1 sprig-review--fontify-fresh
+                  (setq sprig-review--fontify-fresh nil)))
+         ;; A just-cached prose block in the kept prefix is still painted raw;
+         ;; pull the redraw boundary back to it so the tail draws it fontified.
+         ;; The model did not change, so the block diff alone would keep it.
+         (floor (and fresh (sprig-review--fontify-floor new-blocks fresh)))
+         (k (if floor (min k floor) k))
          (reason
           (cond
            ((not sprig-review-incremental-render) 'disabled)
