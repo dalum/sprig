@@ -1537,6 +1537,7 @@ amount, and either read is bounded however large the session grows.")
 
 (defconst sprig--status-glyphs
   '((streaming    . "▶")
+    (agent        . "◐")
     (waiting      . "?")
     (idle         . "●")
     (interrupted  . "◼")
@@ -1604,18 +1605,32 @@ status flags in the navigator."
    (sprig-review-build
     (reverse (buffer-local-value 'sprig-review--events buf)))))
 
+(defun sprig--buffer-agent-running-p (buf)
+  "Non-nil when a background agent BUF's session launched is still running.
+Reads the buffer's own events, the same source its render and inline
+preview use, so the row agrees with what the review buffer shows."
+  (and (sprig-review-agent-running
+        (sprig-review-build
+         (reverse (buffer-local-value 'sprig-review--events buf))))
+       t))
+
 (defun sprig--session-status (buf)
   "Return the session status for its owning review BUF (nil = not open).
-One of `waiting', `streaming', `idle', or `disconnected'.  `waiting' wins
-over `streaming': a session stopped on a question of yours is not working,
-it is on you, so the navigator says so rather than showing it as busy."
+One of `waiting', `streaming', `agent', `idle', or `disconnected'.
+`waiting' wins over `streaming': a session stopped on a question of yours
+is not working, it is on you, so the navigator says so rather than showing
+it as busy.  `agent' is a turn that has ended but left a background agent
+still working, which would otherwise read as plain `idle'."
   (cond
    ((not (buffer-live-p buf)) 'disconnected)
    ((and (process-live-p (buffer-local-value 'sprig--process buf))
          (sprig--buffer-awaiting-answer-p buf))
     'waiting)
    ((buffer-local-value 'sprig--busy buf) 'streaming)
-   ((process-live-p (buffer-local-value 'sprig--process buf)) 'idle)
+   ((process-live-p (buffer-local-value 'sprig--process buf))
+    ;; No turn in flight, but a background agent it launched can still be
+    ;; working; that is not idle, so only claim idle once none is.
+    (if (sprig--buffer-agent-running-p buf) 'agent 'idle))
    (t 'disconnected)))
 
 (defun sprig--status-limit ()
@@ -2062,7 +2077,8 @@ it sorts to the top of a newest-first list rather than the bottom."
 
 (defun sprig--status-rank (status)
   "Return a sort rank for STATUS, busiest (streaming) first."
-  (pcase status ('streaming 0) ('waiting 1) ('idle 2) ('interrupted 3) (_ 4)))
+  (pcase status
+    ('streaming 0) ('agent 1) ('waiting 2) ('idle 3) ('interrupted 4) (_ 5)))
 
 (defun sprig--status-row-less (name)
   "Return an ascending `sort' predicate over status entries for column NAME."
@@ -2097,6 +2113,7 @@ Matching is case-insensitive."
   "Return the face used for STATUS."
   (pcase status
     ('streaming 'warning)
+    ('agent 'warning)
     ('waiting 'sprig-review-waiting)
     ('idle 'success)
     ('interrupted 'font-lock-comment-face)

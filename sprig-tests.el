@@ -1729,6 +1729,35 @@ Return the log directory."
                 sprig-review--events '((dialog "d1" "ask_user_question" nil)))
     (should (eq (sprig--session-status (current-buffer)) 'disconnected))))
 
+(ert-deftest sprig-test-session-status-agent-outlives-the-turn ()
+  ;; The turn is over (not busy) but a background agent is still running, so
+  ;; the row is `agent', not the plain `idle' a done live session would show.
+  (with-temp-buffer
+    (setq-local sprig--sink #'sprig--review-sink
+                sprig--process 'dummy
+                sprig--busy nil
+                ;; Stored newest-first, as `sprig-review-consume' pushes them.
+                sprig-review--events
+                '((done nil nil)
+                  (subagent "toolu_A" (:status "running" :agent-type "Explore"))
+                  (tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+      (should (eq (sprig--session-status (current-buffer)) 'agent)))))
+
+(ert-deftest sprig-test-session-status-idle-once-agent-done ()
+  ;; Its notification closes the agent, and a done live session is `idle'.
+  (with-temp-buffer
+    (setq-local sprig--sink #'sprig--review-sink
+                sprig--process 'dummy
+                sprig--busy nil
+                sprig-review--events
+                '((done nil nil)
+                  (subagent "toolu_A" (:status "completed"))
+                  (subagent "toolu_A" (:status "running" :agent-type "Explore"))
+                  (tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")))
+    (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
+      (should (eq (sprig--session-status (current-buffer)) 'idle)))))
+
 (ert-deftest sprig-test-status-glyph-has-waiting ()
   (should (equal (alist-get 'waiting sprig--status-glyphs) "?")))
 
