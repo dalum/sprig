@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.16.0
+;; Version: 0.17.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -271,6 +271,37 @@ plist (:id ID :content SUBJECT :status STATUS)."
         (when (equal (plist-get tk :id) tid)
           (when status (plist-put tk :status status))
           (when subject (plist-put tk :content subject)))))))
+
+;;;; Event list and its memoised model
+;;
+;; The event list and the model memo live in the data layer, not the UI
+;; layer, so a headless caller (the navigator's status and preview, in
+;; sprig.el) shares the one build a review buffer already paid for without
+;; pulling in sprig-review-mode (and magit-section) to reach it.
+
+(defvar-local sprig-review--events nil
+  "Transport events consumed by this review buffer, most recent first.")
+(defvar-local sprig-review--model nil
+  "The last-built review model for this buffer, memoised (see below).")
+(defvar-local sprig-review--model-head nil
+  "The `sprig-review--events' list head `sprig-review--model' was built at.
+Every consumed event conses a new head onto the list, so this is `eq' to the
+current head exactly when the cached model is still current.")
+
+(defun sprig-review--current-model ()
+  "Return this buffer's review model, rebuilt only when its events changed.
+`sprig-review-build' is O(all events) and the same model is wanted by the
+buffer's own refresh, its state line, and the navigator's inline preview and
+status, often for the same events several times a second while a turn streams.
+This memoises the last build on the event-list head (see
+`sprig-review--model-head'), so those callers share one build per event rather
+than each paying their own.  A big session's build runs into the hundreds of
+milliseconds, so the sharing is what keeps a streaming turn from stuttering the
+UI."
+  (unless (eq sprig-review--events sprig-review--model-head)
+    (setq sprig-review--model (sprig-review-build (reverse sprig-review--events))
+          sprig-review--model-head sprig-review--events))
+  sprig-review--model)
 
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.

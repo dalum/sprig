@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.16.0
+;; Version: 0.17.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -49,6 +49,8 @@
 (declare-function sprig--status-refresh "sprig" ())
 (declare-function sprig--mode-line-permission "sprig" ())
 (declare-function sprig--session-log-lines "sprig" ())
+(declare-function sprig--session-log-lines-async "sprig" (callback))
+(declare-function sprig--remote "sprig" ())
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
 (declare-function sprig--notable-mode "sprig" (mode))
@@ -198,8 +200,17 @@ Applied to the token readout once it crosses `sprig-context-huge-tokens'."
   :group 'sprig)
 
 (defface sprig-review-waiting
-  '((t :inherit warning :weight bold))
-  "Face for the state line while a question waits on you."
+  '((((class color) (min-colors 88) (background light))
+     :foreground "#6f42c1" :weight bold)
+    (((class color) (min-colors 88) (background dark))
+     :foreground "#c792ea" :weight bold)
+    (((class color)) :foreground "magenta" :weight bold)
+    (t :weight bold))
+  "Face for the state line, and the navigator glyph, while a session is on you.
+Purple, deliberately not the working state's amber: a turn that has stopped
+for you (an `AskUserQuestion', a plan to approve, a permission prompt) is not
+working, it is waiting, and amber reads as busy.  The purple makes the `?'
+stand out as needing you rather than blending in with the running rows."
   :group 'sprig)
 
 (defface sprig-review-dialog '((t :inherit font-lock-builtin-face :weight bold))
@@ -216,8 +227,9 @@ Applied to the token readout once it crosses `sprig-context-huge-tokens'."
 
 ;;;; Buffer-local state
 
-(defvar-local sprig-review--events nil
-  "Transport events consumed by this review buffer, most recent first.")
+;; `sprig-review--events', `sprig-review--model', `sprig-review--model-head',
+;; and `sprig-review--current-model' live in sprig-review.el (the data layer),
+;; so the navigator can share the memoised model without loading this file.
 (defvar-local sprig-review--meta nil
   "Display-metadata plist feeding this review buffer's header.")
 (defvar-local sprig-review--dirty nil
@@ -694,6 +706,14 @@ without the memo."
           (sprig-review--adopt-faces (buffer-string))))
     text))
 
+(defun sprig-review--fontify-cache-refresh ()
+  "Empty the fontify memo when `sprig-review-fontify-markdown' has changed.
+Fontification output depends on the flag, so a change to it stales every
+cached entry.  Shared by the synchronous and the deferred fontify paths."
+  (unless (eq sprig-review--fontify-cache-flag sprig-review-fontify-markdown)
+    (clrhash sprig-review--fontify-cache)
+    (setq sprig-review--fontify-cache-flag sprig-review-fontify-markdown)))
+
 (defun sprig-review--fontify-markdown (text)
   "Return TEXT fontified with `markdown-mode', its markup characters hidden.
 Fontifies in a reusable hidden buffer and copies the propertized string,
@@ -704,14 +724,114 @@ would strip them (see `sprig-review--adopt-faces').  Returns TEXT
 unchanged when `sprig-review-fontify-markdown' is nil or markdown-mode is
 not installed.  Memoised on TEXT (see `sprig-review--fontify-cache'),
 since a full re-render fontifies every settled block afresh though only
-the streaming block's text has moved."
-  (unless (eq sprig-review--fontify-cache-flag sprig-review-fontify-markdown)
-    (clrhash sprig-review--fontify-cache)
-    (setq sprig-review--fontify-cache-flag sprig-review-fontify-markdown))
+the streaming block's text has moved.  This is the synchronous pass; the
+render can defer it to idle instead (see `sprig-review--prose')."
+  (sprig-review--fontify-cache-refresh)
   (let ((hit (gethash text sprig-review--fontify-cache)))
     (or hit
         (puthash text (sprig-review--fontify-uncached text)
                  sprig-review--fontify-cache))))
+
+;;;; Deferred (idle) fontification
+;;
+;; Fontifying a settled block is the heavier half of a render, and it runs
+;; on the main thread the moment the block settles: a large markdown reply,
+;; or the first paint of a long conversation (every block uncached at once),
+;; stutters the UI just as a turn lands.  The work cannot leave the main
+;; thread (markdown-mode font-lock has no async form), but it can leave the
+;; critical path: `sprig-review--prose' inserts the block raw and queues its
+;; text, and an idle timer fontifies the backlog in small batches, repainting
+;; each buffer once its faces are ready.  The block reads as plain prose for
+;; the blink before the repaint, exactly as the live streaming block already
+;; does until it settles.  The model, and so the navigator, never wait on any
+;; of this (see `sprig-review--current-model').
+
+(defcustom sprig-review-fontify-async t
+  "When non-nil, fontify settled markdown off the render's critical path.
+An uncached prose block renders raw and is fontified by an idle worker (see
+`sprig-review--fontify-drain'), which repaints the buffer once its faces are
+ready, so a heavy font-lock pass no longer blocks the render that a landing
+turn triggers.  Has no effect when `sprig-review-fontify-markdown' is nil."
+  :type 'boolean
+  :group 'sprig)
+
+(defcustom sprig-review-fontify-idle-delay 0.15
+  "Idle seconds before the deferred markdown fontifier runs (see
+`sprig-review-fontify-async')."
+  :type 'number
+  :group 'sprig)
+
+(defvar sprig-review-fontify-batch 12
+  "How many blocks the deferred fontifier fontifies per idle slice.
+Bounded so a long backlog yields to input between slices rather than
+fontifying the whole conversation in one uninterruptible burst.")
+
+(defvar sprig-review--fontify-queue nil
+  "Raw block texts awaiting deferred fontification, most recent first.")
+(defvar sprig-review--fontify-queued (make-hash-table :test 'equal)
+  "Set of texts already on `sprig-review--fontify-queue', to skip duplicates.")
+(defvar sprig-review--fontify-buffers nil
+  "Review buffers to repaint once the current deferred-fontify batch lands.")
+(defvar sprig-review--fontify-timer nil
+  "Pending idle timer draining `sprig-review--fontify-queue', or nil.")
+
+(defun sprig-review--fontify-arm ()
+  "Arm the idle timer that drains the deferred-fontify queue, once."
+  (unless sprig-review--fontify-timer
+    (setq sprig-review--fontify-timer
+          (run-with-idle-timer sprig-review-fontify-idle-delay nil
+                               #'sprig-review--fontify-drain))))
+
+(defun sprig-review--fontify-enqueue (text buffer)
+  "Queue TEXT for deferred fontification and mark BUFFER for repaint.
+A no-op for the text once it is cached or already queued; BUFFER is recorded
+each time, so the block that finally fontifies it repaints the right buffers."
+  (unless (or (gethash text sprig-review--fontify-cache)
+              (gethash text sprig-review--fontify-queued))
+    (puthash text t sprig-review--fontify-queued)
+    (push text sprig-review--fontify-queue))
+  (unless (memq buffer sprig-review--fontify-buffers)
+    (push buffer sprig-review--fontify-buffers))
+  (sprig-review--fontify-arm))
+
+(defun sprig-review--fontify-drain ()
+  "Fontify a batch of queued blocks into the cache, then repaint their buffers.
+Runs on the idle timer.  Fontifies up to `sprig-review-fontify-batch' blocks,
+repaints the shown review buffers that were waiting (a repaint re-queues any
+block still un-fontified, and re-arms), and re-arms while the queue holds more."
+  (setq sprig-review--fontify-timer nil)
+  (let ((budget sprig-review-fontify-batch) (did nil))
+    (while (and sprig-review--fontify-queue (> budget 0))
+      (let ((text (pop sprig-review--fontify-queue)))
+        (remhash text sprig-review--fontify-queued)
+        (unless (gethash text sprig-review--fontify-cache)
+          (puthash text (sprig-review--fontify-uncached text)
+                   sprig-review--fontify-cache)
+          (setq did t))
+        (setq budget (1- budget))))
+    (let ((buffers (prog1 sprig-review--fontify-buffers
+                     (setq sprig-review--fontify-buffers nil))))
+      (when did
+        (dolist (buf buffers)
+          (when (and (buffer-live-p buf) (get-buffer-window buf t))
+            (with-current-buffer buf
+              (when (derived-mode-p 'sprig-review-mode)
+                (sprig-review--refresh)))))))
+    (when sprig-review--fontify-queue
+      (sprig-review--fontify-arm))))
+
+(defun sprig-review--prose (text)
+  "Return TEXT ready to insert as prose, fontified now or deferred to idle.
+With `sprig-review-fontify-async', an uncached block is returned raw and its
+markdown fontification is queued for the idle worker (see
+`sprig-review--fontify-drain'); a cached block returns fontified at once.
+Without async, fontifies synchronously (`sprig-review--fontify-markdown')."
+  (if (not sprig-review-fontify-async)
+      (sprig-review--fontify-markdown text)
+    (sprig-review--fontify-cache-refresh)
+    (or (gethash text sprig-review--fontify-cache)
+        (progn (sprig-review--fontify-enqueue text (current-buffer))
+               text))))
 
 (defun sprig-review--text-body (text)
   "Return TEXT with trailing newlines normalised to exactly one.
@@ -736,7 +856,7 @@ display."
         (progn
           (insert (plist-get block :text) "\n")
           (setq sprig-review--tail (copy-marker (1- (point)) t)))
-      (insert (sprig-review--fontify-markdown
+      (insert (sprig-review--prose
                (sprig-review--text-body (plist-get block :text)))))))
 
 (defun sprig-review--insert-user (block)
@@ -750,7 +870,7 @@ we want."
   (magit-insert-section (sprig-user block nil
                          :heading-highlight-face 'sprig-review-user-highlight)
     (let ((beg (point)))
-      (insert (sprig-review--fontify-markdown
+      (insert (sprig-review--prose
                (sprig-review--text-body (plist-get block :text))))
       (sprig-review--add-face beg (point) 'sprig-review-user))))
 
@@ -1230,6 +1350,8 @@ section can be found again."
                   (or (oref section end) (point-max)))))
       (min fallback (point-max))))
 
+;; `sprig-review--current-model' now lives in sprig-review.el (the data layer).
+
 (defun sprig-review--refresh ()
   "Rebuild the model from accumulated events and re-render in place.
 Keeps folds (via magit-section's visibility cache), and puts point and the
@@ -1245,7 +1367,7 @@ while a turn came in."
   ;; `magit-insert-section' macro captures it from `magit-root-section'
   ;; itself, and only then advances `magit-root-section' to the new root.
   ;; Pre-binding it leaves the root stale and breaks section finishing.
-  (let* ((model (sprig-review-build (reverse sprig-review--events)))
+  (let* ((model (sprig-review--current-model))
          (pos (point))
          (locator (sprig-review--locate pos))
          (windows (mapcar (lambda (win)
@@ -1294,13 +1416,45 @@ Called by the coalescing timer, and usable to force a render immediately."
       (goto-char sprig-review--tail)
       (insert s))))          ; the type-t tail marker advances past S
 
+(defun sprig-review--flush-if-shown (buffer)
+  "Coalesced-timer render: draw BUFFER now if it is on screen, else defer.
+The per-event redraw is O(conversation); a review buffer nobody is looking at
+should not pay it on every stream tick, and with several sessions running at
+once those off-screen redraws are what stutter the rest of Emacs (the navigator
+included).  So when BUFFER is displayed in no window this leaves it dirty and
+does nothing; `sprig-review--flush-when-shown' draws it the moment it next
+appears.  Its model still rebuilds on demand for the navigator's status and
+preview (see `sprig-review--current-model'), independent of this render, so
+nothing on screen goes stale while it waits."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (sprig-review--cancel-timer)
+      (when (and sprig-review--dirty (get-buffer-window buffer t))
+        (sprig-review-flush buffer)))))
+
+(defun sprig-review--flush-when-shown (&optional frame)
+  "Draw any dirty review buffer newly shown in a window of FRAME.
+On `window-buffer-change-functions': an off-screen review buffer skips its
+coalesced render (see `sprig-review--flush-if-shown'), so when it comes back on
+screen its pending events must be drawn to catch it up."
+  (dolist (win (window-list frame 'no-minibuf))
+    (let ((buf (window-buffer win)))
+      (when (and (buffer-live-p buf)
+                 (buffer-local-value 'sprig-review--dirty buf)
+                 (with-current-buffer buf (derived-mode-p 'sprig-review-mode)))
+        (sprig-review-flush buf)))))
+
+(add-hook 'window-buffer-change-functions #'sprig-review--flush-when-shown)
+
 (defun sprig-review--schedule ()
-  "Mark the buffer dirty and arm the coalescing refresh timer."
+  "Mark the buffer dirty and arm the coalescing refresh timer.
+The timer draws the buffer only if it is on screen (see
+`sprig-review--flush-if-shown'); off-screen it stays dirty until shown."
   (setq sprig-review--dirty t)
   (unless sprig-review--timer
     (setq sprig-review--timer
           (run-with-timer (sprig-review--refresh-delay) nil
-                          #'sprig-review-flush (current-buffer)))))
+                          #'sprig-review--flush-if-shown (current-buffer)))))
 
 (defun sprig-review--stamp-arrival (event)
   "Push a `time' event dating EVENT's arrival, unless it inherits one.
@@ -1376,18 +1530,30 @@ from the buffer."
   (interactive)
   (when (and (boundp 'sprig--busy) sprig--busy)
     (user-error "A turn is in flight; refresh once it lands"))
-  (let* ((lines (if sprig-review--file
-                    (sprig-review-read-session-lines sprig-review--file)
-                  (sprig--session-log-lines)))
-         ;; A live session finds its own log; a remote one has no local path,
-         ;; so it replays without its subagents' steps rather than not at all.
-         (file (or sprig-review--file
-                   (and (fboundp 'sprig--session-log-file)
-                        (sprig--session-log-file))))
-         (events (sprig-review--replayed-events lines file)))
-    (sprig-review-seed events sprig-review--meta)
-    (message "sprig: re-read %d event%s from the log"
-             (length events) (if (= (length events) 1) "" "s"))))
+  (if (and (not sprig-review--file) (sprig--remote))
+      ;; A remote re-read fetches the log over SSH: run it in the background so
+      ;; `g' never blocks Emacs, and re-seed when it lands.  A remote log has no
+      ;; local path, so it replays without its subagents' steps either way.
+      (progn
+        (message "sprig: re-reading the log…")
+        (sprig--session-log-lines-async
+         (lambda (lines)
+           (let ((events (sprig-review--replayed-events lines nil)))
+             (sprig-review-seed events sprig-review--meta)
+             (message "sprig: re-read %d event%s from the log"
+                      (length events) (if (= (length events) 1) "" "s"))))))
+    (let* ((lines (if sprig-review--file
+                      (sprig-review-read-session-lines sprig-review--file)
+                    (sprig--session-log-lines)))
+           ;; A live session finds its own log; a local stored one is read by
+           ;; path.  Its subagent steps ride along when the log has a path.
+           (file (or sprig-review--file
+                     (and (fboundp 'sprig--session-log-file)
+                          (sprig--session-log-file))))
+           (events (sprig-review--replayed-events lines file)))
+      (sprig-review-seed events sprig-review--meta)
+      (message "sprig: re-read %d event%s from the log"
+               (length events) (if (= (length events) 1) "" "s")))))
 
 (defun sprig-review-buffer (name)
   "Return a buffer named NAME, put into `sprig-review-mode'."
@@ -1871,7 +2037,7 @@ replay of this history."
 (defun sprig-review-retry ()
   "Re-send the most recent user turn."
   (interactive)
-  (let* ((model (sprig-review-build (reverse sprig-review--events)))
+  (let* ((model (sprig-review--current-model))
          (last-user (seq-find (lambda (b) (eq (plist-get b :type) 'user))
                               (reverse (plist-get model :blocks)))))
     (unless last-user (user-error "No previous user turn to resend"))
@@ -2124,8 +2290,7 @@ the CLI's own `/btw'."
 
 (defun sprig-review--pending-dialog ()
   "Return this buffer's question waiting on an answer, or signal there is none."
-  (or (sprig-review-pending-dialog
-       (sprig-review-build (reverse sprig-review--events)))
+  (or (sprig-review-pending-dialog (sprig-review--current-model))
       (user-error "No question is waiting")))
 
 (defun sprig-review--answer-plan (dialog answers)

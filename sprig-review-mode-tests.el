@@ -165,6 +165,35 @@ timestamp, or the state line's rule."
       (should (equal "## H\n\n**bold** here"
                      (sprig-review--fontify-markdown "## H\n\n**bold** here"))))))
 
+(ert-deftest sprig-review-mode-test-async-fontify-defers-then-caches ()
+  ;; With async on, an uncached block returns raw and queues; the idle drain
+  ;; fontifies it into the cache, after which the same block returns fontified.
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review-fontify-async t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset)
+        (sprig-review--fontify-queue nil)
+        (sprig-review--fontify-queued (make-hash-table :test 'equal))
+        (sprig-review--fontify-buffers nil)
+        (sprig-review--fontify-timer nil))
+    (let ((raw (sprig-review--prose "**bold** here")))
+      ;; Deferred: the markup is still literal and nothing is cached yet.
+      (should (equal-including-properties raw "**bold** here"))
+      (should (member "**bold** here" sprig-review--fontify-queue))
+      (should (= 0 (hash-table-count sprig-review--fontify-cache))))
+    ;; A second render before the drain must not queue the block twice.
+    (sprig-review--prose "**bold** here")
+    (should (= 1 (length sprig-review--fontify-queue)))
+    ;; The idle worker fontifies the backlog into the cache.
+    (sprig-review--fontify-drain)
+    (should (= 1 (hash-table-count sprig-review--fontify-cache)))
+    (should (null sprig-review--fontify-queue))
+    ;; Now the same block returns the fontified object (markup carries faces or
+    ;; an invisibility property, so it is no longer the bare string).
+    (let ((done (sprig-review--prose "**bold** here")))
+      (should-not (equal-including-properties done "**bold** here")))))
+
 (ert-deftest sprig-review-mode-test-refresh-delay-adapts-to-cost ()
   ;; The coalescing wait is the floor on a cheap buffer, tracks the last
   ;; render's cost between floor and ceiling, and is capped by the ceiling.
@@ -1136,6 +1165,21 @@ the fold learns the id from the result rather than from the call."
     (sprig-review-flush)
     (should (string-match-p "line1\nline2" (buffer-string)))))
 
+(ert-deftest sprig-review-mode-test-off-screen-flush-defers ()
+  ;; The coalesced timer path skips the O(conversation) redraw for a buffer
+  ;; shown in no window (a temp buffer never is), leaving it dirty; an explicit
+  ;; flush, and being shown, still draw it.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "hi"))            ; first text: defers, dirty
+    (should sprig-review--dirty)
+    (sprig-review--flush-if-shown (current-buffer)) ; no window: draw nothing
+    (should sprig-review--dirty)
+    (should-not (string-match-p "hi" (buffer-string)))
+    (sprig-review-flush)                            ; explicit: draws it
+    (should-not sprig-review--dirty)
+    (should (string-match-p "hi" (buffer-string)))))
+
 (ert-deftest sprig-review-mode-test-replayed-text-is-not-a-live-tail ()
   ;; A stored session log carries no `done' event, so the last text block must
   ;; not be taken for a streaming tail on position alone: replayed history is
@@ -1411,6 +1455,29 @@ the fold learns the id from the result rather than from the call."
     (sprig-review-mode)
     (setq sprig--session-id nil)
     (should-error (sprig-review-fork) :type 'user-error)))
+
+(ert-deftest sprig-review-mode-test-remote-open-fetches-log-async ()
+  ;; Opening a remote session seeds the buffer empty at once and fetches its
+  ;; replay history over SSH in the background, so RET on a remote row never
+  ;; blocks Emacs; a local session with an id is read synchronously as before.
+  (let ((sprig-remote nil) buf async-called sync-called)
+    (cl-letf (((symbol-function 'sprig--session-log-lines-async)
+               (lambda (_cb) (setq async-called t)))
+              ((symbol-function 'sprig--session-log-lines)
+               (lambda () (setq sync-called t) nil)))
+      (unwind-protect
+          (progn
+            ;; Remote: the background fetch, and no synchronous SSH read.
+            (setq buf (sprig--review-session-buffer "/p" "sess-r" "me@host" nil))
+            (should async-called)
+            (should-not sync-called)
+            (kill-buffer buf)
+            ;; Local with an id: the synchronous read, and no background fetch.
+            (setq async-called nil sync-called nil)
+            (setq buf (sprig--review-session-buffer "/p" "sess-l" t nil))
+            (should sync-called)
+            (should-not async-called))
+        (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest sprig-review-mode-test-session-buffer-does-not-select ()
   ;; The navigator builds a row's review buffer without displaying it, so a

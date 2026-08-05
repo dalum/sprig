@@ -1644,6 +1644,18 @@ Return the log directory."
       (dolist (r records) (insert (json-serialize r) "\n")))
     logdir))
 
+(defun sprig-tests--warm-remote-scan (host)
+  "Fill the navigator scan cache for HOST synchronously, for tests.
+Production scans a cold remote host in the background (see
+`sprig--status-scan-async'); a test that asserts on collected remote rows
+stands in for that landed scan here, running the scan through whatever
+`sprig--remote-sh' mock is active so the fresh-cache path returns the rows
+without a real SSH process."
+  (let ((sprig-remote host))
+    (setf (alist-get (cons host (sprig--projects-directory))
+                     sprig--status-scan-cache nil nil #'equal)
+          (cons (current-time) (sprig--scan-session-logs)))))
+
 (ert-deftest sprig-test-scan-session-logs ()
   ;; The scan is host-wide: every log under the projects root, newest first,
   ;; with each row's project taken from the log's own `cwd' record.
@@ -1721,9 +1733,9 @@ Return the log directory."
       (delete-directory root t))))
 
 (ert-deftest sprig-test-scan-session-logs-remote ()
-  ;; Two round trips: a mtime-sorted find, then one batched slurp of tails.
-  ;; The find output pairs each mtime with a path; the tails come back
-  ;; record-separated so cwd and title are parsed per session.
+  ;; One round trip: a single combined command lists the newest logs by mtime
+  ;; and slurps each one's fields, which come back record-separated so mtime,
+  ;; cwd, and title are parsed per session.
   (let ((sprig-remote "me@host")
         (sprig-claude-projects-directory "~/.claude/projects")
         (root "~/.claude/projects")
@@ -1731,16 +1743,10 @@ Return the log directory."
     (cl-letf (((symbol-function 'sprig--remote-sh)
                (lambda (cmd)
                  (push cmd calls)
-                 (cond
-                  ((string-match-p "find" cmd)
-                   (format "20.0\t%s/-p/new.jsonl\n10.0\t%s/-p/old.jsonl\n"
-                           root root))
-                  ((string-match-p "^for f in" cmd)
-                   (concat "\036" root "/-p/new.jsonl\037"
-                           "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Newer\"}\n"
-                           "\036" root "/-p/old.jsonl\037"
-                           "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Older\"}\n"))
-                  (t "")))))
+                 (concat "\03620.0\037" root "/-p/new.jsonl\037"
+                         "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Newer\"}\037\n"
+                         "\03610.0\037" root "/-p/old.jsonl\037"
+                         "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Older\"}\037\n"))))
       (let* ((rows (sprig--scan-session-logs))
              (newer (car rows)))
         ;; Newest first, from the find's descending sort.
@@ -1748,8 +1754,56 @@ Return the log directory."
         (should (equal (plist-get newer :title) "Newer"))
         (should (equal (plist-get newer :dir) "/home/me/p"))
         (should (= 2 (length rows)))
-        ;; The find left `*.jsonl' unquoted so the remote shell expands it.
-        (should (seq-find (lambda (c) (string-match-p "\\*\\.jsonl" c)) calls))))))
+        ;; One SSH round trip, its command both finding and slurping.
+        (should (= 1 (length calls)))
+        (should (string-match-p "find" (car calls)))
+        (should (string-match-p "while" (car calls)))
+        ;; The find left `*.jsonl' for find's own `-name' matching.
+        (should (string-match-p "\\*\\.jsonl" (car calls)))))))
+
+(ert-deftest sprig-test-parse-scan-rows ()
+  ;; The combined scan blob parses into plists: mtime, session, cwd, title,
+  ;; newest first, with ignored logs dropped and the rest capped.
+  (let ((blob (concat "\03620.0\037/r/-a/x.jsonl\037"
+                      "{\"cwd\":\"/home/me/a\"}\037{\"aiTitle\":\"Fallback A\"}\n"
+                      "\03610.0\037/r/-b/y.jsonl\037"
+                      "{\"cwd\":\"/home/me/b\",\"aiTitle\":\"Head B\"}\037\n")))
+    (let ((rows (sprig--parse-scan-rows blob nil)))
+      (should (= 2 (length rows)))
+      ;; Newest first; the cwd is read from the head, and the title falls back
+      ;; to the grepped line when the head carried none (row a) or comes from
+      ;; the head itself when it is there (row b).
+      (should (equal (plist-get (car rows) :session) "x"))
+      (should (equal (plist-get (car rows) :dir) "/home/me/a"))
+      (should (equal (plist-get (car rows) :mtime) 20.0))
+      (should (equal (plist-get (car rows) :title) "Fallback A"))
+      (should (equal (plist-get (nth 1 rows) :dir) "/home/me/b"))
+      (should (equal (plist-get (nth 1 rows) :title) "Head B")))
+    ;; The cap keeps only the newest.
+    (should (= 1 (length (sprig--parse-scan-rows blob 1))))
+    ;; An ignore list drops matching logs before the cap.
+    (let ((sprig-status-ignore-directories '("\\`-a\\'")))
+      (let ((rows (sprig--parse-scan-rows blob nil)))
+        (should (= 1 (length rows)))
+        (should (equal (plist-get (car rows) :session) "y"))))))
+
+(ert-deftest sprig-test-status-scan-cache-remote-never-blocks ()
+  ;; A remote host never scans synchronously on the render path: it returns
+  ;; whatever is cached and schedules a background scan instead.
+  (let* ((sprig-remote "host")
+         (sprig-claude-projects-directory "/x")
+         (sprig--status-scan-cache
+          (list (cons (cons "host" (sprig--projects-directory))
+                      (cons (current-time) '(:cached-row)))))
+         (scheduled nil))
+    (cl-letf (((symbol-function 'sprig--status-scan-async)
+               (lambda (h) (setq scheduled h)))
+              ((symbol-function 'sprig--remote-sh)
+               (lambda (&rest _) (error "must not block on SSH for a render"))))
+      ;; Expire the cache so a refresh is due, then read it.
+      (sprig--status-scan-invalidate)
+      (should (equal (sprig--status-scan-cached "host") '(:cached-row)))
+      (should (equal scheduled "host")))))
 
 (ert-deftest sprig-test-entry-matches-filter ()
   (let ((e '(:project "/home/me/Projects/sprig" :title "Fix the navigator")))
@@ -1904,6 +1958,44 @@ Return the log directory."
               (should (equal (plist-get e :title) "From log")))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-status-collect-fork-does-not-mask-parent ()
+  ;; A fork resumes the parent's id until the CLI answers with its own; keyed
+  ;; by that shared id it would mask the parent's stored-log row, and the
+  ;; original would look gone until the handover.  Keyed by its buffer while
+  ;; the fork flag is set, both the live fork and the original show.
+  (let ((root (make-temp-file "sprig-proj" t)))
+    (unwind-protect
+        (let ((sprig-remote nil)
+              (sprig-claude-projects-directory root)
+              (sprig--status-scan-cache nil))
+          (sprig-tests--make-session-log
+           root "/tmp/proj" "parent-id"
+           `(:type "user" :cwd "/tmp/proj" :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "The original"))
+          (with-temp-buffer
+            (setq-local sprig--sink #'sprig--review-sink
+                        sprig--session-id "parent-id"
+                        sprig--fork-session t
+                        sprig--working-dir "/tmp/proj"
+                        sprig-review--meta nil
+                        sprig-review--events '((title "The fork")))
+            (let* ((rows (sprig--status-collect))
+                   ;; The fork owns a buffer; the original comes from its
+                   ;; stored log, so it has none.
+                   (forkrow (seq-find (lambda (r) (plist-get r :buffer)) rows))
+                   (parentrow (seq-find (lambda (r) (null (plist-get r :buffer)))
+                                        rows)))
+              ;; Two distinct rows, not one collapsed onto the shared id.
+              (should (= 2 (length rows)))
+              (should forkrow)
+              (should parentrow)
+              ;; The fork is keyed by its buffer, the original by its stored id.
+              (should (equal (plist-get forkrow :key)
+                             (cons nil (current-buffer))))
+              (should (equal (plist-get parentrow :session) "parent-id"))
+              (should (equal (plist-get parentrow :title) "The original")))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-status-hosts ()
   ;; The local machine is always a group; a configured remote adds a second,
   ;; so the navigator lists both rather than only the configured default.
@@ -1927,6 +2019,7 @@ Return the log directory."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/localproj")
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1935,15 +2028,11 @@ Return the log directory."
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "Local one"))
           (cl-letf (((symbol-function 'sprig--remote-sh)
-                     (lambda (cmd)
-                       (cond
-                        ((string-match-p "find" cmd)
-                         "20.0\t/r/-p/sess-remote.jsonl\n")
-                        ((string-match-p "\\`for f in" cmd)
-                         (concat "\036/r/-p/sess-remote.jsonl\037"
-                                 "{\"cwd\":\"/home/me/p\","
-                                 "\"aiTitle\":\"Remote one\"}\n"))
-                        (t "")))))
+                     (lambda (_cmd)
+                       (concat "\03620.0\037/r/-p/sess-remote.jsonl\037"
+                               "{\"cwd\":\"/home/me/p\","
+                               "\"aiTitle\":\"Remote one\"}\037\n"))))
+            (sprig-tests--warm-remote-scan "me@host")
             (let* ((rows (sprig--status-collect))
                    (local (seq-find (lambda (r)
                                       (equal (plist-get r :session) "sess-local"))
@@ -1968,6 +2057,7 @@ Return the log directory."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/dup")
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1976,14 +2066,11 @@ Return the log directory."
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "The local one"))
           (cl-letf (((symbol-function 'sprig--remote-sh)
-                     (lambda (cmd)
-                       (cond
-                        ((string-match-p "find" cmd) "20.0\t/r/-p/same-id.jsonl\n")
-                        ((string-match-p "\\`for f in" cmd)
-                         (concat "\036/r/-p/same-id.jsonl\037"
-                                 "{\"cwd\":\"/home/me/p\","
-                                 "\"aiTitle\":\"The remote one\"}\n"))
-                        (t "")))))
+                     (lambda (_cmd)
+                       (concat "\03620.0\037/r/-p/same-id.jsonl\037"
+                               "{\"cwd\":\"/home/me/p\","
+                               "\"aiTitle\":\"The remote one\"}\037\n"))))
+            (sprig-tests--warm-remote-scan "me@host")
             (let ((rows (sprig--status-collect)))
               (should (= 2 (length rows)))
               (should (equal (mapcar (lambda (r) (plist-get r :title)) rows)
@@ -2017,6 +2104,7 @@ Return the log directory."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2029,6 +2117,7 @@ Return the log directory."
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "Local two"))
           (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (sprig-tests--warm-remote-scan "me@host")
             (with-temp-buffer
               (sprig-status-mode)
               (sprig--status-render)
@@ -2058,16 +2147,14 @@ Return the log directory."
   ;; leads even when every session is on the remote host.
   (let* ((root (make-temp-file "sprig-proj" t))
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (cl-letf (((symbol-function 'sprig--remote-sh)
-                   (lambda (cmd)
-                     (cond
-                      ((string-match-p "find" cmd) "20.0\t/r/-p/only-remote.jsonl\n")
-                      ((string-match-p "\\`for f in" cmd)
-                       (concat "\036/r/-p/only-remote.jsonl\037"
-                               "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Remote only\"}\n"))
-                      (t "")))))
+                   (lambda (_cmd)
+                     (concat "\03620.0\037/r/-p/only-remote.jsonl\037"
+                             "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Remote only\"}\037\n"))))
+          (sprig-tests--warm-remote-scan "me@host")
           (with-temp-buffer
             (sprig-status-mode)
             (sprig--status-render)
@@ -2128,6 +2215,7 @@ Return the log directory."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2140,6 +2228,7 @@ Return the log directory."
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "Local two"))
           (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (sprig-tests--warm-remote-scan "me@host")
             (with-temp-buffer
               (sprig-status-mode)
               (sprig--status-render)
@@ -2171,6 +2260,7 @@ Return the log directory."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
          (sprig-remote "me@host")
+         (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2179,6 +2269,7 @@ Return the log directory."
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "Local one"))
           (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+            (sprig-tests--warm-remote-scan "me@host")
             (with-temp-buffer
               (sprig-status-mode)
               (sprig--status-render)
@@ -2234,10 +2325,10 @@ Return the log directory."
   (should (null (sprig--events-preview nil)))
   (should (null (sprig--events-preview '((tool-call "t" "Bash" nil))))))
 
-(ert-deftest sprig-test-status-preview-lines-caps-and-leads-with-prompt ()
-  ;; The rendered preview leads with the prompt in its own face, wraps the
-  ;; reply in the preview face, and caps prompt and reply together to the
-  ;; line budget, marking the cut.
+(ert-deftest sprig-test-status-preview-lines-leads-with-prompt-then-reply ()
+  ;; The preview leads with the prompt in its own face, then the reply as a
+  ;; single line in the preview face: the paragraphs collapse to one line,
+  ;; trimmed with an ellipsis where it runs past the window.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/prev")
          (sprig-remote nil)
@@ -2256,47 +2347,73 @@ Return the log directory."
              :message (:role "assistant"
                        :content ,(vector (list :type "text" :text reply)))))
           (let* ((entry (car (sprig--scan-session-logs)))
-                 (sprig-status-preview-max-lines 5)
-                 (lines (sprig--status-preview-lines entry)))
-            (should (<= (length lines) 5))
-            ;; Leads with the prompt, in the prompt face.
-            (should (string-match-p "» my prompt here" (car lines)))
-            (should (eq (get-text-property 0 'face (car lines))
+                 (lines (sprig--status-preview-lines entry))
+                 (prompt-line
+                  (seq-find (lambda (l) (string-match-p "» my prompt here" l)) lines))
+                 (reply-line
+                  (seq-find (lambda (l) (string-match-p "Reply line 1" l)) lines)))
+            ;; The prompt leads, in the prompt face.
+            (should prompt-line)
+            (should (eq (get-text-property 0 'face prompt-line)
                         'sprig-status-preview-prompt))
-            ;; The reply follows in the preview face.
-            (should (eq (get-text-property 0 'face (nth 1 lines))
+            ;; The reply is one line in the preview face: collapsed to a single
+            ;; line of prose and cut with an ellipsis, never more than one row.
+            (should reply-line)
+            (should (eq (get-text-property 0 'face reply-line)
                         'sprig-status-preview))
-            ;; Capped, so the last line is marked with an ellipsis.
-            (should (string-match-p "…\\'" (car (last lines))))))
+            (should (string-suffix-p "…" reply-line))
+            (should-not (string-match-p "Reply line 8" reply-line))
+            (should (= 1 (seq-count (lambda (l) (string-match-p "Reply line" l))
+                                    lines)))))
       (delete-directory root t))))
 
-(ert-deftest sprig-test-status-preview-lines-uncapped-shows-whole-reply ()
-  ;; With the cap nil (the default), the whole reply shows: more lines than
-  ;; any small cap, and nothing cut with an ellipsis.
+(ert-deftest sprig-test-log-created-reads-first-timestamp ()
+  ;; The creation time is the first record's timestamp, as an epoch float;
+  ;; junk or a headless log yields nil.
+  (should (= (sprig--log-created "{\"timestamp\":\"2026-08-05T09:16:56.955Z\"}")
+             (float-time (encode-time
+                          (iso8601-parse "2026-08-05T09:16:56.955Z")))))
+  ;; The first match wins, so a later record's stamp does not override it.
+  (should (= (sprig--log-created
+              (concat "{\"timestamp\":\"2026-08-05T09:16:56.955Z\"}\n"
+                      "{\"timestamp\":\"2026-08-05T10:00:00.000Z\"}"))
+             (float-time (encode-time
+                          (iso8601-parse "2026-08-05T09:16:56.955Z")))))
+  (should (null (sprig--log-created "{\"type\":\"user\"}")))
+  (should (null (sprig--log-created nil))))
+
+(ert-deftest sprig-test-status-preview-lines-date-each-message ()
+  ;; Each preview line leads with its own message's time (HH:MM), the prompt's
+  ;; on the prompt line and the reply's on the reply line.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (proj "/tmp/whatever/full")
+         (proj "/tmp/whatever/dated")
          (sprig-remote nil)
-         (sprig-claude-projects-directory root)
-         (reply (mapconcat
-                 (lambda (i) (format "Reply line %d with enough words to wrap." i))
-                 (number-sequence 1 8) "\n\n")))
+         (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
           (sprig-tests--make-session-log
-           root proj "sess-full"
-           `(:type "user" :cwd ,proj
-             :message (:role "user" :content "short prompt"))
-           '(:type "ai-title" :aiTitle "Full")
-           `(:type "assistant" :cwd ,proj
+           root proj "sess-dated"
+           `(:type "user" :timestamp "2026-08-05T09:16:00.000Z" :cwd ,proj
+             :message (:role "user" :content "my prompt here"))
+           '(:type "ai-title" :aiTitle "Dated")
+           `(:type "assistant" :timestamp "2026-08-05T09:17:00.000Z" :cwd ,proj
              :message (:role "assistant"
-                       :content ,(vector (list :type "text" :text reply)))))
+                       :content ,(vector (list :type "text"
+                                               :text "the reply here")))))
           (let* ((entry (car (sprig--scan-session-logs)))
-                 (sprig-status-preview-max-lines nil)
-                 (lines (sprig--status-preview-lines entry)))
-            ;; The 8-paragraph reply wraps well past any small cap.
-            (should (> (length lines) 8))
-            ;; Nothing was cut: no line ends in an ellipsis.
-            (should-not (seq-some (lambda (l) (string-suffix-p "…" l)) lines))))
+                 (lines (sprig--status-preview-lines entry))
+                 (prompt-line
+                  (seq-find (lambda (l) (string-match-p "» my prompt here" l)) lines))
+                 (reply-line
+                  (seq-find (lambda (l) (string-match-p "the reply here" l)) lines)))
+            ;; A clock leads the prompt, right before its marker.
+            (should prompt-line)
+            (should (string-match-p "[0-9][0-9]:[0-9][0-9] » my prompt here"
+                                    prompt-line))
+            ;; And a clock leads the reply.
+            (should reply-line)
+            (should (string-match-p "^ +[0-9][0-9]:[0-9][0-9] .*the reply here"
+                                    reply-line))))
       (delete-directory root t))))
 
 (ert-deftest sprig-test-status-scroll-anchor-round-trips-by-id ()
@@ -2335,9 +2452,9 @@ Return the log directory."
                  (list (propertize "     (no reply yet)"
                                    'face 'sprig-status-preview)))))
 
-(ert-deftest sprig-test-status-preview-lines-streaming-holds-back-reply ()
-  ;; While the turn streams the reply is held back: the prompt still leads,
-  ;; but the growing prose stays out until the turn settles.
+(ert-deftest sprig-test-status-preview-lines-streams-the-last-message ()
+  ;; While the turn streams, the preview shows the growing last message live
+  ;; under the prompt, rather than holding it back until the turn settles.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/stream")
          (sprig-remote nil)
@@ -2359,8 +2476,8 @@ Return the log directory."
                  (joined (string-join lines "\n")))
             ;; The prompt still leads under the state line.
             (should (string-match-p "» my prompt here" joined))
-            ;; The reply prose is held back until the turn settles.
-            (should-not (string-match-p "partial reply so far" joined))))
+            ;; The growing reply shows live, as the last message so far.
+            (should (string-match-p "partial reply so far" joined))))
       (delete-directory root t))))
 
 (ert-deftest sprig-test-tidy-prose ()
@@ -2410,7 +2527,19 @@ Return the log directory."
            (sprig--status-state-line '(:status agent) '(:done t))))
   (should (string-match-p
            "agent working…"
-           (sprig--status-state-line '(:status idle) '(:done t :agent-running t)))))
+           (sprig--status-state-line '(:status idle) '(:done t :agent-running t))))
+  ;; A message queued for the running turn is flagged, the way the review
+  ;; buffer's state line flags it; no queue, no flag.
+  (let ((l (sprig--status-state-line '(:status streaming :queued 2) nil)))
+    (should (string-match-p "▶  working…" l))
+    (should (string-match-p "2 queued" l)))
+  (should-not (string-match-p
+               "queued"
+               (sprig--status-state-line '(:status streaming :queued 0) nil)))
+  ;; A queue alone is enough to draw the line even with nothing else to say.
+  (should (string-match-p
+           "1 queued"
+           (sprig--status-state-line '(:queued 1) nil))))
 
 (ert-deftest sprig-test-status-refresh-soon-coalesces ()
   ;; A burst of events schedules a single render; a second call while one is
@@ -2492,49 +2621,167 @@ Return the log directory."
             '((time "2026-08-03T10:00:00Z") (user "q") (text "an answer")))))
     (should (equal (plist-get p :time) "2026-08-03T10:00:00Z"))))
 
-(ert-deftest sprig-test-status-reply-lines-fontifies-markdown ()
-  ;; With markdown on, the markup characters are dropped and the emphasised
-  ;; word carries a markdown face.
-  (skip-unless (require 'markdown-mode nil t))
-  (let* ((sprig-status-preview-markdown t)
-         (lines (sprig--status-reply-lines "Plain and **bold** words." 60))
-         (joined (mapconcat #'identity lines "\n")))
-    (should-not (string-match-p "\\*\\*" joined))
-    (should (string-match-p "Plain and bold words\\." joined))
-    (should (seq-some
-             (lambda (l)
-               (seq-some (lambda (i)
-                           (let ((f (get-text-property i 'face l)))
-                             (memq 'markdown-bold-face (if (listp f) f (list f)))))
-                         (number-sequence 0 (1- (length l)))))
-             lines))))
+(ert-deftest sprig-test-status-reply-oneline-collapses-prose ()
+  ;; The reply teaser collapses paragraphs and wrapping to a single line of
+  ;; prose, so the row shows one line rather than a block.
+  (should (equal (sprig--status-reply-oneline "First para.\n\nSecond  para.")
+                 "First para. Second para."))
+  (should (equal (sprig--status-reply-oneline nil) "")))
 
-(ert-deftest sprig-test-status-reply-lines-plain-fallback ()
-  ;; With markdown off, the raw markup is kept and every line is the muted
-  ;; preview face; the list is collapsed to prose.
-  (let* ((sprig-status-preview-markdown nil)
-         (lines (sprig--status-reply-lines "Plain and **bold** words." 60)))
-    (should (string-match-p "\\*\\*bold\\*\\*" (mapconcat #'identity lines "\n")))
-    (should (eq (get-text-property 0 'face (car lines)) 'sprig-status-preview))))
-
-(ert-deftest sprig-test-status-preview-lines-no-indented-blanks ()
-  ;; A paragraph gap stays a truly empty line, never an indented blank one a
-  ;; trailing-whitespace highlighter would flag.
+(ert-deftest sprig-test-status-preview-lines-one-line-reply ()
+  ;; A multi-paragraph reply renders as a single preview line, never a block.
   (let ((preview '(:prompt "ask" :reply "First para.\n\nSecond para." :time nil)))
     (cl-letf (((symbol-function 'sprig--entry-preview) (lambda (_) preview)))
-      (let ((lines (sprig--status-preview-lines '(:buffer nil :file nil))))
-        (should-not (seq-some (lambda (l) (string-match-p "\\`[ \t]+\\'" l)) lines))
-        (when (require 'markdown-mode nil t)
-          (should (member "" lines)))))))
+      (let* ((lines (sprig--status-preview-lines '(:buffer nil :file nil)))
+             (reply-line (seq-find (lambda (l) (string-match-p "First para" l))
+                                   lines)))
+        (should reply-line)
+        (should (string-match-p "First para\\. Second para\\." reply-line))
+        (should (= 1 (seq-count (lambda (l) (string-match-p "para" l)) lines)))))))
 
 (ert-deftest sprig-test-format-time-value ()
   ;; A time value formats to a short local string; today's clock, else dated.
   (should (stringp (sprig--format-time-value (current-time))))
   (should (null (sprig--format-time-value nil))))
 
-(ert-deftest sprig-test-status-row-shows-time-column ()
-  ;; The row carries the session's time in an outer `Time' column, so it is
-  ;; visible even with the preview collapsed.
+(ert-deftest sprig-test-status-scan-cache-reuses-and-invalidates ()
+  ;; The navigator caches its disk scan, so a live re-render reuses it rather
+  ;; than re-reading every log; a structural refresh expires the cache, and the
+  ;; next read returns the stale rows at once and refreshes in the background
+  ;; rather than blocking on a second synchronous scan.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/cache")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (sprig--status-scan-cache nil)
+         (sprig--status-remote-scan-hosts nil)
+         (calls 0)
+         (scheduled 'unset))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-cache"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "Cached"))
+          (cl-letf* ((orig (symbol-function 'sprig--scan-session-logs))
+                     ((symbol-function 'sprig--scan-session-logs)
+                      (lambda (&rest a) (setq calls (1+ calls)) (apply orig a)))
+                     ((symbol-function 'sprig--status-scan-async)
+                      (lambda (h) (setq scheduled h))))
+            ;; Cold read scans once; a second within the TTL reuses the cache.
+            (should (sprig--status-scan-cached nil))
+            (sprig--status-scan-cached nil)
+            (should (= calls 1))
+            (should (eq scheduled 'unset))
+            ;; A structural refresh expires the cache; the next read returns the
+            ;; stale rows at once and schedules a background scan for the local
+            ;; host (nil), never a second synchronous scan.
+            (sprig--status-scan-invalidate)
+            (should (sprig--status-scan-cached nil))
+            (should (= calls 1))
+            (should (null scheduled))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-status-scan-async-local-uses-sh-not-ssh ()
+  ;; The background scan for the local host runs in a bare `sh -c', never
+  ;; through ssh (which would defeat the point) and never through TRAMP.
+  (let* ((sprig-remote nil)
+         (sprig-claude-projects-directory "/tmp/nope")
+         (sprig--status-remote-scan-hosts nil)
+         (captured nil))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (setq captured (plist-get args :command)) 'proc))
+              ((symbol-function 'set-process-sentinel) #'ignore))
+      (sprig--status-scan-async nil)
+      (should (equal (car captured) "sh"))
+      (should (equal (cadr captured) "-c"))
+      (should-not (member sprig-ssh-program captured)))))
+
+(ert-deftest sprig-test-status-scan-async-remote-uses-ssh ()
+  ;; A remote host's background scan is the same shell command, wrapped in ssh.
+  (let* ((sprig--status-remote-scan-hosts nil)
+         (sprig-claude-projects-directory "~/.claude/projects")
+         (captured nil))
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args) (setq captured (plist-get args :command)) 'proc))
+              ((symbol-function 'set-process-sentinel) #'ignore))
+      (sprig--status-scan-async "me@host")
+      (should (equal (car captured) sprig-ssh-program))
+      (should (member "me@host" captured)))))
+
+(ert-deftest sprig-test-status-scan-cold-remote-never-blocks ()
+  ;; Even the first open of a remote host never scans synchronously: with
+  ;; nothing cached yet it returns nothing and schedules a background scan,
+  ;; rather than blocking Emacs on the SSH round trip.
+  (let* ((sprig-claude-projects-directory "/x")
+         (sprig--status-scan-cache nil)
+         (sprig--status-remote-scan-hosts nil)
+         (scheduled 'unset))
+    (cl-letf (((symbol-function 'sprig--status-scan-async)
+               (lambda (h) (setq scheduled h)))
+              ((symbol-function 'sprig--remote-sh)
+               (lambda (&rest _)
+                 (error "must not block on SSH for a cold open"))))
+      (should (null (sprig--status-scan-cached "host")))
+      (should (equal scheduled "host")))))
+
+(ert-deftest sprig-test-remote-log-command ()
+  ;; The one-round-trip log fetch finds the log by id and cats it.
+  (let* ((sprig-claude-projects-directory "~/.claude/projects")
+         (cmd (sprig--remote-log-command "abc-123")))
+    (should (string-match-p "find " cmd))
+    (should (string-match-p "abc-123\\.jsonl" cmd))
+    (should (string-match-p "cat " cmd))))
+
+(ert-deftest sprig-test-status-render-signature-tracks-visible-changes ()
+  ;; The live-tick skip hinges on this: an unchanged render yields an identical
+  ;; signature, and any visible change (a title, or the row's formatted time)
+  ;; changes it.  The formatted time string is compared, not the raw value.
+  (cl-letf (((symbol-function 'sprig--status-todo-notes) (lambda () nil))
+            ((symbol-function 'sprig--status-collapsed-p) (lambda (_) nil))
+            ((symbol-function 'sprig--format-time-value)
+             (lambda (m) (format "%s" m))))
+    (let ((a '(:key ("h" . "s1") :host "h" :status disconnected :title "One"
+                    :project "p" :session "s1" :created 100 :queued 0))
+          (b '(:key ("h" . "s1") :host "h" :status disconnected :title "Two"
+                    :project "p" :session "s1" :created 100 :queued 0)))
+      (should (equal (sprig--status-render-signature (list a))
+                     (sprig--status-render-signature (list a))))
+      (should-not (equal (sprig--status-render-signature (list a))
+                         (sprig--status-render-signature (list b)))))
+    (let ((a '(:key ("h" . "s1") :host "h" :status disconnected :title "One"
+                    :project "p" :session "s1" :created 100 :queued 0)))
+      (cl-letf (((symbol-function 'sprig--format-time-value) (lambda (_) "2m")))
+        (let ((sig (sprig--status-render-signature (list a))))
+          (cl-letf (((symbol-function 'sprig--format-time-value)
+                     (lambda (_) "3m")))
+            (should-not (equal sig (sprig--status-render-signature
+                                    (list a))))))))))
+
+(ert-deftest sprig-test-status-todo-notes-caches-on-mtime ()
+  ;; The notes file is read from disk once per mtime, not once per render: a
+  ;; second read at the same mtime reuses the cache, a bumped mtime re-reads.
+  (let ((sprig--status-notes-cache nil)
+        (reads 0)
+        (mtime '(100 0)))
+    (cl-letf (((symbol-function 'file-readable-p) (lambda (_) t))
+              ((symbol-function 'file-attributes) (lambda (&rest _) 'attrs))
+              ((symbol-function 'file-attribute-modification-time)
+               (lambda (_) mtime))
+              ((symbol-function 'sprig-notes-read)
+               (lambda () (setq reads (1+ reads)) nil))
+              ((symbol-function 'sprig-notes--notes) (lambda (_) nil)))
+      (sprig--status-todo-notes)
+      (sprig--status-todo-notes)
+      (should (= reads 1))
+      (setq mtime '(200 0))
+      (sprig--status-todo-notes)
+      (should (= reads 2)))))
+
+(ert-deftest sprig-test-status-row-shows-created-column ()
+  ;; The row carries the session's creation time in an outer `Created' column,
+  ;; read from the first log record's timestamp, so it is visible even with the
+  ;; preview collapsed.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/whenrow")
          (sprig-remote nil)
@@ -2543,7 +2790,8 @@ Return the log directory."
         (progn
           (sprig-tests--make-session-log
            root proj "sess-one"
-           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           `(:type "user" :timestamp "2026-08-05T09:16:56.955Z" :cwd ,proj
+             :message (:role "user" :content "hi"))
            '(:type "ai-title" :aiTitle "Whenish"))
           (with-temp-buffer
             (sprig-status-mode)
@@ -2551,17 +2799,17 @@ Return the log directory."
             (goto-char (point-min))
             (should (search-forward "Whenish" nil t))
             (beginning-of-line)
-            ;; A freshly-written log dates from today, so the cell is a clock.
+            ;; The cell dates the session's creation as a short local time.
             (let ((cell (aref (tabulated-list-get-entry) 4)))
               (should (string-match-p "[0-9][0-9]:[0-9][0-9]" cell)))))
       (delete-directory root t))))
 
-(ert-deftest sprig-test-status-sort-rows-time-desc ()
-  ;; The default sort puts the latest Time first.
-  (let* ((sprig--status-sort '("Time" . t))
-         (rows (list '(:session "old" :mtime 100 :host nil)
-                     '(:session "new" :mtime 300 :host nil)
-                     '(:session "mid" :mtime 200 :host nil)))
+(ert-deftest sprig-test-status-sort-rows-created-desc ()
+  ;; The default sort puts the newest-created session first.
+  (let* ((sprig--status-sort '("Created" . t))
+         (rows (list '(:session "old" :created 100 :host nil)
+                     '(:session "new" :created 300 :host nil)
+                     '(:session "mid" :created 200 :host nil)))
          (sorted (sprig--status-sort-rows rows)))
     (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
                    '("new" "mid" "old")))))
@@ -2575,16 +2823,17 @@ Return the log directory."
                    '("apple" "Banana" "Cherry")))))
 
 (ert-deftest sprig-test-status-sort-rows-fresh-session-tops ()
-  ;; A live session with no log yet (no mtime) sorts to the top, newest first.
-  (let* ((sprig--status-sort '("Time" . t))
-         (rows (list '(:session "stored" :mtime 500)
+  ;; A live session with no log yet (no creation time) sorts to the top,
+  ;; newest first.
+  (let* ((sprig--status-sort '("Created" . t))
+         (rows (list '(:session "stored" :created 500)
                      '(:session "fresh")))
          (sorted (sprig--status-sort-rows rows)))
     (should (equal (plist-get (car sorted) :session) "fresh"))))
 
 (ert-deftest sprig-test-status-sort-command-flips-direction ()
   ;; The command sets the sort, and a second call on the same column flips it;
-  ;; a text column defaults ascending, Time descending.
+  ;; a text column defaults ascending, Created descending.
   (with-temp-buffer
     (sprig-status-mode)
     (sprig--status-render)
@@ -2592,18 +2841,20 @@ Return the log directory."
     (should (equal sprig--status-sort '("Title")))
     (sprig-status-sort "Title")
     (should (equal sprig--status-sort '("Title" . t)))
-    (sprig-status-sort "Time")
-    (should (equal sprig--status-sort '("Time" . t)))))
+    (sprig-status-sort "Created")
+    (should (equal sprig--status-sort '("Created" . t)))))
 
 (ert-deftest sprig-test-status-preview-line-resolves-the-row-session ()
-  ;; A verb keyed on point works from an expanded preview line: the line
+  ;; A verb keyed on point works from an inline preview line: the line
   ;; carries the row's id, so it resolves to the same session as the row.
+  ;; An active row shows its preview on its own; forcing the active check
+  ;; stands in for a live owning buffer the test does not spin up.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/prevrow")
          (sprig-remote nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
-        (progn
+        (cl-letf (((symbol-function 'sprig--status-entry-active-p) (lambda (_) t)))
           (sprig-tests--make-session-log
            root proj "sess-one"
            `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
@@ -2616,11 +2867,6 @@ Return the log directory."
             (beginning-of-line)
             (let ((id (tabulated-list-get-id)))
               (should id)
-              (sprig--status-toggle-id id)
-              (sprig--status-render)
-              (goto-char (point-min))
-              (should (search-forward "Rowed" nil t))
-              (beginning-of-line)
               ;; The line just below the row is the preview: it has no
               ;; tabulated id of its own, yet resolves to the same session.
               (forward-line 1)

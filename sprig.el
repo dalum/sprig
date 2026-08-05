@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.16.0
+;; Version: 0.17.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -176,16 +176,6 @@ feel.  Prefer leaving it nil and using `/'."
   :type '(choice (const :tag "No initial filter" nil)
                  (repeat directory)))
 
-(defcustom sprig-status-preview-max-lines nil
-  "Line cap for a navigator inline reply preview, or nil for the whole reply.
-`sprig-status-toggle-preview' (bound to TAB) expands the row at point to
-the last exchange: your last prompt as a lead line, then the agent's reply
-prose, wrapped to the window.  nil (the default) shows the reply in full,
-however long; a number bounds the prompt and reply together to that many
-lines, cutting the reply with an ellipsis.  Set a number to keep a long
-reply from filling the list."
-  :type '(choice (const :tag "Whole reply (no cap)" nil) integer))
-
 (defcustom sprig-status-live-refresh-interval 1.0
   "Seconds to coalesce live navigator refreshes over, or nil to disable them.
 While a turn is in flight its context readout and status change with every
@@ -194,15 +184,6 @@ a remote host), so it cannot run per event.  A number keeps the open
 navigator current by rendering at most once per that many seconds during a
 turn; nil leaves it refreshing only at turn boundaries, as it did before."
   :type '(choice (const :tag "Only at turn boundaries" nil) number))
-
-(defcustom sprig-status-preview-markdown t
-  "When non-nil, fontify the navigator inline reply preview with markdown.
-The expanded reply is rendered with `markdown-mode' faces and its `*'/`#'
-markup dropped, so bold, headings, lists and code read as formatting rather
-than raw characters, muted under `sprig-status-preview'.  Has no effect when
-`markdown-mode' is not installed; the reply then falls back to plainly filled
-prose.  Mirrors `sprig-review-fontify-markdown' for the review buffer."
-  :type 'boolean)
 
 (defcustom sprig-status-ignore-directories nil
   "Regexps for stored sessions the navigator should hide.
@@ -218,7 +199,7 @@ Example, hiding /tmp and everything under it:
   :type '(repeat regexp))
 
 (defface sprig-status-preview '((t :inherit shadow))
-  "Face for the inline reply preview shown under an expanded navigator row.")
+  "Face for the inline reply preview shown under an active navigator row.")
 
 (defface sprig-status-preview-prompt '((t :inherit shadow :weight bold))
   "Face for the last user prompt shown as the lead of an inline preview.
@@ -1136,6 +1117,53 @@ reproduced.  Signals a `user-error' when there is no id or no log."
           (insert-file-contents file)
           (split-string (buffer-string) "\n" t))))))
 
+(defun sprig--remote-log-command (id)
+  "Shell command that prints the stored log for session ID, or nothing.
+One SSH round trip does the whole fetch: `find' locates the log by id under
+the projects dir, then `cat' streams it.  Nothing is printed when there is no
+such log, so an empty result is `no log', not an error."
+  (let ((root (sprig--remote-dir-arg (sprig--projects-directory)))
+        (name (shell-quote-argument (concat id ".jsonl"))))
+    (format "p=$(find %s -name %s -print -quit 2>/dev/null); \
+[ -n \"$p\" ] && cat \"$p\"" root name)))
+
+(defun sprig--session-log-lines-async (callback)
+  "Fetch the current buffer's remote session-log lines in the background.
+CALLBACK is called with the lines (a list, or nil for no log or a failed
+fetch) back in the originating buffer once the SSH fetch lands, so opening or
+re-reading a remote session never blocks Emacs on the round trip.  The buffer,
+its session id, and its remote are captured now; CALLBACK is skipped if the
+buffer has since died.  Remote only: a local caller reads the file directly."
+  (let* ((buffer (current-buffer))
+         (id sprig--session-id)
+         (host (sprig--remote))
+         (command (sprig--remote-log-command id))
+         ;; Launch from a local directory so a remote `default-directory'
+         ;; cannot send the `ssh' itself through TRAMP.
+         (default-directory temporary-file-directory)
+         (out (generate-new-buffer " *sprig-log-fetch*"))
+         (proc (make-process
+                :name "sprig-log-fetch" :buffer out :noquery t
+                :connection-type 'pipe
+                :command (append (list sprig-ssh-program) sprig-ssh-args
+                                 (list host (concat "sh -c "
+                                                    (shell-quote-argument
+                                                     command)))))))
+    (set-process-sentinel
+     proc
+     (lambda (p _event)
+       (when (memq (process-status p) '(exit signal))
+         (let ((lines (and (eq (process-exit-status p) 0)
+                           (buffer-live-p (process-buffer p))
+                           (split-string
+                            (with-current-buffer (process-buffer p)
+                              (buffer-string))
+                            "\n" t))))
+           (when (buffer-live-p (process-buffer p))
+             (kill-buffer (process-buffer p)))
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer (funcall callback lines)))))))))
+
 ;; A review buffer owns its session outright: the transport routes events
 ;; to `sprig--review-sink' and its verbs steer the session directly (see
 ;; DESIGN.md, option A: CLI sessions are the branches).
@@ -1584,9 +1612,25 @@ in the background, and only the verb's own compose or answer buffer shows."
             sprig--remote-override (sprig--remote-override-value host)
             sprig--sink #'sprig--review-sink
             sprig--connect-fn #'sprig-review-connect)
-      (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
-             (events (and lines (sprig-review-session-events lines))))
-        (sprig-review-seed events (list :project dir)))
+      (if (and session-id (sprig--remote))
+          ;; A remote session's log is fetched over SSH: seed the buffer empty
+          ;; now, so opening the row returns at once, and fill in the replayed
+          ;; history when the background fetch lands.  Only if the buffer is
+          ;; still pristine by then: a turn started in the meantime is the live
+          ;; conversation now, and re-seeding would drop it.
+          (progn
+            (sprig-review-seed nil (list :project dir))
+            (sprig--session-log-lines-async
+             (lambda (lines)
+               (when (and lines
+                          (null (buffer-local-value 'sprig-review--events
+                                                     (current-buffer)))
+                          (not sprig--busy))
+                 (sprig-review-seed (sprig-review-session-events lines)
+                                    (list :project dir))))))
+        (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
+               (events (and lines (sprig-review-session-events lines))))
+          (sprig-review-seed events (list :project dir))))
       (sprig-review-set-remote (sprig--remote))
       (sprig--sync-default-directory))
     buffer))
@@ -1721,8 +1765,8 @@ On success just a message; on failure the CLI's output is shown in
 (defconst sprig--status-preview-bytes 65536
   "Bytes of a session log read from one end, for two callers.
 A row's scan reads this much from the head to recover its `cwd', which is
-in the first record; a `TAB' preview reads this much from the tail for the
-last reply, which lives at the end.  (The title is not in either window in
+in the first record; the inline preview reads this much from the tail for
+the last reply, which lives at the end.  (The title is not in either window in
 general, so it is grepped whole-file.)  Local and remote read the same
 amount, and either read is bounded however large the session grows.")
 
@@ -1786,23 +1830,30 @@ untouched and return on the next toggle.")
 
 (declare-function sprig-review-build "sprig-review" (events))
 (declare-function sprig-review-pending-dialog "sprig-review" (model))
+(declare-function sprig-review--current-model "sprig-review" ())
 
 (defun sprig--buffer-awaiting-answer-p (buf)
   "Non-nil when owning review BUF has a dialog still waiting on the user.
 A pending `AskUserQuestion', plan approval, or permission prompt each
 count: the CLI is stopped until it hears back, which is what the `waiting'
-status flags in the navigator."
+status flags in the navigator.
+
+Reads BUF's memoised model (`sprig-review--current-model'), not a fresh
+`sprig-review-build': this runs per buffer inside `sprig--session-status',
+which the navigator collect calls twice a tick, so a fresh O(all events)
+build here (and in `sprig--buffer-agent-running-p', and the inline preview)
+meant several full rebuilds a tick per active session.  Sharing the memo
+collapses them to one."
   (sprig-review-pending-dialog
-   (sprig-review-build
-    (reverse (buffer-local-value 'sprig-review--events buf)))))
+   (with-current-buffer buf (sprig-review--current-model))))
 
 (defun sprig--buffer-agent-running-p (buf)
   "Non-nil when a background agent BUF's session launched is still running.
 Reads the buffer's own events, the same source its render and inline
-preview use, so the row agrees with what the review buffer shows."
+preview use, so the row agrees with what the review buffer shows.  Via the
+memoised model (see `sprig--buffer-awaiting-answer-p'), not a fresh build."
   (and (sprig-review-agent-running
-        (sprig-review-build
-         (reverse (buffer-local-value 'sprig-review--events buf))))
+        (with-current-buffer buf (sprig-review--current-model)))
        t))
 
 (defun sprig--session-status (buf)
@@ -1857,6 +1908,19 @@ Every CLI record carries the session's `cwd', so any slice of the log
 holds it; the scan reads the head, where the first record already has it."
   (and (string-match "\"cwd\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text)
        (ignore-errors (json-parse-string (match-string 1 text)))))
+
+(defun sprig--log-created (text)
+  "Return the session-creation time from log TEXT as an epoch time, or nil.
+The log is append-only, so its first record dates the session's creation; its
+`timestamp' is read from the same head the `cwd' is (see `sprig--log-cwd'),
+the first match winning.  An epoch float, so it sorts and formats like the
+scan's mtime (see `sprig--format-time-value')."
+  (and text
+       (string-match "\"timestamp\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text)
+       (ignore-errors
+         (float-time
+          (encode-time
+           (iso8601-parse (json-parse-string (match-string 1 text))))))))
 
 (defun sprig--log-title (text)
   "Return the last `aiTitle' recorded in session-log TEXT, or nil.
@@ -1928,12 +1992,14 @@ lines, is consulted, so a title pushed past the head window is still found."
                        (file-name-nondirectory
                         (directory-file-name (file-name-directory file))))
           :mtime mtime
+          :created (and head (sprig--log-created head))
           :title (or title "(untitled)"))))
 
 (defun sprig--scan-session-logs ()
   "Return session plists for the newest stored logs on the session host.
 Each plist has :session, :file, :dir (the log's recorded cwd, or nil),
-:project (its display label), :mtime, and :title.  Sourced host-wide from
+:project (its display label), :mtime, :created (its first record's timestamp,
+what the navigator dates and sorts by), and :title.  Sourced host-wide from
 `sprig-claude-projects-directory',
 newest first, capped to `sprig--status-limit' so a host with hundreds of
 sessions still paints fast."
@@ -1962,73 +2028,68 @@ sessions still paints fast."
                                 (lambda () (sprig--local-title-line (cdr cell)))))
             dated)))
 
+(defun sprig--remote-scan-cap (limit)
+  "The server-side listing cap for LIMIT: LIMIT, widened for an ignore list.
+The scan lists and slurps in one pass, so it cannot list uncapped and slurp
+only the survivors the way a two-pass scan would; an ignore list may drop
+some of the newest, so a little headroom keeps the capped set full."
+  (cond ((null limit) 1000000)
+        (sprig-status-ignore-directories (* 2 limit))
+        (t limit)))
+
+(defun sprig--remote-scan-all-command (root cap)
+  "Shell command listing the CAP newest logs under ROOT with their scan fields.
+One SSH round trip does the whole scan: `find | sort | head' picks the newest
+logs by mtime, then each is slurped for its mtime, path, head bytes (for the
+`cwd'), and its last `ai-title' line (for the title, grepped whole-file since
+it can sit anywhere).  Records are RS(\\036)-separated, fields US(\\037)-
+separated, for `sprig--parse-scan-rows'."
+  (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' 2>/dev/null \
+| sort -rn | head -n %d | while IFS='\t' read -r m p; do \
+printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; head -c %d \"$p\"; \
+printf '\\037'; grep -a aiTitle \"$p\" | tail -1; done"
+          root cap sprig--status-preview-bytes))
+
+(defun sprig--parse-scan-rows (blob limit)
+  "Parse BLOB from `sprig--remote-scan-all-command' into scan plists.
+Records are RS(\\036)-separated; each is mtime, path, head bytes, and the
+`ai-title' line, US(\\037)-separated.  Ignored logs are dropped and the rest
+capped to LIMIT, newest first, matching `sprig--scan-session-logs'.  The head
+holds no US byte in any real log, so it is bounded by the first two."
+  (let (rows)
+    (dolist (chunk (and blob (split-string blob "\036" t)))
+      (let ((p1 (string-search "\037" chunk)))
+        (when p1
+          (let* ((mtime (string-to-number (substring chunk 0 p1)))
+                 (rest1 (substring chunk (1+ p1)))
+                 (p2 (string-search "\037" rest1)))
+            (when p2
+              (let* ((path (substring rest1 0 p2))
+                     (rest2 (substring rest1 (1+ p2)))
+                     (p3 (string-search "\037" rest2))
+                     (head (if p3 (substring rest2 0 p3) rest2))
+                     (raw (and p3 (string-trim (substring rest2 (1+ p3)))))
+                     (title (and raw (not (string-empty-p raw)) raw)))
+                (unless (sprig--log-ignored-p path)
+                  (push (sprig--log-plist path mtime head (lambda () title))
+                        rows))))))))
+    (setq rows (nreverse rows))
+    (if limit (seq-take rows limit) rows)))
+
 (defun sprig--scan-session-logs-remote (limit)
-  "Scan the LIMIT newest remote logs under `sprig-claude-projects-directory'.
-Two SSH round trips whatever LIMIT is: one lists the newest logs by mtime,
-one slurps each log's head (for the cwd) and its last `ai-title' line (for
-the title, grepped whole-file since it can sit anywhere).  With an ignore
-list the listing is uncapped so the drop happens before the cap; otherwise
-the cap is applied server-side to keep the listing small."
+  "Scan the newest remote logs under `sprig-claude-projects-directory'.
+One SSH round trip: `sprig--remote-scan-all-command' lists the newest logs
+and slurps each one's fields, and `sprig--parse-scan-rows' turns the blob into
+plists.  LIMIT caps the set.  This is the synchronous entry (it blocks on the
+round trip); the navigator drives the same scan in the background instead (see
+`sprig--status-scan-async')."
   (let* ((root (sprig--remote-dir-arg
                 (directory-file-name (sprig--projects-directory))))
-         (server-cap (and limit (not sprig-status-ignore-directories) limit))
-         (listing (ignore-errors
-                    (sprig--remote-sh
-                     (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' \
-2>/dev/null | sort -rn | head -n %d"
-                             root (or server-cap 1000000)))))
-         (dated (seq-remove
-                 (lambda (cell) (sprig--log-ignored-p (cdr cell)))
-                 (delq nil
-                       (mapcar (lambda (line)
-                                 (when (string-match "\\`\\([0-9.]+\\)\t\\(.+\\)\\'"
-                                                     line)
-                                   (cons (string-to-number (match-string 1 line))
-                                         (match-string 2 line))))
-                               (split-string (or listing "") "\n" t))))))
-    (when (and limit sprig-status-ignore-directories)
-      (setq dated (seq-take dated limit)))
-    (when dated
-      (let* ((paths (mapcar #'cdr dated))
-             (blob (ignore-errors
-                     (sprig--remote-sh (sprig--remote-scan-command paths))))
-             (scan (sprig--parse-scan-blob blob)))
-        (mapcar (lambda (cell)
-                  (let ((fields (gethash (cdr cell) scan)))
-                    (sprig--log-plist (cdr cell) (car cell)
-                                      (car fields)
-                                      (lambda () (cdr fields)))))
-                dated)))))
-
-(defun sprig--remote-scan-command (paths)
-  "Shell command printing each of PATHS' scan fields, record-separated.
-Per file: RS, path, US, its head bytes (for the `cwd'), US, then its last
-`ai-title' line grepped from the whole file (for the title, wherever it
-sits).  The set returns in one SSH round trip for `sprig--parse-scan-blob'."
-  (concat "for f in " (mapconcat #'shell-quote-argument paths " ")
-          (format "; do printf '\\036%%s\\037' \"$f\"; head -c %d \"$f\"; \
-printf '\\037'; grep -a aiTitle \"$f\" | tail -1; done"
-                  sprig--status-preview-bytes)))
-
-(defun sprig--parse-scan-blob (blob)
-  "Parse BLOB from `sprig--remote-scan-command' into path -> (head . title).
-Each record is path, then its head bytes, then its `ai-title' line, split
-on the US byte; the title is nil when the file had none."
-  (let ((map (make-hash-table :test 'equal)))
-    (dolist (chunk (and blob (split-string blob "\036" t)))
-      (let ((us (string-search "\037" chunk)))
-        (when us
-          (let* ((path (substring chunk 0 us))
-                 (rest (substring chunk (1+ us)))
-                 (us2 (string-search "\037" rest)))
-            (puthash path
-                     (if us2
-                         (let ((title (substring rest (1+ us2))))
-                           (cons (substring rest 0 us2)
-                                 (unless (string-empty-p title) title)))
-                       (cons rest nil))
-                     map)))))
-    map))
+         (blob (ignore-errors
+                 (sprig--remote-sh
+                  (sprig--remote-scan-all-command
+                   root (sprig--remote-scan-cap limit))))))
+    (sprig--parse-scan-rows blob limit)))
 
 ;;; Last-reply preview
 
@@ -2087,29 +2148,40 @@ outcome, context size, and permission mode for the preview's state line.
 When the turn since your prompt carried no prose (it ended on a tool call or
 a question), or there is no user turn at all, the reply falls back to the
 last assistant text anywhere.  EVENTS are chronological (the review model's
-input order)."
-  (let* ((model (ignore-errors (sprig-review-build events)))
-         (blocks (and model (plist-get model :blocks))))
+input order).
+
+Building the model is O(all events); an owning buffer already has one, so
+`sprig--entry-preview' hands its cached model to `sprig--model-preview'
+directly rather than rebuilding it here."
+  (sprig--model-preview (ignore-errors (sprig-review-build events))))
+
+(defun sprig--model-preview (model)
+  "Return a preview plist for a built review MODEL, or nil.
+The extraction half of `sprig--events-preview' (which see for the plist),
+split out so a caller holding a model already built need not build another."
+  (let* ((blocks (and model (plist-get model :blocks))))
     (when blocks
       (let* ((last-user (let ((pos nil) (i 0))
                           (dolist (b blocks)
                             (when (eq (plist-get b :type) 'user) (setq pos i))
                             (setq i (1+ i)))
                           pos))
-             (prompt (and last-user
+             (prompt-block (and last-user (nth last-user blocks)))
+             (prompt (and prompt-block
                           (sprig--collapse-whitespace
-                           (plist-get (nth last-user blocks) :text))))
-             (reply (or (and last-user
-                             (let ((final (seq-find
-                                           (lambda (b) (eq (plist-get b :type) 'text))
-                                           (reverse (nthcdr (1+ last-user) blocks)))))
-                               (and final (sprig--tidy-prose
-                                           (plist-get final :text)))))
-                        (let ((last (seq-find
-                                     (lambda (b) (eq (plist-get b :type) 'text))
-                                     (reverse blocks))))
-                          (and last (sprig--tidy-prose
-                                     (plist-get last :text)))))))
+                           (plist-get prompt-block :text))))
+             ;; The reply block itself, so the preview can date it (its `:time'):
+             ;; the last prose of the turn that answered the prompt, or the last
+             ;; prose anywhere when that turn carried none.
+             (reply-block (or (and last-user
+                                   (seq-find
+                                    (lambda (b) (eq (plist-get b :type) 'text))
+                                    (reverse (nthcdr (1+ last-user) blocks))))
+                              (seq-find
+                               (lambda (b) (eq (plist-get b :type) 'text))
+                               (reverse blocks))))
+             (reply (and reply-block (sprig--tidy-prose
+                                      (plist-get reply-block :text)))))
         (let ((prompt* (and prompt (not (string-empty-p prompt)) prompt))
               (ctx (plist-get model :context))
               (done (plist-get model :done))
@@ -2120,22 +2192,31 @@ input order)."
           (when (or prompt* reply ctx done err pending mode agent-running)
             (list :prompt prompt* :reply reply
                   :time (plist-get (car (last blocks)) :time)
+                  ;; Each side's own block time, so the navigator can date the
+                  ;; prompt and the reply on their own lines (see
+                  ;; `sprig--status-preview-lines').
+                  :prompt-time (and prompt* (plist-get prompt-block :time))
+                  :reply-time (and reply (plist-get reply-block :time))
                   :context ctx :done done :error err :mode mode
                   :pending pending :agent-running agent-running)))))))
 
 (defun sprig--entry-preview (entry)
   "Return the inline preview plist for status ENTRY, or nil.
-From the open review buffer's events when ENTRY has one, else the stored
+From the open review buffer's model when ENTRY has one, else the stored
 session log's tail, read on the host that row's session ran on rather than
 the configured default: with a group per host the two are often not the
-same, and the wrong one has no such log."
+same, and the wrong one has no such log.
+
+An open buffer's model is taken from `sprig-review--current-model', which
+memoises the build the buffer's own render already paid for, so the
+navigator does not rebuild the whole transcript on every refresh."
   (let ((buf (plist-get entry :buffer))
         (file (plist-get entry :file))
         (sprig-remote (plist-get entry :host)))
     (cond
      ((buffer-live-p buf)
-      (sprig--events-preview
-       (reverse (buffer-local-value 'sprig-review--events buf))))
+      (sprig--model-preview
+       (with-current-buffer buf (sprig-review--current-model))))
      (file
       (let ((tail (sprig--session-log-tail file)))
         (and tail (sprig--events-preview
@@ -2143,13 +2224,141 @@ same, and the wrong one has no such log."
 
 ;;; Collect open buffers and stored sessions into rows
 
+(defvar sprig--status-scan-cache nil
+  "Cached log scan per host and root: an alist of (HOST . ROOT) -> (TIME . ROWS).
+The navigator re-renders on every stream event (coalesced to at most one a
+second), but the stored logs on disk do not change within a turn except the
+live session's own, whose row is built from its owning buffer, not this scan.
+So the scan is cached and reused across those live re-renders, which would
+otherwise re-read every session log each second on the main thread; for a
+remote host that read is a blocking SSH round trip that freezes all of Emacs.
+`sprig--status-scan-invalidate' marks it stale at structural moments (a session
+opening, starting, ending, or being removed, or a manual revert), keeping the
+rows for display; the next render re-scans in the background (local or remote,
+see `sprig--status-scan-async').  `sprig--status-scan-cache-ttl' is a
+backstop.")
+
+(defvar sprig--status-scan-cache-ttl 10.0
+  "Seconds a cached navigator log scan is reused before a forced re-scan.
+A backstop under the structural invalidation in `sprig--status-scan-invalidate',
+so a session another process creates still surfaces during a long streaming
+turn.  A live session's own row never goes through this cache, never stale.")
+
+(defvar sprig--status-remote-scan-hosts nil
+  "Hosts with a background navigator scan in flight, so one runs per host.
+nil is the local machine, a valid element like any SSH destination.")
+
+(defun sprig--status-scan-cached (host)
+  "Return the cached log scan for HOST, refreshing it when it is stale.
+A fresh cache (younger than `sprig--status-scan-cache-ttl' and not
+invalidated) is returned as is.  When it is stale but rows are already cached,
+they are returned at once and a background scan refreshes them (see
+`sprig--status-scan-async'), so neither the disk read nor an SSH round trip
+ever blocks the recurring render.  A cold cache with nothing to show yet scans
+in the background too for a remote host, so even the first open never waits on
+the network; only a cold local host scans synchronously, a cheap capped `find'
+paid once at the first open so the list paints populated.
+Keyed on the projects root too, so a `sprig-config-directory' switch (and each
+test's own root) re-reads.  This is what keeps a streaming turn's navigator
+re-render off the disk and off SSH (see `sprig--status-scan-cache')."
+  (let* ((key (cons host (sprig--projects-directory)))
+         (cell (assoc key sprig--status-scan-cache))
+         (age (and cell (float-time (time-subtract (current-time) (cadr cell))))))
+    (cond
+     ((and age (< age sprig--status-scan-cache-ttl)) (cddr cell))
+     ;; Stale, with rows to show: refresh in the background, never block.  This
+     ;; is every recurring refresh once the cache is warm, local or remote.
+     (cell
+      (sprig--status-scan-async host)
+      (cddr cell))
+     ;; Cold remote: scan in the background too and show nothing yet, so even
+     ;; the navigator's first open never waits on an SSH round trip.  The
+     ;; repaint lands when the scan does.
+     (host
+      (sprig--status-scan-async host)
+      nil)
+     ;; Cold local: one synchronous disk scan, once at the navigator's first
+     ;; open.  A capped local `find' is cheap and on no network, so the single
+     ;; blocking read is imperceptible and keeps the first paint populated.
+     ;; `sprig-remote' is bound to the host (nil) so the scan runs locally even
+     ;; when a remote is configured as the session default.
+     (t
+      (let ((rows (let ((sprig-remote host)) (sprig--scan-session-logs))))
+        (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
+              (cons (current-time) rows))
+        rows)))))
+
+(defun sprig--status-scan-async (host)
+  "Scan HOST's logs in a background process, then cache and re-render.
+HOST is nil for the local machine (the scan runs in a bare `sh -c') or an SSH
+destination (the same scan wrapped in `ssh').  Either way the shell does the
+`find | sort | head | slurp' off the main thread, so the navigator never
+blocks: `sprig--status-scan-cached' shows the last cached rows (or none yet)
+and this repaints when the process lands.  One scan per host runs at a time,
+so a burst of stale reads spawns just one; the sentinel drops the in-flight
+mark, caches the parsed rows, and refreshes the open navigator."
+  (unless (member host sprig--status-remote-scan-hosts)
+    (let* ((sprig-remote host)
+           (limit (sprig--status-limit))
+           (key (cons host (sprig--projects-directory)))
+           (root (if host
+                     (sprig--remote-dir-arg
+                      (directory-file-name (sprig--projects-directory)))
+                   (shell-quote-argument
+                    (directory-file-name
+                     (expand-file-name (sprig--projects-directory))))))
+           (command (sprig--remote-scan-all-command
+                     root (sprig--remote-scan-cap limit)))
+           ;; A local scan must launch from a local directory: a remote
+           ;; `default-directory' would send the `sh' through TRAMP and defeat
+           ;; the point.  The `ssh' command is explicit, so a local cwd suits
+           ;; it too.
+           (default-directory temporary-file-directory)
+           (buffer (generate-new-buffer " *sprig-status-scan*"))
+           (proc (make-process
+                  :name "sprig-status-scan" :buffer buffer :noquery t
+                  :connection-type 'pipe
+                  :command (if host
+                               (append (list sprig-ssh-program) sprig-ssh-args
+                                       (list host (concat "sh -c "
+                                                          (shell-quote-argument
+                                                           command))))
+                             (list "sh" "-c" command)))))
+      (push host sprig--status-remote-scan-hosts)
+      (set-process-sentinel
+       proc
+       (lambda (p _event)
+         (when (memq (process-status p) '(exit signal))
+           (setq sprig--status-remote-scan-hosts
+                 (delete host sprig--status-remote-scan-hosts))
+           (when (and (eq (process-exit-status p) 0)
+                      (buffer-live-p (process-buffer p)))
+             (let ((rows (sprig--parse-scan-rows
+                          (with-current-buffer (process-buffer p) (buffer-string))
+                          limit)))
+               (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
+                     (cons (current-time) rows))))
+           (when (buffer-live-p (process-buffer p))
+             (kill-buffer (process-buffer p)))
+           (sprig--status-render-if-live)))))))
+
+(defun sprig--status-scan-invalidate ()
+  "Mark every cached log scan stale so the next render re-reads it.
+The rows are kept for display, only the timestamp is expired: a group then
+shows its last rows while a background re-scan runs rather than blanking to
+nothing.  Called when the stored set can have changed under the navigator: it
+is opened or reverted, or a session starts, opens, is removed, or ends."
+  (dolist (cell sprig--status-scan-cache)
+    (setcar (cdr cell) 0)))
+
 (defun sprig--status-collect ()
   "Return status plists for all branches, grouped by the host they run on.
 Each plist has :key, :host (nil for local, else an SSH destination),
 :buffer (or nil), :file (or nil), :dir (a real working directory or nil),
-:project (its display label), :title, :status, and :session.  An open
-session-owning review buffer wins over its stored log, carrying live
-status and a session with no log yet.
+:project (its display label), :title, :status, :session, :mtime (its log's
+last-run time), and :created (its creation time, what the list dates and sorts
+by).  An open session-owning review buffer wins over its stored log, carrying
+live status and a session with no log yet.
 
 The :key pairs the host with the session id, because an id is only unique
 on the host that issued it: two hosts can hand out the same one and they
@@ -2162,7 +2371,15 @@ group filtered down to nothing keeps its heading all the same."
     (dolist (buf (sprig--owning-review-buffers))
       (let* ((host (sprig--buffer-remote buf))
              (id (buffer-local-value 'sprig--session-id buf))
-             (key (cons host (or id buf))))
+             ;; A fork resumes the parent's id until the CLI answers with its
+             ;; own.  Key such a fork-in-flight by its buffer, not that shared
+             ;; id, so it does not mask the parent's own row (its stored log, or
+             ;; its open buffer) during the handover: they would otherwise
+             ;; collapse into one row and the original would look gone until the
+             ;; fork got its id.  Once it does, the fork flag clears and it keys
+             ;; by id like any other session.
+             (forking (buffer-local-value 'sprig--fork-session buf))
+             (key (cons host (if forking buf (or id buf)))))
         (unless (gethash key table)
           (push key order)
           (puthash key
@@ -2179,14 +2396,20 @@ group filtered down to nothing keeps its heading all the same."
                                     (sprig-review-events-title
                                      (buffer-local-value 'sprig-review--events buf)))
                          :status (sprig--session-status buf)
+                         ;; Live buffer-local state, like the status: a message
+                         ;; held for the running turn is invisible otherwise
+                         ;; (nothing was sent), so carry its count for the state
+                         ;; line the way the review buffer shows it.
+                         :queued (length (buffer-local-value 'sprig--queued buf))
                          :session id)
                    table))))
     (dolist (host (sprig--status-hosts))
       ;; The scan, and everything it reaches (the head slurp, the SSH round
-      ;; trips), keys off `sprig-remote', so the host is bound rather than
-      ;; threaded through every one of them: one host per pass, each with a
-      ;; cap of its own so a busy host cannot crowd the other out.
-      (dolist (e (let ((sprig-remote host)) (sprig--scan-session-logs)))
+      ;; trips), keys off `sprig-remote', which `sprig--status-scan-cached'
+      ;; binds per host: one host per pass, each with a cap of its own so a
+      ;; busy host cannot crowd the other out, and each cached so a live
+      ;; re-render reuses it rather than re-reading the disk.
+      (dolist (e (sprig--status-scan-cached host))
         (let* ((key (cons host (plist-get e :session)))
                (existing (gethash key table)))
           (cond
@@ -2200,15 +2423,19 @@ group filtered down to nothing keeps its heading all the same."
                            :title (plist-get e :title)
                            :status 'disconnected
                            :mtime (plist-get e :mtime)
+                           :created (plist-get e :created)
                            :session (plist-get e :session))
                      table))
            ;; An owning buffer borrows the log's mtime (so an open row shows
-           ;; when it last ran too) and its title, if it could not title itself.
+           ;; when it last ran too), its creation time (what the list sorts and
+           ;; dates by), and its title, if it could not title itself.
            (t
             (unless (plist-get existing :title)
               (setq existing (plist-put existing :title (plist-get e :title))))
             (unless (plist-get existing :mtime)
               (setq existing (plist-put existing :mtime (plist-get e :mtime))))
+            (unless (plist-get existing :created)
+              (setq existing (plist-put existing :created (plist-get e :created))))
             (puthash key existing table))))))
     (let ((rows (mapcar (lambda (k)
                           (let ((e (gethash k table)))
@@ -2254,17 +2481,19 @@ being filed under someone else's heading."
           (lambda (a b) (< (gethash (plist-get a :host) rank 0)
                            (gethash (plist-get b :host) rank 0))))))
 
-(defvar-local sprig--status-sort '("Time" . t)
+(defvar-local sprig--status-sort '("Created" . t)
   "Active navigator sort as (COLUMN-NAME . DESCENDING-P).
 Applied within each host group, before the stable group sort, so the two
 groups stay apart while their rows order by the chosen column.  The default
-sorts by `Time' descending, newest first.  `sprig-status-sort' changes it.")
+sorts by `Created' descending, newest-created first: unlike a last-activity
+sort, a session then keeps its place as it runs rather than jumping to the top
+each turn.  `sprig-status-sort' changes it.")
 
-(defun sprig--status-entry-time (entry)
-  "Return ENTRY's sort time: its log mtime, or now for a session with no log.
-A live session not yet written to a log is the freshest thing there is, so
-it sorts to the top of a newest-first list rather than the bottom."
-  (or (plist-get entry :mtime) most-positive-fixnum))
+(defun sprig--status-entry-created (entry)
+  "Return ENTRY's sort key: its session-creation time, or now if it has none.
+A live session not yet written to a log is the freshest thing there is, so it
+sorts to the top of a newest-first list rather than the bottom."
+  (or (plist-get entry :created) most-positive-fixnum))
 
 (defun sprig--status-rank (status)
   "Return a sort rank for STATUS, busiest (streaming) first."
@@ -2274,8 +2503,8 @@ it sorts to the top of a newest-first list rather than the bottom."
 (defun sprig--status-row-less (name)
   "Return an ascending `sort' predicate over status entries for column NAME."
   (pcase name
-    ("Time" (lambda (a b) (< (sprig--status-entry-time a)
-                             (sprig--status-entry-time b))))
+    ("Created" (lambda (a b) (< (sprig--status-entry-created a)
+                                (sprig--status-entry-created b))))
     ("S" (lambda (a b) (< (sprig--status-rank (plist-get a :status))
                           (sprig--status-rank (plist-get b :status)))))
     (_ (let ((k (pcase name ("Title" :title) ("Project" :project) (_ :session))))
@@ -2285,7 +2514,7 @@ it sorts to the top of a newest-first list rather than the bottom."
 (defun sprig--status-sort-rows (rows)
   "Sort ROWS by `sprig--status-sort' ahead of the stable group sort, so the
 column order becomes the order within each host group."
-  (pcase-let ((`(,name . ,desc) (or sprig--status-sort '("Time" . t))))
+  (pcase-let ((`(,name . ,desc) (or sprig--status-sort '("Created" . t))))
     (let ((less (sprig--status-row-less name)))
       (sort (copy-sequence rows)
             (if desc (lambda (a b) (funcall less b a)) less)))))
@@ -2329,14 +2558,23 @@ lines so TAB folds them the way it folds a host group.")
 Filled by `sprig--status-insert-notes' from `sprig-notes-file', so
 `sprig--status-note-at-point' can resolve the note a row stands for.")
 
+(defvar sprig--status-render-rows nil
+  "Rows already collected for the render in progress, or nil.
+`sprig--status-render-if-live' collects once for its signature check, then
+renders; without this the render's `sprig--status-entries' would collect a
+second time in the same synchronous pass (no event lands between them, so the
+two are identical).  Bound to that first collect for the span of the render, it
+lets the entry build reuse it rather than repeat the whole scan and status
+sweep.  nil off the live path, where each caller collects fresh.")
+
 (defun sprig--status-entries ()
-  "Build `tabulated-list-entries' from a fresh `sprig--status-collect'.
-The entry id is the entry's `:key' (its host paired with its session id,
-else with its buffer): stable across refreshes, so point and inline-preview
-state survive.  Stale ids are pruned from `sprig--status-expanded' so it
-never outlives its row."
+  "Build `tabulated-list-entries' from `sprig--status-collect'.
+Reuses `sprig--status-render-rows' when the live path already collected this
+pass, else collects fresh.  The entry id is the entry's `:key' (its host paired
+with its session id, else with its buffer): stable across refreshes, so point
+survives."
   (let ((index (make-hash-table :test 'equal))
-        (collected (sprig--status-collect))
+        (collected (or sprig--status-render-rows (sprig--status-collect)))
         rows)
     (setq sprig--status-groups (sprig--status-group-hosts collected))
     (dolist (e collected)
@@ -2360,7 +2598,7 @@ never outlives its row."
                                   (substring session 0 (min 8 (length session)))
                                 "-")
                               (propertize
-                               (or (sprig--format-time-value (plist-get e :mtime))
+                               (or (sprig--format-time-value (plist-get e :created))
                                    "-")
                                'face 'sprig-status-preview)))
                 rows))))
@@ -2373,34 +2611,17 @@ never outlives its row."
                   (when sprig--status-sort
                     (format " %s%s" (if (cdr sprig--status-sort) "↓" "↑")
                             (car sprig--status-sort)))))
-    (sprig--status-prune-expanded index)
     (nreverse rows)))
 
 ;;; Inline reply previews
 
-(defvar-local sprig--status-expanded nil
-  "Hash table of navigator entry ids currently showing an inline preview.")
-
-(defun sprig--status-prune-expanded (index)
-  "Drop ids from `sprig--status-expanded' absent from INDEX.
-An entry's id changes when it flips identity (an owning buffer gains a
-session id once its log exists), which would otherwise strand its expanded
-flag and desync the hash from the screen, so a later TAB toggles the
-phantom instead of the row."
-  (when sprig--status-expanded
-    (let (stale)
-      (maphash (lambda (id _)
-                 (unless (gethash id index) (push id stale)))
-               sprig--status-expanded)
-      (dolist (id stale) (remhash id sprig--status-expanded)))))
-
-(defun sprig--status-toggle-id (id)
-  "Toggle inline-preview state for entry ID; return the new state."
-  (unless sprig--status-expanded
-    (setq sprig--status-expanded (make-hash-table :test 'equal)))
-  (if (gethash id sprig--status-expanded)
-      (progn (remhash id sprig--status-expanded) nil)
-    (puthash id t sprig--status-expanded) t))
+(defun sprig--status-entry-active-p (entry)
+  "Non-nil when ENTRY is a live session rather than a disconnected log.
+An active session has an owning review buffer, so its status is one of the
+live states rather than `disconnected'.  The navigator keeps such a row's
+inline preview open at all times; a disconnected row shows only its own
+line, and you open it with RET for the full transcript."
+  (not (eq (plist-get entry :status) 'disconnected)))
 
 ;;; Collapsing a host group to its heading
 
@@ -2439,63 +2660,12 @@ heading and not a row."
     (beginning-of-line)
     found))
 
-(defun sprig--fill-to-lines (text width)
-  "Fill TEXT to WIDTH columns and return it as a list of lines."
-  (with-temp-buffer
-    (insert text)
-    (let ((fill-column width))
-      (fill-region (point-min) (point-max)))
-    (split-string (buffer-string) "\n" t)))
-
-(defvar markdown-hide-markup)
-(declare-function markdown-mode "markdown-mode" ())
-(declare-function markdown-toggle-markup-hiding "markdown-mode" (&optional arg))
-
-(defun sprig--markdown-fill (text width)
-  "Return TEXT as markdown-fontified display lines filled to WIDTH, or nil.
-Fontifies in a reusable hidden buffer with `markdown-mode', fills the prose
-to WIDTH, then drops the `*'/`#' markup characters markdown marked invisible
-and underlays `sprig-status-preview' so plain prose stays muted while bold,
-headings and code keep their markdown faces.  Returns nil when
-`sprig-status-preview-markdown' is off or `markdown-mode' is not installed,
-so the caller can fall back to plain prose."
-  (when (and sprig-status-preview-markdown
-             (require 'markdown-mode nil t))
-    (with-current-buffer (get-buffer-create " *sprig-status-markdown*")
-      (let ((inhibit-read-only t))
-        (erase-buffer)
-        (delay-mode-hooks (markdown-mode))
-        (setq-local markdown-hide-markup t)
-        ;; The toggle wires markup hiding fully where merely setting the flag
-        ;; may not (mirrors `sprig-review--fontify-markdown').
-        (when (fboundp 'markdown-toggle-markup-hiding)
-          (ignore-errors (markdown-toggle-markup-hiding 1)))
-        (insert text)
-        (font-lock-ensure)
-        ;; Fill first, while the markup is still present for markdown's
-        ;; paragraph detection, then delete what it marked invisible so the
-        ;; markers neither eat width nor show through.
-        (let ((fill-column width))
-          (fill-region (point-min) (point-max)))
-        (let ((pos (point-min)))
-          (while (< pos (point-max))
-            (let ((next (or (next-single-property-change pos 'invisible)
-                            (point-max))))
-              (if (get-text-property pos 'invisible)
-                  (delete-region pos next)
-                (setq pos next)))))
-        (add-face-text-property (point-min) (point-max) 'sprig-status-preview t)
-        (split-string (string-trim-right (buffer-string) "\n+") "\n")))))
-
-(defun sprig--status-reply-lines (reply width)
-  "Return REPLY as display lines wrapped to WIDTH.
-With `markdown-mode' and `sprig-status-preview-markdown' on the lines carry
-markdown faces (see `sprig--markdown-fill'); otherwise the reply collapses to
-prose and fills in the muted preview face."
-  (or (sprig--markdown-fill reply width)
-      (mapcar (lambda (l) (propertize l 'face 'sprig-status-preview))
-              (sprig--fill-to-lines (or (sprig--normalize-prose reply) reply)
-                                    width))))
+(defun sprig--status-reply-oneline (reply)
+  "Return REPLY collapsed to a single line of prose for the inline preview.
+Paragraph breaks and wrapping are dropped to whitespace, since the row
+shows only a one-line teaser; RET opens the review buffer for the whole
+reply."
+  (sprig--collapse-whitespace (or reply "")))
 
 (defun sprig--ellipsize (text width)
   "Return TEXT truncated to WIDTH columns, ending in an ellipsis if cut."
@@ -2541,9 +2711,11 @@ status, as the row glyph does; the turn's outcome, permission mode, and
 context size come from PREVIEW's model fields.  nil when there is no status
 and no model at all (nothing to say)."
   (let ((status (plist-get entry :status))
+        (queued (plist-get entry :queued))
         (ctx (plist-get preview :context))
         (mode (sprig--notable-mode (plist-get preview :mode))))
-    (when (or status ctx mode (plist-get preview :done) (plist-get preview :error)
+    (when (or status ctx mode (and queued (> queued 0))
+              (plist-get preview :done) (plist-get preview :error)
               (plist-get preview :pending) (plist-get preview :agent-running))
       (pcase-let
           ((`(,glyph ,text ,face)
@@ -2557,6 +2729,13 @@ and no model at all (nothing to say)."
               ((eq status 'interrupted) 'interrupted)
               (t 'idle)))))
         (concat (propertize (format "     %s  %s" glyph text) 'face face)
+                ;; A queued message is invisible otherwise (nothing was sent),
+                ;; and it fires on its own when the turn ends, so flag it here
+                ;; the way the review buffer's state line does, in its own face.
+                (when (and queued (> queued 0))
+                  (concat (propertize "  ·  " 'face face)
+                          (propertize (format "%d queued" queued)
+                                      'face 'sprig-review-pending)))
                 ;; The permission mode rides its own tag, coloured on its own
                 ;; terms rather than the turn's, the way the review buffer's
                 ;; mode line carries `[plan]'.  Only the notable modes show.
@@ -2599,21 +2778,22 @@ plain `sprig-review-context' face, exactly as the plain readout already does."
 (defun sprig--status-preview-lines (entry)
   "Return the propertized display lines for ENTRY's inline preview.
 A leading state line (what the turn is doing or how it ended, and the context
-in use), then the last exchange, indented: your last prompt as one lead line,
-then the agent's reply prose wrapped to the window.  The exchange's time is not
-repeated here; it rides the row's own `Time' column, visible collapsed too.
-`sprig-status-preview-max-lines' bounds the prompt and reply together when it is
-a number; nil (the default) shows the whole reply.  A row with no reply yet
-shows a single muted placeholder.
+in use), then the last exchange, indented: your last prompt as one line, then
+the agent's reply as one line, each dated with its own time (`HH:MM', muted)
+and trimmed with an ellipsis where it runs past the window.  The times ride
+the lines themselves rather than the row's own column, which now dates the
+session's creation instead.  Both are teasers: open the row with RET for the
+whole transcript.  A row with no reply yet shows a single muted placeholder.
 
-While the turn is still streaming the reply is held back: the growing prose
-is noise until it settles, so only the prompt rides under the `working…' state
-line.  The reply appears once the turn is over, or the moment it needs you (a
-question or a plan), which is exactly when it is worth reading."
+The reply updates live as the turn streams, so the row shows the last message
+as it grows under the `working…' state line, not only once the turn settles:
+a one-line teaser is cheap to refresh and the point of watching a row run is
+to see what it is saying now."
   (let* ((preview (sprig--entry-preview entry))
          (prompt (plist-get preview :prompt))
-         (reply (and (not (eq (plist-get entry :status) 'streaming))
-                     (plist-get preview :reply)))
+         (reply (plist-get preview :reply))
+         (ptime (sprig--format-time (plist-get preview :prompt-time)))
+         (rtime (sprig--format-time (plist-get preview :reply-time)))
          (state (sprig--status-state-line entry preview))
          (width (max 24 (- (min 100 (window-width)) 6)))
          (lines '()))
@@ -2623,29 +2803,30 @@ question or a plan), which is exactly when it is worth reading."
       (push (propertize "     (no reply yet)" 'face 'sprig-status-preview) lines))
      (t
       (when prompt
-        (push (propertize (concat "     » " (sprig--ellipsize prompt (- width 2)))
-                          'face 'sprig-status-preview-prompt)
-              lines))
+        (let* ((stamp (if ptime (concat ptime " ") ""))
+               (line (propertize
+                      (concat "     " stamp "» "
+                              (sprig--ellipsize prompt
+                                                (- width 2 (string-width stamp))))
+                      'face 'sprig-status-preview-prompt)))
+          ;; The stamp reads muted, the prompt in its own face; the whole line
+          ;; is prompt-faced first so its indentation carries it (that is what
+          ;; the row's preview id and scroll anchor hang off), then the stamp is
+          ;; toned down over the top.
+          (when (> (length stamp) 0)
+            (put-text-property 5 (+ 5 (length stamp)) 'face
+                               'sprig-status-preview line))
+          (push line lines)))
       (when reply
-        (let* ((cap sprig-status-preview-max-lines)
-               (budget (and cap (max 1 (- cap (length lines)))))
-               (wrapped (sprig--status-reply-lines reply width)))
-          ;; Drop trailing blank lines so a cap, or the row's end, lands on
-          ;; real content rather than an empty paragraph gap.
-          (while (and wrapped (string-blank-p (car (last wrapped))))
-            (setq wrapped (butlast wrapped)))
-          (when (and budget (> (length wrapped) budget))
-            (setq wrapped (seq-take wrapped budget))
-            (setcar (last wrapped)
-                    (concat (car (last wrapped))
-                            (propertize " …" 'face 'sprig-status-preview))))
-          (dolist (l wrapped)
-            ;; A paragraph gap stays a truly empty line: an indented blank
-            ;; line is trailing whitespace, which some setups highlight.
-            (push (if (string-blank-p l)
-                      ""
-                    (concat (propertize "     " 'face 'sprig-status-preview) l))
-                  lines))))))
+        (let ((stamp (if rtime (concat rtime " ") "")))
+          ;; The reply and its stamp share the muted preview face, so no
+          ;; two-tone is needed here.
+          (push (propertize
+                 (concat "     " stamp
+                         (sprig--ellipsize (sprig--status-reply-oneline reply)
+                                           (- width (string-width stamp))))
+                 'face 'sprig-status-preview)
+                lines)))))
     (nreverse lines)))
 
 ;;; Host group headings
@@ -2704,10 +2885,34 @@ lists only open ones by default."
             (if done (propertize text 'face 'sprig-status-preview) text)
             (and time (concat "  " (propertize time 'face 'sprig-status-preview))))))
 
+(defvar sprig--status-notes-cache nil
+  "Cache of the open notes as (MTIME . NOTES), or nil.
+`sprig--status-insert-notes' runs on every navigator render, including each
+coalesced live tick; without this it would read and parse `sprig-notes-file'
+from disk every time.  Keyed on the file's modification time, so an external
+edit still surfaces on the next render, but an unchanged file is parsed once.
+A note verb rewrites the file, bumping the mtime, so its change surfaces too.")
+
+(defun sprig--status-todo-notes ()
+  "Return the open (todo) notes, re-reading `sprig-notes-file' only when changed.
+Guards the render path against a fresh disk read and parse on every tick, via
+`sprig--status-notes-cache' keyed on the file's mtime."
+  (let ((mtime (and (file-readable-p sprig-notes-file)
+                    (file-attribute-modification-time
+                     (file-attributes sprig-notes-file)))))
+    (unless (and sprig--status-notes-cache
+                 (equal (car sprig--status-notes-cache) mtime))
+      (setq sprig--status-notes-cache
+            (cons mtime
+                  (seq-filter (lambda (n) (eq (plist-get n :state) 'todo))
+                              (sprig-notes--notes (sprig-notes-read))))))
+    (cdr sprig--status-notes-cache)))
+
 (defun sprig--status-insert-notes ()
   "Insert the notes group (its heading and open-note rows) at point.
-Reads `sprig-notes-file' fresh and caches its open notes in
-`sprig--status-notes' so `sprig--status-note-at-point' can resolve a row.
+Reads the open notes (cached against `sprig-notes-file's mtime, see
+`sprig--status-todo-notes') into `sprig--status-notes' so
+`sprig--status-note-at-point' can resolve a row.
 Only TODO notes are listed; a done note stays in the file (see `+ o').
 
 Unlike a host group, an empty notes group is not headed: a host with no
@@ -2717,9 +2922,7 @@ open notes it leaves the navigator exactly as it was.  With notes, the
 heading carries the notes sentinel as its host and `sprig--status-heading',
 so TAB folds the group the way it folds a host group; each row carries its
 note's id for point resolution."
-  (setq sprig--status-notes
-        (seq-filter (lambda (n) (eq (plist-get n :state) 'todo))
-                    (sprig-notes--notes (sprig-notes-read))))
+  (setq sprig--status-notes (sprig--status-todo-notes))
   (when sprig--status-notes
     (let* ((host sprig--status-notes-host)
            (from (point)))
@@ -2746,7 +2949,7 @@ the way `sprig--status-id-at-point' resolves a session row."
     (and id (sprig-notes--find sprig--status-notes id))))
 
 (defun sprig--status-decorate ()
-  "Head each host group and insert the expanded rows' inline previews.
+  "Head each host group and insert the active rows' inline previews.
 Runs after `tabulated-list-print', which erases both.  The printed rows
 are in `sprig--status-groups' order, so the two are walked in step: a
 heading falls due whenever a row's host advances past the group last
@@ -2786,8 +2989,7 @@ on its row rather than stranding it on the heading."
                                              (min (point-max)
                                                   (1+ (line-end-position)))
                                              host)
-                  (when (and sprig--status-expanded
-                             (gethash id sprig--status-expanded))
+                  (when (sprig--status-entry-active-p entry)
                     (save-excursion
                       (forward-line 1)
                       (let ((from (point)))
@@ -2797,7 +2999,7 @@ on its row rather than stranding it on the heading."
                                 "\n")
                         (sprig--status-stamp-group from (point) host)
                         ;; Carry the row's id onto its preview lines so a verb
-                        ;; keyed on point (c c, a a, TAB) finds the same
+                        ;; keyed on point (c c, a a, RET) finds the same
                         ;; session there as on the row itself.
                         (put-text-property from (point)
                                            'sprig--status-preview-id id)))))))
@@ -2905,6 +3107,43 @@ not restored, leaving that window to redisplay's own default."
                  (forward-line (- (cdr start-anchor)))
                  (point))))))))
 
+(defvar-local sprig--status-last-signature 'none
+  "Signature of the navigator's last painted content, for the live path.
+`sprig--status-render-if-live' fires on every coalesced stream tick; when the
+freshly computed signature matches this, nothing visible changed, so the
+reprint and its preview rebuild are skipped.  `none' until the first paint, so
+the first tick always renders.")
+
+(defun sprig--status-render-signature (collected)
+  "Return a value capturing everything COLLECTED would paint in the navigator.
+Compared with `equal' to decide whether a live tick can skip its reprint (see
+`sprig--status-render-if-live').  Covers each row's visible fields, its group's
+fold state, its inline preview when active, plus the view flags and open notes,
+so any change that alters the display changes the signature.  The row's own
+time is its creation time, which never moves; the times that do change ride the
+inline preview lines (the last exchange's stamps), captured with the preview."
+  (list sprig--status-filter
+        sprig--status-show-all
+        sprig--status-hide-disconnected
+        sprig--status-sort
+        (sprig--status-collapsed-p sprig--status-notes-host)
+        (sprig--status-todo-notes)
+        (mapcar
+         (lambda (e)
+           (let ((host (plist-get e :host)))
+             (list (plist-get e :key)
+                   (plist-get e :status)
+                   (plist-get e :title)
+                   (plist-get e :project)
+                   (plist-get e :session)
+                   (sprig--format-time-value (plist-get e :created))
+                   (plist-get e :queued)
+                   (sprig--status-collapsed-p host)
+                   (and (sprig--status-entry-active-p e)
+                        (not (sprig--status-collapsed-p host))
+                        (sprig--status-preview-lines e)))))
+         collected)))
+
 (defun sprig--status-render ()
   "Reprint the navigator, then head its groups and re-insert its previews.
 Every navigator refresh path routes through here so both survive a reprint.
@@ -2963,7 +3202,7 @@ an already-open navigator, whose header is otherwise fixed at mode init."
          ("Title" 32 t)
          ("Project" 24 t)
          ("Session" 9 nil)
-         ("Time" 11 nil)]
+         ("Created" 11 nil)]
         tabulated-list-padding 1
         tabulated-list-sort-key nil
         tabulated-list-entries #'sprig--status-entries)
@@ -2981,19 +3220,38 @@ interrupt with \\[sprig-status-interrupt], jot and manage personal notes with
   (sprig--status-apply-format))
 
 (defun sprig--status-revert (&rest _)
-  "Revert the navigator (the `g' / `revert-buffer' path), keeping previews."
+  "Revert the navigator (the `g' / `revert-buffer' path), keeping previews.
+Drops the cached log scan first, so `g' always re-reads the disk: it is the
+explicit \"show me what is there now\" gesture, cache or no cache."
+  (sprig--status-scan-invalidate)
   (sprig--status-render))
 
-(defun sprig--status-refresh ()
-  "Re-render the `*sprig-status*' navigator if it is live; else do nothing.
-Called from session lifecycle points, so a stream finishing in a buffer
-you are not viewing still updates the list.  A no-op, and thus free, when
-the navigator is not open."
+(defun sprig--status-render-if-live ()
+  "Re-render the `*sprig-status*' navigator if it is open and something changed.
+A no-op, and thus free, when the navigator is not open.  Reuses the cached log
+scan (see `sprig--status-scan-cache'), and skips the reprint entirely when the
+freshly computed content signature matches the last paint (see
+`sprig--status-render-signature'), so a stream tick that changes nothing
+visible costs one collect and no buffer work.  This is the cheap path the live
+per-event tick and the structural refresh both take."
   (let ((buf (get-buffer sprig-status-buffer-name)))
     (when (buffer-live-p buf)
       (with-current-buffer buf
         (when (derived-mode-p 'sprig-status-mode)
-          (sprig--status-render))))))
+          (let ((sig (sprig--status-render-signature (sprig--status-collect))))
+            (unless (equal sig sprig--status-last-signature)
+              (setq sprig--status-last-signature sig)
+              (sprig--status-render))))))))
+
+(defun sprig--status-refresh ()
+  "Re-scan the stored logs and re-render the navigator if it is open.
+Called from session lifecycle points, so a stream finishing in a buffer you
+are not viewing still updates the list.  Drops the cached log scan first, so
+a structural change (a session opening, ending, or being removed) is picked
+up from disk; the coalesced live tick uses `sprig--status-render-if-live'
+instead, which keeps the cache and so never re-reads the disk mid-turn."
+  (sprig--status-scan-invalidate)
+  (sprig--status-render-if-live))
 
 (defun sprig--status-refresh-deferred ()
   "Refresh the navigator on the next idle moment.
@@ -3015,10 +3273,12 @@ burst of stream events schedules just one render (see
 
 (defun sprig--status-refresh-soon ()
   "Refresh the navigator soon, coalescing a burst of events into one render.
-A streaming turn fires many events a second and a full render re-scans the
-session logs (over SSH for a remote host), so this renders at most once per
-`sprig-status-live-refresh-interval' rather than once per event.  A no-op,
-and thus free, when that is nil or the navigator is not open."
+A streaming turn fires many events a second, so this renders at most once per
+`sprig-status-live-refresh-interval' rather than once per event.  It takes the
+cheap `sprig--status-render-if-live' path, which reuses the cached log scan:
+the live session's row is rebuilt from its owning buffer, and the stored logs
+do not change mid-turn, so a live tick never touches the disk.  A no-op, and
+thus free, when the interval is nil or the navigator is not open."
   (when (and sprig-status-live-refresh-interval
              (null sprig--status-refresh-timer)
              (get-buffer sprig-status-buffer-name))
@@ -3026,13 +3286,13 @@ and thus free, when that is nil or the navigator is not open."
           (run-at-time sprig-status-live-refresh-interval nil
                        (lambda ()
                          (setq sprig--status-refresh-timer nil)
-                         (sprig--status-refresh))))))
+                         (sprig--status-render-if-live))))))
 
 (defun sprig--status-id-at-point ()
   "Return the session id of the row at point, reached from a preview line too.
 `tabulated-list-get-id' has it on a printed row; a preview line under a row
 carries it as a text property, so a verb keyed on point finds the same
-session whether point sits on the row or in its expanded preview."
+session whether point sits on the row or in its inline preview."
   (or (tabulated-list-get-id)
       (get-text-property (line-beginning-position) 'sprig--status-preview-id)))
 
@@ -3171,13 +3431,20 @@ N defaults to 1; a negative N moves to previous rows."
 (defun sprig-status-open ()
   "Open the review buffer for the session on the current line.
 Reuses an open owning buffer, or replays the stored log into a new one.
-On a note row, opens `sprig-notes-file' at that note instead, the way `+ o'
-does, since a note has no session to open."
+Point lands on the last message, so the newest reply is what you see, and
+the view keeps following the tail as a live turn streams in, rather than
+opening at the top of a long transcript.  On a note row, opens
+`sprig-notes-file' at that note instead, the way `+ o' does, since a note
+has no session to open."
   (interactive)
   (if (sprig--status-note-at-point)
       (sprig-status-note-open)
-    (pop-to-buffer (sprig--status-review-buffer (sprig--status-entry-at-point)))
-    (sprig--status-refresh)))
+    (let ((buf (sprig--status-review-buffer (sprig--status-entry-at-point))))
+      (pop-to-buffer buf)
+      (goto-char (point-max))
+      (let ((win (get-buffer-window buf)))
+        (when win (set-window-point win (point-max))))
+      (sprig--status-refresh))))
 
 (defun sprig-status-connect ()
   "Open the session on the current line and start or resume it."
@@ -3285,15 +3552,15 @@ On a header-line mouse click the column name rides the header text
 (defun sprig-status-sort (&optional column)
   "Sort the navigator within each host group by COLUMN, then re-render.
 Interactively, sort by the header column clicked, or prompt for one; choosing
-the column that is already active flips its direction.  `Time' and the status
-column default to descending (newest, busiest first), the text columns to
-ascending.  The groups stay apart: the sort is within each, so local and
+the column that is already active flips its direction.  `Created' and the
+status column default to descending (newest, busiest first), the text columns
+to ascending.  The groups stay apart: the sort is within each, so local and
 remote never intermix."
   (interactive (list (sprig--status-sort-read-column last-command-event)))
   (setq sprig--status-sort
         (if (equal column (car sprig--status-sort))
             (cons column (not (cdr sprig--status-sort)))
-          (cons column (and (member column '("Time" "S")) t))))
+          (cons column (and (member column '("Created" "S")) t))))
   (sprig--status-render))
 
 ;; Defined here, after the connect / interrupt / disconnect verbs they list,
@@ -3403,23 +3670,17 @@ not tied to any session."
     ("o" "open the notes file" sprig-status-note-open)]])
 
 (defun sprig-status-toggle-preview ()
-  "Fold the group under point, or preview the reply of the row under point.
-On a host heading (`local' or `remote HOST'), TAB collapses that whole
-group to its heading and expands it again, the way `magit' folds a
-section.  On a session row, it toggles an inline preview of the last
-exchange: your prompt and the agent's reply in full (see
-`sprig-status-preview-max-lines' to bound a long one)."
+  "Fold the host group under point to its heading, or unfold it again.
+On a host heading (`local' or `remote HOST') or any row within a group, TAB
+collapses that whole group to its heading and expands it again, the way
+`magit' folds a section; the count stays on a collapsed heading, so
+`▸ remote you@your-server (12)' tells you what is hidden.  A live session's
+last exchange shows inline under its row on its own, with no per-row toggle;
+open the session with \\[sprig-status-open] for the full transcript."
   (interactive)
-  (let ((id (sprig--status-id-at-point)))
-    (cond
-     ((get-text-property (line-beginning-position) 'sprig--status-heading)
-      (sprig--status-toggle-collapse (sprig--status-host-at-point)))
-     (id
-      (sprig--status-toggle-id id)
-      (sprig--status-render))
-     ;; A note row has nothing to preview; leave point on it for a `+' verb.
-     ((get-text-property (line-beginning-position) 'sprig--status-note) nil)
-     (t (user-error "No Sprig session or host heading on this line")))))
+  (if (get-text-property (line-beginning-position) 'sprig--status-group)
+      (sprig--status-toggle-collapse (sprig--status-host-at-point))
+    (user-error "No Sprig host group on this line")))
 
 (defun sprig--status-new-session-args (local)
   "Return (HOST . DEFAULT-DIR) for a fresh session started at point.
@@ -3543,6 +3804,9 @@ listed; an empty string clears the filter."
   "Toggle listing every stored session against the capped newest set."
   (interactive)
   (setq sprig--status-show-all (not sprig--status-show-all))
+  ;; The cap bounds the scan itself, so lifting it needs a fresh, wider read;
+  ;; the cached scan holds only the capped set.
+  (sprig--status-scan-invalidate)
   (sprig--status-render)
   (message (if sprig--status-show-all
                "Listing every session"
@@ -3602,6 +3866,9 @@ live session.  Narrow with `/', lift the cap with `l a'."
         (sprig-status-mode)
         (when (and seed (not (string-empty-p seed)))
           (setq sprig--status-filter seed)))
+      ;; Opening is a "show me now" gesture, and the cache may hold a scan from
+      ;; an earlier viewing, so read the disk fresh.
+      (sprig--status-scan-invalidate)
       (sprig--status-render))
     (pop-to-buffer buf)))
 
@@ -3664,6 +3931,7 @@ their behaviour picks up the new definitions."
     (with-current-buffer buf
       (when (derived-mode-p 'sprig-status-mode)
         (sprig--status-apply-format)
+        (sprig--status-scan-invalidate)
         (sprig--status-render))))
   (message "sprig: reloaded %d files from %s"
            (length sprig--source-files) sprig--source-directory))
