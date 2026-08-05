@@ -348,6 +348,24 @@ without this a refreshed `Agent' call would lose the work you just watched."
     (should (equal (plist-get (plist-get blk :agent) :description) "Reading note.txt"))
     (should (equal (plist-get (plist-get blk :agent) :status) "completed"))))
 
+(ert-deftest sprig-test-agent-running-outlives-the-turn ()
+  "A background agent still running is detected, so a done turn need not read
+as over while its work is in flight."
+  (let ((running (sprig-review-build
+                  '((tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")
+                    (subagent "toolu_A" (:status "running" :agent-type "Explore"))
+                    (done nil nil))))
+        (finished (sprig-review-build
+                   '((tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")
+                     (subagent "toolu_A" (:status "running" :agent-type "Explore"))
+                     (subagent "toolu_A" (:status "completed"))
+                     (done nil nil)))))
+    ;; Running while the turn is already done: the case the state line is for.
+    (should (plist-get running :done))
+    (should (sprig-review-agent-running running))
+    ;; Its notification closes it, and the turn reads as over again.
+    (should-not (sprig-review-agent-running finished))))
+
 (ert-deftest sprig-test-subagent-steps-nest-under-the-agent-call ()
   "A subagent's steps become tool blocks under the `Agent' row, not beside it."
   (let* ((model (sprig-review-build

@@ -1872,7 +1872,8 @@ be parsed."
 (defun sprig--events-preview (events)
   "Return a preview plist for EVENTS' conversation tail, or nil.
 The plist is (:prompt STR :reply STR :time ISO :context N :done BOOL :error
-BOOL :mode STR :pending BOOL): the last user turn collapsed to a line, the
+BOOL :mode STR :pending BOOL :agent-running BOOL): the last user turn
+collapsed to a line, the
 agent's final message that answered it (only the last text block of that
 turn, not the running narration between its tool calls, its structure kept
 for the markdown pass), the stamp of the freshest block, and the turn's
@@ -1908,12 +1909,13 @@ input order)."
               (done (plist-get model :done))
               (err (plist-get model :error))
               (mode (plist-get model :mode))
-              (pending (and (sprig-review-pending-dialog model) t)))
-          (when (or prompt* reply ctx done err pending mode)
+              (pending (and (sprig-review-pending-dialog model) t))
+              (agent-running (and (sprig-review-agent-running model) t)))
+          (when (or prompt* reply ctx done err pending mode agent-running)
             (list :prompt prompt* :reply reply
                   :time (plist-get (car (last blocks)) :time)
                   :context ctx :done done :error err :mode mode
-                  :pending pending)))))))
+                  :pending pending :agent-running agent-running)))))))
 
 (defun sprig--entry-preview (entry)
   "Return the inline preview plist for status ENTRY, or nil.
@@ -2310,7 +2312,7 @@ no status and no model at all (nothing to say)."
         (ctx (plist-get preview :context))
         (mode (sprig--notable-mode (plist-get preview :mode))))
     (when (or status ctx mode (plist-get preview :done) (plist-get preview :error)
-              (plist-get preview :pending))
+              (plist-get preview :pending) (plist-get preview :agent-running))
       (pcase-let
           ((`(,glyph ,text ,face)
             (cond
@@ -2318,6 +2320,10 @@ no status and no model at all (nothing to say)."
              ((or (eq status 'waiting) (plist-get preview :pending))
               '("?" "waiting on you" sprig-review-waiting))
              ((plist-get preview :error) '("✗" "turn failed" error))
+             ;; A background agent still working outlives the turn that
+             ;; launched it; say so ahead of `turn over', as the review
+             ;; buffer's own state line does.
+             ((plist-get preview :agent-running) '("▶" "agent working…" warning))
              ((plist-get preview :done) '("✓" "turn over" success))
              ((eq status 'interrupted)
               '("◼" "interrupted" font-lock-comment-face))

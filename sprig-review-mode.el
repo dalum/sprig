@@ -1020,6 +1020,12 @@ read, and a dialog is a question put to you, which wants the same air."
    ((and (boundp 'sprig--busy) sprig--busy)
     (list "▷" "sent, awaiting reply" 'sprig-review-pending))
    ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
+   ;; The turn can end while a background agent (Task, Explore, ...) it
+   ;; launched is still working, which reads as `turn over' when work is
+   ;; plainly still going on.  Say so, ahead of `done', so the buffer does
+   ;; not go quiet on you while an agent churns.
+   ((sprig-review-agent-running model)
+    (list "▶" "agent working…" 'sprig-review-working))
    ;; What it cost is in the header; the line says the one thing it is for.
    ((plist-get model :done) (list "✓" "turn over" 'sprig-review-done))
    ;; Replayed history, or a session not yet sent to: nothing is running, but

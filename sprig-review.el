@@ -238,6 +238,18 @@ hears back."
                    (not (plist-get b :answered))))
             (plist-get model :blocks)))
 
+(defun sprig-review-agent-running (model)
+  "Return MODEL's `Agent' block whose subagent is still working, or nil.
+A subagent (Task, Explore, ...) runs in the background, so the turn that
+launched it can end while its work is still in flight, leaving the turn to
+read as over when it is not.  The `Agent' row carries the last status the
+CLI narrated for its subagent: \"running\" until a `task_notification'
+closes it.  A replayed log records no subagent status, so this is nil there
+and only ever fires for a live subagent actually in flight."
+  (seq-find (lambda (b)
+              (equal (plist-get (plist-get b :agent) :status) "running"))
+            (plist-get model :blocks)))
+
 (defun sprig-review--task-created-id (text)
   "Return the id string in a TaskCreate result TEXT, or nil.
 The task tool answers a create with \"Task #N created ...\", so a new
