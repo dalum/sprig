@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.17.0
+;; Version: 0.18.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1212,6 +1212,77 @@ the turn as plainly as the line does."
 
 ;;;; Rendering entry points
 
+(defcustom sprig-review-incremental-render t
+  "When non-nil, redraw only the changed tail of a review buffer.
+A full re-render is O(conversation): on a long session every structural
+event repaints the whole buffer, which is the main source of navigator
+lag while a turn streams in.  Since events almost always append at the
+end, `sprig-review--render-incremental' keeps the unchanged block prefix
+and re-inserts only the new tail and the state line, turning that into
+O(new events).  It falls back to a full render whenever the prefix
+diverges or a header field changed, so the buffer stays a faithful
+projection of the model either way.  Set to nil to force full renders."
+  :type 'boolean
+  :group 'sprig)
+
+(defvar-local sprig-review--rendered-blocks nil
+  "The model's `:blocks' at the last render.
+The baseline `sprig-review--render-incremental' diffs the new model
+against to find the unchanged prefix it can keep.")
+
+(defvar-local sprig-review--rendered-header nil
+  "Header-field signature at the last render (see
+`sprig-review--header-signature').  A change forces a full redraw, so the
+kept header section cannot go stale behind the incremental path.")
+
+(defvar-local sprig-review--rendered-sections nil
+  "The last top-level section each block drew at the last render, aligned
+with `sprig-review--rendered-blocks'.  The incremental splice takes its
+boundary from a section's magit-maintained `end' marker, which stays at the
+block's true end across a later fold or unfold (a raw position marker would
+be left mid-section when a folded tool's body is later drawn).  Recording
+the block's *last* section, rather than mapping blocks to sections by
+position, also handles a block that draws several top-level sections, as a
+multi-question dialog does.")
+
+(defvar-local sprig-review--incremental-reason nil
+  "Why the last refresh fell back to a full render, or nil if it did not.
+Set by `sprig-review--render-incremental' and logged when
+`sprig-review-debug-render' is on, to make a fallback storm diagnosable.")
+
+(defun sprig-review--insert-block (block prev first last)
+  "Insert one BLOCK at point, with its boundary blank line and its margin.
+PREV is the block before it (nil at the head), FIRST is non-nil for the
+first block of the render, and LAST is the model's final block, which when
+it is streaming text opens the live tail.  Factored out so the full render
+and the incremental tail render (`sprig-review--splice-tail') draw a block
+identically."
+  ;; A blank line at every boundary prose is on either side of, which is to
+  ;; say: around prose, and so above the first row of a run of tool calls, but
+  ;; never between two of those rows.  A turn's tool calls then sit as one
+  ;; block with air around it, rather than as a ladder down the buffer.  The
+  ;; line goes before the block rather than after, which would sit between the
+  ;; live text section's end and `sprig-review--tail'.
+  (when (and (not first)
+             (or (sprig-review--prose-block-p block)
+                 (sprig-review--prose-block-p prev)))
+    (insert "\n"))
+  ;; Held from before the block is drawn, so the stamp lands against its
+  ;; first line rather than against whatever follows it.
+  (let ((start (point)))
+    (pcase (plist-get block :type)
+      ('user     (sprig-review--insert-user block))
+      ;; The live tail is the last block, when it is text, and only while a
+      ;; turn is actually streaming in.
+      ('text     (sprig-review--insert-text
+                  block (and sprig-review--streaming (eq block last))))
+      ('thinking (sprig-review--insert-thinking block))
+      ('tool     (sprig-review--insert-tool block))
+      ('tasks    (sprig-review--insert-tasks block))
+      ('dialog   (sprig-review--insert-dialog block))
+      ('error    (sprig-review--insert-error block)))
+    (sprig-review--insert-margin start (plist-get block :time))))
+
 (defun sprig-review-render (model &optional meta)
   "Render review MODEL into the current buffer as magit-sections.
 META is an optional plist of display metadata (see
@@ -1226,44 +1297,157 @@ META is an optional plist of display metadata (see
     ;; Before the erase: these hang off buffer text that is about to go.
     (remove-overlays (point-min) (point-max) 'sprig-review-margin t)
     (erase-buffer)
-    (magit-insert-section (sprig-review)
-      (sprig-review--insert-headers model meta)
-      (dolist (block blocks)
-        ;; A blank line at every boundary prose is on either side of, which
-        ;; is to say: around prose, and so above the first row of a run of
-        ;; tool calls, but never between two of those rows.  A turn's tool
-        ;; calls then sit as one block with air around it, rather than as a
-        ;; ladder down the buffer.  The line goes before the block rather
-        ;; than after, which would sit between the live text section's end
-        ;; and `sprig-review--tail'.
-        (when (and (not first)
-                   (or (sprig-review--prose-block-p block)
-                       (sprig-review--prose-block-p prev)))
-          (insert "\n"))
-        (setq first nil prev block)
-        ;; Held from before the block is drawn, so the stamp lands against
-        ;; its first line rather than against whatever follows it.
-        (let ((start (point)))
-          (pcase (plist-get block :type)
-            ('user     (sprig-review--insert-user block))
-            ;; The live tail is the last block, when it is text, and only
-            ;; while a turn is actually streaming in.
-            ('text     (sprig-review--insert-text
-                        block (and sprig-review--streaming (eq block last))))
-            ('thinking (sprig-review--insert-thinking block))
-            ('tool     (sprig-review--insert-tool block))
-            ('tasks    (sprig-review--insert-tasks block))
-            ('dialog   (sprig-review--insert-dialog block))
-            ('error    (sprig-review--insert-error block)))
-          (sprig-review--insert-margin start (plist-get block :time))))
-      ;; Below the last message, and last of all, so it is what the buffer
-      ;; ends on.  The live tail sits inside the block above and is not
-      ;; disturbed by an insertion after it, so streamed text still lands
-      ;; above this line rather than through it.
-      (when blocks (insert "\n"))
-      (sprig-review--insert-state model))
-    (sprig-review--update-margin)
+    (let (sections)
+      (magit-insert-section (sprig-review)
+        (sprig-review--insert-headers model meta)
+        (setq sections
+              (sprig-review--insert-blocks magit-root-section blocks prev first last))
+        ;; Below the last message, and last of all, so it is what the buffer
+        ;; ends on.  The live tail sits inside the block above and is not
+        ;; disturbed by an insertion after it, so streamed text still lands
+        ;; above this line rather than through it.
+        (when blocks (insert "\n"))
+        (sprig-review--insert-state model))
+      (sprig-review--update-margin)
+      (sprig-review--record-baseline model meta sections))
     (goto-char (point-min))))
+
+(defun sprig-review--insert-blocks (root blocks prev first last)
+  "Insert BLOCKS under ROOT in order, returning the last top-level section
+each block drew.  A block may draw several top-level sections (a
+multi-question dialog does); its last is what bounds it.  PREV and FIRST
+seed the boundary blank line for the first of BLOCKS (see
+`sprig-review--insert-block'); LAST is the model's final block."
+  (let (sections)
+    (dolist (block blocks)
+      (sprig-review--insert-block block prev first last)
+      (setq first nil prev block)
+      ;; The block's sections have just been appended to ROOT; its last is
+      ;; the freshest child.
+      (push (car (last (oref root children))) sections))
+    (nreverse sections)))
+
+(defun sprig-review--header-signature (model meta)
+  "Return the header fields of MODEL and META as a comparable value.
+The incremental render keeps the header section untouched, so a change to
+a field it draws (see `sprig-review--insert-headers') must force a full
+redraw; comparing this signature across renders is how that is caught.
+
+Cost is deliberately left out: it ticks up throughout a turn, so keying on
+it would force a full O(conversation) redraw on nearly every structural
+event, which is the very cost this path exists to avoid.  So the Cost line
+is allowed to lag, refreshing on the next full render (a title, mode, or
+session change, or a reset)."
+  (list (or (plist-get meta :title) (plist-get model :title))
+        (plist-get meta :project) (plist-get meta :model)
+        (plist-get meta :status)  (plist-get model :mode)
+        (plist-get model :session)))
+
+(defun sprig-review--record-baseline (model meta sections)
+  "Store MODEL's blocks, header signature, and per-block SECTIONS as baseline."
+  (setq sprig-review--rendered-blocks (plist-get model :blocks)
+        sprig-review--rendered-header (sprig-review--header-signature model meta)
+        sprig-review--rendered-sections sections))
+
+(defun sprig-review--common-prefix (a b)
+  "Return the count of leading elements `equal' in lists A and B."
+  (let ((n 0))
+    (while (and a b (equal (car a) (car b)))
+      (setq n (1+ n) a (cdr a) b (cdr b)))
+    n))
+
+(defun sprig-review--splice-tail (root k model meta)
+  "Redraw the buffer from block K on, keeping the first K blocks in place.
+ROOT is the review root section.  BOUNDARY is the recorded end of block
+K-1 (`sprig-review--rendered-ends'); everything past it (blocks from K, the
+trailing blank line, and the state line) is deleted and re-inserted as
+fresh children of ROOT, so only O(new events) is drawn.  Sections are kept
+by buffer position, not by block index, so a block that drew several
+sections is handled correctly.  Returns t."
+  (let* ((inhibit-read-only t)
+         (new-blocks (plist-get model :blocks))
+         ;; A shallow copy carrying the full old child list, so re-inserted
+         ;; sections still inherit a predecessor's fold state by ident.  It
+         ;; must be taken before ROOT's children are truncated below; `oset'
+         ;; replaces the slot rather than mutating the list, so the copy keeps
+         ;; the original.
+         (oldroot (clone root))
+         ;; End of block K-1's last section: the true end of the kept prefix,
+         ;; magit-maintained across a fold or unfold, and before the blank
+         ;; line to block K so that separator is redrawn with the tail.
+         (boundary (oref (nth (1- k) sprig-review--rendered-sections) end))
+         ;; Keep the header and every section starting before the boundary;
+         ;; those are exactly the sections of blocks 0..K-1, however many each
+         ;; drew.  A fresh list, since the inserts below `nconc' onto it.
+         (keep (seq-filter (lambda (c) (< (oref c start) boundary))
+                           (oref root children)))
+         (kept-sections (seq-take sprig-review--rendered-sections k))
+         (prev (nth (1- k) new-blocks))
+         (last (car (last new-blocks)))
+         new-sections)
+    (oset root children keep)
+    (remove-overlays boundary (point-max) 'sprig-review-margin t)
+    (delete-region boundary (point-max))
+    (goto-char boundary)
+    ;; Clear the live tail only when the block holding it is being redrawn.
+    ;; A state-only splice (no new blocks) keeps the last block, so its tail
+    ;; marker stays valid and streaming keeps appending in place; clearing it
+    ;; would send every following delta through a needless refresh.
+    (when (nthcdr k new-blocks)
+      (setq sprig-review--tail nil))
+    ;; Append the new tail as children of the existing root: binding the
+    ;; parent (non-nil) keeps `magit-insert-section' from starting a new root,
+    ;; and the old root feeds fold inheritance.
+    (let ((magit-insert-section--parent root)
+          (magit-insert-section--oldroot oldroot))
+      (setq new-sections
+            (sprig-review--insert-blocks root (nthcdr k new-blocks) prev nil last))
+      (when new-blocks (insert "\n"))
+      (sprig-review--insert-state model))
+    ;; The root's end marker sat at the old point-max; carry it to the new one.
+    (oset root end (point-marker))
+    (sprig-review--update-margin)
+    (sprig-review--record-baseline model meta (append kept-sections new-sections)))
+  t)
+
+(defun sprig-review--render-incremental (model meta)
+  "Redraw only the changed tail of the buffer, or return nil to fall back.
+Diffs MODEL's blocks against the last render's (`sprig-review--rendered-blocks')
+for the unchanged leading prefix, and as long as the first block is kept
+hands off to `sprig-review--splice-tail' (which redraws the new blocks and
+the state line, or the state line alone when only it changed).  Returns
+non-nil when it rendered, nil for the caller to run a full
+`sprig-review-render'; it declines when disabled, on the first render, when
+a header field changed, when the recorded per-block boundaries are missing,
+or when even the first block diverged.  The reason is recorded in
+`sprig-review--incremental-reason' for the debug log."
+  (let* ((root magit-root-section)
+         (old-blocks sprig-review--rendered-blocks)
+         (new-blocks (plist-get model :blocks))
+         (k (sprig-review--common-prefix old-blocks new-blocks))
+         (reason
+          (cond
+           ((not sprig-review-incremental-render) 'disabled)
+           ((not (and root old-blocks
+                      (eq (oref root type) 'sprig-review))) 'no-baseline)
+           ;; The recorded sections must line up with the recorded blocks, or
+           ;; a full render is safer than trusting stale boundaries.  They are
+           ;; written together (`sprig-review--record-baseline'), so this can
+           ;; only disagree after a reload swapped the render code under a
+           ;; buffer whose baseline the old code built; the full render heals it.
+           ((not (= (length sprig-review--rendered-sections) (length old-blocks)))
+            'sections-mismatch)
+           ((not (equal sprig-review--rendered-header
+                        (sprig-review--header-signature model meta)))
+            'header)
+           ;; k == 0 means even the first block changed, so nothing is worth
+           ;; keeping.  k up to the full block count is fine: with no new
+           ;; blocks the splice redraws only the trailing state line, which is
+           ;; the common state-only refresh (streaming -> done, busy toggling).
+           ((not (> k 0)) 'prefix-diverged))))
+    (setq sprig-review--incremental-reason reason)
+    (unless reason
+      (sprig-review--splice-tail root k model meta))))
 
 ;;;; Live sink: accumulate events, refresh the buffer
 ;;
@@ -1324,6 +1508,15 @@ so a cheap buffer keeps the snappy floor while a costly one widens toward
 its own render time.  Nil-safe start of zero means the first render waits
 only the floor.")
 
+(defcustom sprig-review-debug-render nil
+  "When non-nil, log each re-render's cost to `*Messages*'.
+A diagnostic for redraw lag: with it on, every `sprig-review--refresh'
+reports the milliseconds it took (and whether it was a full or an
+incremental tail draw) alongside the buffer's accumulated event count, so
+a slow draw and its conversation size show up together.  Off by default."
+  :type 'boolean
+  :group 'sprig)
+
 (defun sprig-review--refresh-delay ()
   "Return the coalescing delay, widened toward the last render's cost.
 `sprig-review-refresh-delay' is the floor and `sprig-review-refresh-delay-max'
@@ -1367,7 +1560,9 @@ while a turn came in."
   ;; `magit-insert-section' macro captures it from `magit-root-section'
   ;; itself, and only then advances `magit-root-section' to the new root.
   ;; Pre-binding it leaves the root stale and breaks section finishing.
-  (let* ((model (sprig-review--current-model))
+  (let* ((mt0 (and sprig-review-debug-render (current-time)))
+         (model (sprig-review--current-model))
+         (model-ms (and mt0 (* 1000 (float-time (time-subtract (current-time) mt0)))))
          (pos (point))
          (locator (sprig-review--locate pos))
          (windows (mapcar (lambda (win)
@@ -1377,12 +1572,24 @@ while a turn came in."
                                   (sprig-review--locate (window-start win))
                                   (window-start win)))
                           (get-buffer-window-list nil nil t))))
-    (let ((t0 (current-time)))
-      (sprig-review-render model sprig-review--meta)
+    (let ((t0 (current-time))
+          (incremental (sprig-review--render-incremental model sprig-review--meta)))
+      ;; The tail path handles the common append; only on its own terms does a
+      ;; full O(conversation) render run.
+      (unless incremental
+        (sprig-review-render model sprig-review--meta))
       ;; Time the draw so the coalescing timer can widen toward it: a heavy
       ;; render must not be re-armed before it has finished drawing.
       (setq sprig-review--last-render-cost
-            (float-time (time-subtract (current-time) t0))))
+            (float-time (time-subtract (current-time) t0)))
+      (when sprig-review-debug-render
+        (message "sprig-review model %.1fms[%s] + %s %.1fms  %d events  %s"
+                 model-ms sprig-review--last-fold
+                 (if incremental "tail"
+                   (format "render[%s]" sprig-review--incremental-reason))
+                 (* 1000 sprig-review--last-render-cost)
+                 (length sprig-review--events)
+                 (buffer-name))))
     (goto-char (sprig-review--relocate locator pos))
     (pcase-dolist (`(,win ,point-loc ,point-pos ,start-loc ,start-pos) windows)
       (when (window-live-p win)

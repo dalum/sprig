@@ -1025,7 +1025,92 @@ the fold learns the id from the result rather than from the call."
       ;; The tool folds by default, so neither its diff nor its result is drawn.
       (should-not (string-match-p "↳ result" s))
       (should-not (string-match-p "ok" s))
-      (should (string-match-p "\\$0\\.02" s)))))
+      ;; Cost lands on the header, which the incremental tail draw keeps in
+      ;; place, so it lags here on purpose (see
+      ;; `sprig-review--header-signature'); a full render picks it up.
+      (should-not (string-match-p "\\$0\\.02" s)))))
+
+(ert-deftest sprig-review-mode-test-incremental-keeps-prefix ()
+  ;; A structural event that only appends redraws the tail, not the whole
+  ;; buffer: the first block's section object survives across the flush.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "first"))
+    (sprig-review-flush)
+    (goto-char (point-min))
+    (should (re-search-forward "first" nil t))
+    (let ((before (magit-current-section)))
+      (sprig-review-consume '(user "second"))
+      (sprig-review-flush)
+      (goto-char (point-min))
+      (should (re-search-forward "first" nil t))
+      ;; Same section object, i.e. not re-inserted by a full render.
+      (should (eq (magit-current-section) before))
+      (should (string-match-p "second" (buffer-string))))))
+
+(ert-deftest sprig-review-mode-test-incremental-state-only ()
+  ;; A refresh that changes only the state line (no new block) must take the
+  ;; tail path and redraw just that line, not fall back to a full render: the
+  ;; first block's section object survives the flush.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "body"))
+    (sprig-review-consume '(text " more"))
+    (sprig-review-flush)
+    (should (string-match-p "working" (buffer-string)))
+    (goto-char (point-min))
+    (should (re-search-forward "body" nil t))
+    (let ((before (magit-current-section)))
+      ;; `done' adds no block; it flips the state line streaming -> over.
+      (sprig-review-consume '(done 0.01 nil))
+      (sprig-review-flush)
+      (goto-char (point-min))
+      (should (re-search-forward "body" nil t))
+      (should (eq (magit-current-section) before))
+      (should-not (string-match-p "working" (buffer-string)))
+      (should (null sprig-review--incremental-reason)))))
+
+(ert-deftest sprig-review-mode-test-incremental-multi-section-block ()
+  ;; A dialog with two questions draws two top-level sections but is one
+  ;; model block, so mapping blocks to sections by position is off by one.
+  ;; The splice must still keep such a block's whole span in the prefix and
+  ;; append cleanly after it, not fall back or drop content.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let ((input '((questions . [((question . "First?")
+                                  (multiSelect . :false)
+                                  (options . [((label . "a") (description . "x"))]))
+                                 ((question . "Second?")
+                                  (multiSelect . :false)
+                                  (options . [((label . "b") (description . "y"))]))]))))
+      (sprig-review-consume (list 'dialog "d1" "ask_user_question" input))
+      (sprig-review-consume '(dialog-answer "d1" ("a" "b")))
+      (sprig-review-flush)
+      (should (string-match-p "First?" (buffer-string)))
+      (should (string-match-p "Second?" (buffer-string)))
+      ;; A later block appends; the multi-section dialog stays put in the
+      ;; prefix and the tail path handles it.
+      (sprig-review-consume '(text "afterwards"))
+      (sprig-review-flush)
+      (should (null sprig-review--incremental-reason))
+      (let ((s (buffer-string)))
+        (should (string-match-p "First?" s))
+        (should (string-match-p "Second?" s))
+        (should (string-match-p "afterwards" s))
+        ;; Order preserved: both questions before the new text.
+        (should (< (string-match "Second?" s) (string-match "afterwards" s)))))))
+
+(ert-deftest sprig-review-mode-test-incremental-off-full-render ()
+  ;; With the incremental path disabled every flush is a full render, so the
+  ;; cost the tail draw would leave stale shows immediately.
+  (let ((sprig-review-incremental-render nil))
+    (with-temp-buffer
+      (sprig-review-mode)
+      (sprig-review-consume '(text "hi"))
+      (sprig-review-flush)
+      (sprig-review-consume '(done 0.02 nil))
+      (sprig-review-flush)
+      (should (string-match-p "\\$0\\.02" (buffer-string))))))
 
 (ert-deftest sprig-review-mode-test-consume-preserves-point ()
   (with-temp-buffer

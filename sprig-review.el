@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.17.0
+;; Version: 0.18.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -287,50 +287,115 @@ plist (:id ID :content SUBJECT :status STATUS)."
   "The `sprig-review--events' list head `sprig-review--model' was built at.
 Every consumed event conses a new head onto the list, so this is `eq' to the
 current head exactly when the cached model is still current.")
+(defvar-local sprig-review--builder nil
+  "Persisted `sprig-review--fold-events' state, for incremental model builds.
+Carrying it lets `sprig-review--current-model' fold only the newly-arrived
+events into the running fold, instead of re-folding the whole history.")
+(defvar-local sprig-review--builder-head nil
+  "The `sprig-review--events' head `sprig-review--builder' has folded up to.")
+(defvar-local sprig-review--last-fold nil
+  "What the last `sprig-review--current-model' did, for the debug log:
+`cached', `(incremental . N)', or a `full-...' symbol naming why it had to
+rebuild the whole history.")
+
+(defun sprig-review--initial-state ()
+  "Return a fresh, empty `sprig-review--fold-events' state.
+The state is an opaque list of the fold's accumulators, in the order the
+folder and finaliser unpack them: session, title, mode, cost, error, done,
+context, the pending block timestamp, the reversed block list, the open
+text/thinking block, the task list, pending TaskCreate subjects, Task* tool
+ids, and the running task snapshot."
+  (list nil nil nil nil nil nil nil nil '() nil '() '() '() nil))
+
+(defun sprig-review--events-since (events old-head)
+  "Return the events in EVENTS newer than OLD-HEAD, and whether OLD-HEAD held.
+The car is those events oldest-first, ready to fold; the cdr is t when
+OLD-HEAD is still a tail of EVENTS (only events were appended since), so the
+running fold can be continued rather than restarted."
+  (let ((new '()) (cell events))
+    (while (and (consp cell) (not (eq cell old-head)))
+      (push (car cell) new)
+      (setq cell (cdr cell)))
+    (cons new (eq cell old-head))))
+
+(defun sprig-review--state-model (state)
+  "Finalise fold STATE into a model plist.
+The blocks are deep-copied out, so the running fold may keep mutating its
+own blocks in place (a result landing on a call, a delta extending the open
+text) without those edits reaching a model already handed out: each build
+is an independent value, which is what lets the renderer diff one against
+the next by `equal'."
+  (pcase-let ((`(,session ,title ,mode ,cost ,error ,done ,context ,_time
+                 ,blocks . ,_rest)
+               state))
+    (list :session session :title title :mode mode
+          :cost cost :error error :done done :context context
+          :blocks (mapcar #'copy-tree (reverse blocks)))))
 
 (defun sprig-review--current-model ()
-  "Return this buffer's review model, rebuilt only when its events changed.
-`sprig-review-build' is O(all events) and the same model is wanted by the
-buffer's own refresh, its state line, and the navigator's inline preview and
-status, often for the same events several times a second while a turn streams.
-This memoises the last build on the event-list head (see
-`sprig-review--model-head'), so those callers share one build per event rather
-than each paying their own.  A big session's build runs into the hundreds of
-milliseconds, so the sharing is what keeps a streaming turn from stuttering the
-UI."
-  (unless (eq sprig-review--events sprig-review--model-head)
-    (setq sprig-review--model (sprig-review-build (reverse sprig-review--events))
-          sprig-review--model-head sprig-review--events))
+  "Return this buffer's review model, folding only what is new since last time.
+The same model is wanted by the buffer's own refresh, its state line, and
+the navigator's inline preview and status, often several times a second
+while a turn streams.  This memoises the last build on the event-list head
+\(see `sprig-review--model-head'), so those callers share one build per
+event.  And the build itself is incremental: a full fold is O(all events)
+and, run per structural event on a long session, is a main source of live
+lag, so the running fold state is kept (`sprig-review--builder') and only
+the newly-arrived events are folded into it.  It restarts from scratch only
+when the event list was replaced rather than appended to (a reseed)."
+  (if (eq sprig-review--events sprig-review--model-head)
+      (setq sprig-review--last-fold 'cached)
+    (let ((delta (and sprig-review--builder sprig-review--builder-head
+                      (sprig-review--events-since sprig-review--events
+                                                  sprig-review--builder-head))))
+      (setq sprig-review--last-fold
+            (cond ((not sprig-review--builder) 'full-no-builder)
+                  ((not (and delta (cdr delta)))
+                   (if delta 'full-not-reached 'full-no-head))
+                  (t (cons 'incremental (length (car delta))))))
+      (setq sprig-review--builder
+            (if (and delta (cdr delta))
+                (sprig-review--fold-events sprig-review--builder (car delta))
+              (sprig-review--fold-events (sprig-review--initial-state)
+                                         (reverse sprig-review--events))))
+      (setq sprig-review--builder-head sprig-review--events
+            sprig-review--model (sprig-review--state-model sprig-review--builder)
+            sprig-review--model-head sprig-review--events)))
   sprig-review--model)
 
 (defun sprig-review-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
-See the section commentary for the event vocabulary and block shapes."
-  (let* ((session nil) (title nil) (mode nil) (cost nil) (error nil) (done nil)
-         (context nil)       ; the freshest turn's context-window token count
-         (time nil)          ; the stamp the next block opened takes
-         (blocks '())        ; built in reverse
-         (open nil)          ; the open text/thinking block being coalesced
-         (tasks '())         ; current Task* state, oldest-first (see fold below)
-         (pending-creates '()) ; TaskCreate tool-id -> subject, awaiting its id
-         (task-ids '())      ; tool-ids of Task* calls, so their results fold too
-         (tasks-block nil)   ; the running task snapshot, coalesced across a run
-         (snapshot
-          (lambda ()
-            ;; Push a fresh task checklist, or update the running one, to the
-            ;; current `tasks'.  ITEMS mirror a `TodoWrite' alist so both
-            ;; render through one checklist; each is copied so a later fold
-            ;; does not bleed back into an earlier snapshot.
-            (let ((items (mapcar (lambda (tk)
-                                   (list (cons 'content (plist-get tk :content))
-                                         (cons 'status (plist-get tk :status))))
-                                 tasks)))
-              (if tasks-block
-                  (plist-put tasks-block :items items)
-                (setq tasks-block (list :type 'tasks :items items :time time))
-                (push tasks-block blocks))))))
-    (dolist (ev events)
-      (pcase ev
+See the section commentary for the event vocabulary and block shapes.  This
+is the one-shot entry point (a stored log, a preview); the live buffer folds
+incrementally through `sprig-review--current-model'."
+  (sprig-review--state-model
+   (sprig-review--fold-events (sprig-review--initial-state) events)))
+
+(defun sprig-review--fold-events (state events)
+  "Fold transport EVENTS into fold STATE, returning the advanced state.
+STATE is the opaque accumulator list built by `sprig-review--initial-state';
+EVENTS are in order (oldest first).  Blocks accumulate in place, so a state
+may be carried across calls to continue a fold (see
+`sprig-review--current-model')."
+  (pcase-let ((`(,session ,title ,mode ,cost ,error ,done ,context ,time
+                 ,blocks ,open ,tasks ,pending-creates ,task-ids ,tasks-block)
+               state))
+    (let ((snapshot
+           (lambda ()
+             ;; Push a fresh task checklist, or update the running one, to the
+             ;; current `tasks'.  ITEMS mirror a `TodoWrite' alist so both
+             ;; render through one checklist; each is copied so a later fold
+             ;; does not bleed back into an earlier snapshot.
+             (let ((items (mapcar (lambda (tk)
+                                    (list (cons 'content (plist-get tk :content))
+                                          (cons 'status (plist-get tk :status))))
+                                  tasks)))
+               (if tasks-block
+                   (plist-put tasks-block :items items)
+                 (setq tasks-block (list :type 'tasks :items items :time time))
+                 (push tasks-block blocks))))))
+      (dolist (ev events)
+        (pcase ev
         (`(session ,id) (setq session id))
         (`(title ,tt) (setq title tt))
         (`(mode ,m) (setq mode m))
@@ -443,10 +508,11 @@ See the section commentary for the event vocabulary and block shapes."
       ;; block reaches the head, that run has ended, so the next task op opens
       ;; a fresh checklist rather than reopening the stale one.
       (when (and tasks-block (not (eq (car blocks) tasks-block)))
-        (setq tasks-block nil)))
-    (list :session session :title title :mode mode
-          :cost cost :error error :done done :context context
-          :blocks (nreverse blocks))))
+        (setq tasks-block nil))))
+    ;; Repack the advanced accumulators, in the order `sprig-review--initial-state'
+    ;; lays them out, so a later fold can pick this state up.
+    (list session title mode cost error done context time
+          blocks open tasks pending-creates task-ids tasks-block)))
 
 (defun sprig-review-events-title (events)
   "Return the freshest title carried by EVENTS, or nil.

@@ -427,6 +427,59 @@ as over while its work is in flight."
                            (plist-get model :blocks))
                    '(text tool text)))))
 
+(defun sprig-tests--incremental-model (chron)
+  "Fold CHRON (chronological events) one at a time through the live memo.
+Returns the model `sprig-review--current-model' ends on, having taken the
+incremental fold path from the second event on."
+  (with-temp-buffer
+    (dolist (ev chron)
+      (push ev sprig-review--events)
+      ;; Build after each push, so all but the first fold continue the
+      ;; running builder rather than restart it.
+      (sprig-review--current-model))
+    (sprig-review--current-model)))
+
+(ert-deftest sprig-test-incremental-model-matches-full ()
+  ;; The live buffer folds events into a running builder as they arrive; that
+  ;; must land on exactly the model a single full build of the same events
+  ;; produces, across every block kind that mutates after it is first made:
+  ;; coalesced text, a tool gaining its result, a subagent's nested step and
+  ;; result, a task checklist, and an answered dialog.
+  (dolist (chron
+           (list
+            '((session "s1") (text "Hel") (text "lo")
+              (tool-call "t1" "Edit"
+                         "{\"file_path\":\"x\",\"old_string\":\"a\",\"new_string\":\"b\"}")
+              (tool-result "t1" nil "ok")
+              (text "after") (context 1234) (done 0.02 nil))
+            '((tool-call "toolu_P" "Agent" "{}")
+              (subagent "toolu_P" (:status "running" :description "go"))
+              (subagent-call "toolu_P" "toolu_1" "Read" "{\"file_path\":\"/tmp/n\"}")
+              (subagent-result "toolu_P" "toolu_1" nil "hello")
+              (tool-result "toolu_P" nil "done"))
+            '((tool-call "c1" "TaskCreate" "{\"subject\":\"first\"}")
+              (tool-result "c1" nil "id: 7")
+              (tool-call "u1" "TaskUpdate"
+                         "{\"id\":\"7\",\"status\":\"completed\"}")
+              (tool-result "u1" nil "ok")
+              (text "moving on"))
+            '((dialog "d1" "ask_user_question" "{\"question\":\"pick\"}")
+              (dialog-answer "d1" ["yes"]) (text "ok"))))
+    (should (equal (sprig-tests--incremental-model chron)
+                   (sprig-review-build chron)))))
+
+(ert-deftest sprig-test-incremental-model-independent-copies ()
+  ;; Each build is a value of its own: mutating a returned block must not
+  ;; reach through the running builder into the next build.
+  (with-temp-buffer
+    (push '(text "one") sprig-review--events)
+    (let ((first (sprig-review--current-model)))
+      (plist-put (car (plist-get first :blocks)) :text "TAMPERED")
+      (push '(user "two") sprig-review--events)
+      (let ((second (sprig-review--current-model)))
+        (should (equal (plist-get (car (plist-get second :blocks)) :text)
+                       "one"))))))
+
 (ert-deftest sprig-test-parse-task-started ()
   ;; Names the agent and the job it was given.
   (with-temp-buffer
