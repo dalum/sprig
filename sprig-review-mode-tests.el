@@ -1263,6 +1263,29 @@ the fold learns the id from the result rather than from the call."
         ;; The carrier is spent, so a later ordinary refresh does not re-splice.
         (should (null sprig-review--fontify-fresh))))))
 
+(ert-deftest sprig-review-mode-test-btw-answer-fontifies ()
+  ;; The side-question panel streams its answer raw, then fontifies its
+  ;; markdown once the turn settles: the markup gains the invisible property,
+  ;; so the propertised answer is no longer the bare string.
+  (skip-unless (require 'markdown-mode nil t))
+  (skip-unless (fboundp 'sprig-btw-mode))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset))
+    (with-temp-buffer
+      (sprig-btw-mode)
+      (let ((inhibit-read-only t))
+        (insert "btw: why?\n\n")
+        (setq sprig--btw-answer-beg (point)))       ; as `sprig--btw-display' does
+      (sprig--btw-consume '(text "**bold** answer"))
+      ;; Raw while streaming.
+      (should (string-match-p "\\*\\*bold\\*\\*"
+                              (buffer-substring-no-properties (point-min) (point-max))))
+      (sprig--btw-consume '(done nil nil))
+      ;; Settled: fontified, so the answer region is no longer the raw string.
+      (let ((ans (buffer-substring sprig--btw-answer-beg (point-max))))
+        (should-not (equal-including-properties ans "**bold** answer\n"))))))
+
 (ert-deftest sprig-review-mode-test-consume-preserves-point ()
   (with-temp-buffer
     (sprig-review-mode)

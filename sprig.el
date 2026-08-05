@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.18.1
+;; Version: 0.19.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1050,6 +1050,7 @@ is visible without opening the header."
 (declare-function sprig-review-retry "sprig-review-mode" ())
 (declare-function sprig-review-compact "sprig-review-mode" ())
 (declare-function sprig-review-btw "sprig-review-mode" (question))
+(declare-function sprig-review--fontify-markdown "sprig-review-mode" (text))
 (declare-function sprig-review-answer "sprig-review-mode" ())
 (declare-function sprig-review-answer-recommended "sprig-review-mode" ())
 (declare-function sprig-review-answer-skip "sprig-review-mode" ())
@@ -1235,7 +1236,20 @@ One at a time, so a second `c b' does not interleave its answer with the
 first in the shared `*sprig-btw*' buffer.")
 
 (define-derived-mode sprig-btw-mode special-mode "sprig-btw"
-  "Major mode for the `*sprig-btw*' side-question buffer.")
+  "Major mode for the `*sprig-btw*' side-question buffer."
+  ;; Render the answer's markdown the way a review buffer does: its markup
+  ;; carries `invisible markdown-markup' and its colours ride `font-lock-face'
+  ;; (see `sprig-review--fontify-markdown').  special-mode runs no font-lock,
+  ;; so hide the one here and alias the other into `face' by hand.
+  (add-to-invisibility-spec 'markdown-markup)
+  (setq-local char-property-alias-alist '((face font-lock-face)))
+  (setq-local word-wrap t)
+  (setq-local truncate-lines nil))
+
+(defvar-local sprig--btw-answer-beg nil
+  "Where the current answer's text begins in `*sprig-btw*'.
+`sprig--btw-consume' fontifies the answer's markdown from here once the
+side turn settles; a fresh question resets it (`sprig--btw-display').")
 
 (defun sprig--btw-args (id)
   "The `claude' argument list for a side question against session ID.
@@ -1292,11 +1306,29 @@ arrives and closing the entry when the turn ends."
          (set-window-point win (point-max))))
       (`(done ,_ ,err)
        (goto-char (point-max))
-       (insert (if err "\n\n[the side question failed]\n" "\n")))
+       (if err
+           (insert "\n\n[the side question failed]\n")
+         (insert "\n")
+         ;; The answer streamed in raw; now it has settled, render its markdown.
+         (sprig--btw-fontify)))
       (`(error ,m)
        (goto-char (point-max))
        (insert (format "\n\n[error] %s\n" m)))
       (_ nil))))
+
+(defun sprig--btw-fontify ()
+  "Re-render the current answer's markdown in `*sprig-btw*'.
+The answer streams in raw; once the side turn settles this replaces it with
+its markdown-fontified form, the way a review buffer fontifies a settled
+block.  A no-op if the start was not recorded or markdown is unavailable."
+  (when (and sprig--btw-answer-beg (fboundp 'sprig-review--fontify-markdown))
+    (let ((inhibit-read-only t)
+          (raw (buffer-substring-no-properties sprig--btw-answer-beg (point-max))))
+      (delete-region sprig--btw-answer-beg (point-max))
+      (goto-char sprig--btw-answer-beg)
+      (insert (sprig-review--fontify-markdown raw))
+      (dolist (win (get-buffer-window-list (current-buffer) nil t))
+        (set-window-point win (point-max))))))
 
 (defun sprig--btw-display (question)
   "Show `*sprig-btw*' with a fresh QUESTION heading, returning the buffer.
@@ -1310,7 +1342,9 @@ running `/btw' side panel."
         (goto-char (point-max))
         (unless (bobp) (insert "\n\n"))
         (insert (propertize (format "btw: %s" question) 'face '(:inherit bold))
-                "\n\n")))
+                "\n\n")
+        ;; Where this answer's text starts, so `sprig--btw-fontify' can find it.
+        (setq sprig--btw-answer-beg (point))))
     ;; Reuse an existing window the way `sprig-status' does, rather than
     ;; carving out a dedicated side window of its own.
     (pop-to-buffer buf)
