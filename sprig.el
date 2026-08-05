@@ -2317,14 +2317,38 @@ prose and fills in the muted preview face."
   (if (>= n 1000000) (format "%.1fM" (/ n 1000000.0))
     (format "%.1fk" (/ n 1000.0))))
 
+(defun sprig--state-parts (state)
+  "Return (GLYPH TEXT FACE) for a canonical turn STATE symbol.
+The one source of truth for how a state reads on a state line, shared by
+the review buffer (`sprig-review--state') and the navigator
+\(`sprig--status-state-line') so the two never drift.  Each caller decides
+only which STATE applies, from whatever it can see, then renders these
+parts in its own medium.  STATE is one of `waiting', `compacting',
+`streaming', `pending', `failed', `agent', `done', `interrupted', or
+anything else for `idle'."
+  (pcase state
+    ('waiting     (list "?" "waiting on you"       'sprig-review-waiting))
+    ('compacting  (list "▼" "compacting…"          'sprig-review-working))
+    ('streaming   (list "▶" "working…"             'sprig-review-working))
+    ('pending     (list "▷" "sent, awaiting reply" 'sprig-review-pending))
+    ('failed      (list "✗" "turn failed"          'sprig-review-failed))
+    ;; A background agent outlives the turn that launched it, so this reads
+    ;; ahead of `done': work is still going on though the turn is over.
+    ('agent       (list "▶" "agent working…"       'sprig-review-working))
+    ('done        (list "✓" "turn over"            'sprig-review-done))
+    ('interrupted (list "◼" "interrupted"          'font-lock-comment-face))
+    (_            (list "●" "idle"                 'sprig-review-idle))))
+
 (defun sprig--status-state-line (entry preview)
   "Return the preview's leading state line for ENTRY, or nil.
 Mirrors the review buffer's state line: a glyph and word for what the turn
 is doing or how it ended, then the permission mode when it is a notable one,
-then the context in use.  The live streaming and waiting states come from
-ENTRY's own status, as the row glyph does; the turn's outcome, permission
-mode, and context size come from PREVIEW's model fields.  nil when there is
-no status and no model at all (nothing to say)."
+then the context in use.  The glyph, word, and face are `sprig--state-parts',
+shared with the review buffer so the two agree; only which state applies is
+decided here.  The live streaming and waiting states come from ENTRY's own
+status, as the row glyph does; the turn's outcome, permission mode, and
+context size come from PREVIEW's model fields.  nil when there is no status
+and no model at all (nothing to say)."
   (let ((status (plist-get entry :status))
         (ctx (plist-get preview :context))
         (mode (sprig--notable-mode (plist-get preview :mode))))
@@ -2332,19 +2356,15 @@ no status and no model at all (nothing to say)."
               (plist-get preview :pending) (plist-get preview :agent-running))
       (pcase-let
           ((`(,glyph ,text ,face)
-            (cond
-             ((eq status 'streaming) '("▶" "working…" warning))
-             ((or (eq status 'waiting) (plist-get preview :pending))
-              '("?" "waiting on you" sprig-review-waiting))
-             ((plist-get preview :error) '("✗" "turn failed" error))
-             ;; A background agent still working outlives the turn that
-             ;; launched it; say so ahead of `turn over', as the review
-             ;; buffer's own state line does.
-             ((plist-get preview :agent-running) '("▶" "agent working…" warning))
-             ((plist-get preview :done) '("✓" "turn over" success))
-             ((eq status 'interrupted)
-              '("◼" "interrupted" font-lock-comment-face))
-             (t '("●" "idle" shadow)))))
+            (sprig--state-parts
+             (cond
+              ((eq status 'streaming) 'streaming)
+              ((or (eq status 'waiting) (plist-get preview :pending)) 'waiting)
+              ((plist-get preview :error) 'failed)
+              ((or (eq status 'agent) (plist-get preview :agent-running)) 'agent)
+              ((plist-get preview :done) 'done)
+              ((eq status 'interrupted) 'interrupted)
+              (t 'idle)))))
         (concat (propertize (format "     %s  %s" glyph text) 'face face)
                 ;; The permission mode rides its own tag, coloured on its own
                 ;; terms rather than the turn's, the way the review buffer's

@@ -52,6 +52,7 @@
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
 (declare-function sprig--notable-mode "sprig" (mode))
+(declare-function sprig--state-parts "sprig" (state))
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -1001,36 +1002,40 @@ read, and a dialog is a question put to you, which wants the same air."
 ;; that nothing has moved for a while.
 
 (defun sprig-review--state (model)
-  "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended."
-  (cond
-   ;; Before anything else: the turn is not working, it is stopped, and it is
-   ;; stopped on you.
-   ((sprig-review-pending-dialog model)
-    (list "?" "waiting on you  ·  a a to answer" 'sprig-review-waiting))
-   ;; Ahead of the turn's own state: a compaction stops the turn dead for a
-   ;; minute or more, so `working…' would be the least of what is going on.
-   ;; An automatic one lands mid-turn, uninvited, which is exactly when the
-   ;; reader wonders why nothing is moving.
-   ((and (boundp 'sprig--compacting) sprig--compacting)
-    (list "▼" "compacting…" 'sprig-review-working))
-   (sprig-review--streaming (list "▶" "working…" 'sprig-review-working))
-   ;; Sent, but nothing back yet: the transport is busy while it waits on the
-   ;; agent's first token, so this window would otherwise read as the previous
-   ;; turn's stale `✓ turn over'.
-   ((and (boundp 'sprig--busy) sprig--busy)
-    (list "▷" "sent, awaiting reply" 'sprig-review-pending))
-   ((plist-get model :error) (list "✗" "turn failed" 'sprig-review-failed))
-   ;; The turn can end while a background agent (Task, Explore, ...) it
-   ;; launched is still working, which reads as `turn over' when work is
-   ;; plainly still going on.  Say so, ahead of `done', so the buffer does
-   ;; not go quiet on you while an agent churns.
-   ((sprig-review-agent-running model)
-    (list "▶" "agent working…" 'sprig-review-working))
-   ;; What it cost is in the header; the line says the one thing it is for.
-   ((plist-get model :done) (list "✓" "turn over" 'sprig-review-done))
-   ;; Replayed history, or a session not yet sent to: nothing is running, but
-   ;; no turn of ours ended either, so claim neither.
-   (t (list "●" "idle" 'sprig-review-idle))))
+  "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended.
+The glyph, word, and face are `sprig--state-parts', shared with the
+navigator so the two state lines never drift; only which state applies is
+decided here, from this buffer's own live flags and MODEL.  The one thing
+the navigator has no room for, the `a a to answer' hint on a waiting turn,
+is added here."
+  (let ((state
+         (cond
+          ;; Before anything else: the turn is not working, it is stopped, and
+          ;; it is stopped on you.
+          ((sprig-review-pending-dialog model) 'waiting)
+          ;; Ahead of the turn's own state: a compaction stops the turn dead
+          ;; for a minute or more, so `working…' would be the least of what is
+          ;; going on.  An automatic one lands mid-turn, uninvited, which is
+          ;; exactly when the reader wonders why nothing is moving.
+          ((and (boundp 'sprig--compacting) sprig--compacting) 'compacting)
+          (sprig-review--streaming 'streaming)
+          ;; Sent, but nothing back yet: the transport is busy while it waits
+          ;; on the agent's first token, so this window would otherwise read as
+          ;; the previous turn's stale `✓ turn over'.
+          ((and (boundp 'sprig--busy) sprig--busy) 'pending)
+          ((plist-get model :error) 'failed)
+          ;; The turn can end while a background agent (Task, Explore, ...) it
+          ;; launched is still working; say so ahead of `done' so the buffer
+          ;; does not go quiet on you while an agent churns.
+          ((sprig-review-agent-running model) 'agent)
+          ((plist-get model :done) 'done)
+          ;; Replayed history, or a session not yet sent to: nothing is
+          ;; running, but no turn of ours ended either, so claim neither.
+          (t 'idle))))
+    (pcase-let ((`(,glyph ,text ,face) (sprig--state-parts state)))
+      (when (eq state 'waiting)
+        (setq text (concat text "  ·  a a to answer")))
+      (list glyph text face))))
 
 (defun sprig-review--insert-state (model)
   "Insert the state line, below the last message: what is going on, or ended.

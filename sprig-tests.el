@@ -2341,7 +2341,29 @@ Return the log directory."
     (should (string-match-p "plan" l)))
   (should-not (string-match-p
                "auto"
-               (sprig--status-state-line '(:status idle) '(:done t :mode "auto")))))
+               (sprig--status-state-line '(:status idle) '(:done t :mode "auto"))))
+  ;; A background agent still running reads ahead of `turn over', whether the
+  ;; row status or the preview flag reports it.
+  (should (string-match-p
+           "agent working…"
+           (sprig--status-state-line '(:status agent) '(:done t))))
+  (should (string-match-p
+           "agent working…"
+           (sprig--status-state-line '(:status idle) '(:done t :agent-running t)))))
+
+(ert-deftest sprig-test-state-parts-shared-vocabulary ()
+  ;; The one table the review buffer and the navigator both read, so their
+  ;; state lines cannot drift.  An unknown state falls back to idle.
+  (should (equal (sprig--state-parts 'streaming)
+                 '("▶" "working…" sprig-review-working)))
+  (should (equal (sprig--state-parts 'agent)
+                 '("▶" "agent working…" sprig-review-working)))
+  (should (equal (sprig--state-parts 'done)
+                 '("✓" "turn over" sprig-review-done)))
+  (should (equal (sprig--state-parts 'waiting)
+                 '("?" "waiting on you" sprig-review-waiting)))
+  (should (equal (sprig--state-parts 'anything-else)
+                 '("●" "idle" sprig-review-idle))))
 
 (ert-deftest sprig-test-notable-mode ()
   ;; Only the modes worth flagging come back; the everyday ones are dropped.
