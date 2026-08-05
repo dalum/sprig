@@ -219,10 +219,12 @@ question the reply is answering rather than more of the reply.")
 (defface sprig-status-group '((t :inherit font-lock-keyword-face :weight bold))
   "Face for a navigator group heading naming the host its rows run on.")
 
-(defface sprig-status-mode '((t :inherit font-lock-keyword-face))
-  "Face for the permission mode shown in a navigator preview's state line.
-Coloured on its own terms, apart from the turn's state and the context, so
-`plan' reads as the mode it is and not as a warning about the turn.")
+(defface sprig-mode-tag '((t :inherit font-lock-keyword-face))
+  "Face for the permission mode tag on a state line.
+Shared by the navigator preview and the review buffer, so `plan' reads the
+same in both.  Coloured on its own terms, apart from the turn's state and
+the context, so it reads as the mode it is and not as a warning about the
+turn.")
 
 ;;;; Buffer-local state
 
@@ -2306,7 +2308,7 @@ mode, and context size come from PREVIEW's model fields.  nil when there is
 no status and no model at all (nothing to say)."
   (let ((status (plist-get entry :status))
         (ctx (plist-get preview :context))
-        (mode (sprig--status-notable-mode (plist-get preview :mode))))
+        (mode (sprig--notable-mode (plist-get preview :mode))))
     (when (or status ctx mode (plist-get preview :done) (plist-get preview :error)
               (plist-get preview :pending))
       (pcase-let
@@ -2326,7 +2328,7 @@ no status and no model at all (nothing to say)."
                 ;; mode line carries `[plan]'.  Only the notable modes show.
                 (when mode
                   (concat (propertize "  ·  " 'face face)
-                          (propertize mode 'face 'sprig-status-mode)))
+                          (propertize mode 'face 'sprig-mode-tag)))
                 (when (and (numberp ctx) (> ctx 0))
                   (concat (propertize "  ·  " 'face face)
                           ;; Colour the count on its own terms, escalating past
@@ -2336,11 +2338,12 @@ no status and no model at all (nothing to say)."
                           (propertize (sprig--format-tokens ctx)
                                       'face (sprig--status-context-face ctx)))))))))
 
-(defun sprig--status-notable-mode (mode)
-  "Return MODE when it is worth flagging in the state line, else nil.
+(defun sprig--notable-mode (mode)
+  "Return MODE when it is worth flagging on a state line, else nil.
 The everyday modes (nil, and the CLI's own auto / default / manual) say
 nothing worth the space; plan and the auto-approving ones do, so only those
-show.  Mirrors the review header's own filter."
+show.  Shared by the navigator state line, the review state line, and the
+review header, so all three agree on what counts as notable."
   (and (stringp mode)
        (not (member mode '("auto" "default" "manual")))
        mode))

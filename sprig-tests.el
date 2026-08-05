@@ -2296,14 +2296,14 @@ Return the log directory."
                "auto"
                (sprig--status-state-line '(:status idle) '(:done t :mode "auto")))))
 
-(ert-deftest sprig-test-status-notable-mode ()
+(ert-deftest sprig-test-notable-mode ()
   ;; Only the modes worth flagging come back; the everyday ones are dropped.
-  (should (equal (sprig--status-notable-mode "plan") "plan"))
-  (should (equal (sprig--status-notable-mode "bypassPermissions") "bypassPermissions"))
-  (should-not (sprig--status-notable-mode "auto"))
-  (should-not (sprig--status-notable-mode "manual"))
-  (should-not (sprig--status-notable-mode "default"))
-  (should-not (sprig--status-notable-mode nil)))
+  (should (equal (sprig--notable-mode "plan") "plan"))
+  (should (equal (sprig--notable-mode "bypassPermissions") "bypassPermissions"))
+  (should-not (sprig--notable-mode "auto"))
+  (should-not (sprig--notable-mode "manual"))
+  (should-not (sprig--notable-mode "default"))
+  (should-not (sprig--notable-mode nil)))
 
 (ert-deftest sprig-test-status-context-face-escalates ()
   ;; The count colours on its own terms: plain when small, amber past the

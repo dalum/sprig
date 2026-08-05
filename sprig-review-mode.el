@@ -51,6 +51,7 @@
 (declare-function sprig--session-log-lines "sprig" ())
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
+(declare-function sprig--notable-mode "sprig" (mode))
 ;; Transport state, defined in sprig.el; a session-owning review buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -975,8 +976,7 @@ META may carry :title, :project, :model, and :status."
                    (sprig-review--meta-line "Model"   (plist-get meta :model))
                    (sprig-review--meta-line "Status"  (plist-get meta :status))
                    (sprig-review--meta-line
-                    "Mode" (let ((m (plist-get model :mode)))
-                             (unless (member m '(nil "auto" "default" "manual")) m)))
+                    "Mode" (sprig--notable-mode (plist-get model :mode)))
                    (sprig-review--meta-line "Session" (plist-get model :session))
                    (sprig-review--meta-line
                     "Cost" (when (plist-get model :cost)
@@ -1054,6 +1054,13 @@ the turn as plainly as the line does."
         (insert (sprig-review--face "  ·  " face)
                 (sprig-review--face (format "%d queued" queued)
                                     'sprig-review-pending)))
+      ;; The permission mode rides its own tag, coloured on its own terms
+      ;; rather than the turn's, exactly as the navigator's state line carries
+      ;; it (same `sprig--notable-mode' filter, same `sprig-mode-tag' face).
+      ;; Only the notable modes show; the everyday ones say nothing worth it.
+      (when-let ((mode (sprig--notable-mode (plist-get model :mode))))
+        (insert (sprig-review--face "  ·  " face)
+                (sprig-review--face mode 'sprig-mode-tag)))
       (when ctx
         ;; The separator belongs to the line, the readout does not: the
         ;; context is coloured on its own terms, so a normal one does not
