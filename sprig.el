@@ -2901,10 +2901,10 @@ survives."
         (unless (sprig--status-collapsed-p (plist-get e :host))
           (push (list id
                       (vector glyph
-                              (or (plist-get e :title) "")
                               (if dir (file-name-nondirectory
                                        (directory-file-name dir))
                                 "-")
+                              (or (plist-get e :title) "")
                               (if (and (stringp session) (> (length session) 0))
                                   (substring session 0 (min 8 (length session)))
                                 "-")
@@ -3511,8 +3511,8 @@ Split from the mode so `sprig-reload' can re-apply an edited column layout to
 an already-open navigator, whose header is otherwise fixed at mode init."
   (setq tabulated-list-format
         [("S" 2 t)
-         ("Title" 32 t)
          ("Project" 24 t)
+         ("Title" 32 t)
          ("Session" 9 nil)
          ("Created" 11 nil)]
         tabulated-list-padding 1
