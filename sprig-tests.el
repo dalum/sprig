@@ -2463,10 +2463,12 @@ without a real SSH process."
             (should prompt-line)
             (should (string-match-p "[0-9][0-9]:[0-9][0-9] » my prompt here"
                                     prompt-line))
-            ;; And a clock leads the reply.
+            ;; And a clock leads the reply, after an optional date prefix that
+            ;; `sprig--format-time-value' adds once the log is no longer today.
             (should reply-line)
-            (should (string-match-p "^ +[0-9][0-9]:[0-9][0-9] .*the reply here"
-                                    reply-line))))
+            (should (string-match-p
+                     "^ +\\([0-9][0-9]-[0-9][0-9] \\)?[0-9][0-9]:[0-9][0-9] .*the reply here"
+                     reply-line))))
       (delete-directory root t))))
 
 (ert-deftest sprig-test-status-scroll-anchor-round-trips-by-id ()
