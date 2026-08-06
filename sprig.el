@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.20.1
+;; Version: 0.21.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1449,16 +1449,18 @@ be nil.  Streams the answer into `*sprig-btw*'.  The one-at-a-time guard is
     (message "sprig: side question sent (%s)"
              (if remote-host "remote" "local"))))
 
-;;; Retitle by asking the agent
+;;; Retitle a session
 ;;
-;; A retitle forks the session the way `c b' does (`--fork-session
-;; --no-session-persistence'), but instead of streaming an answer into a
-;; panel it asks for one short title, collects it, lets you edit it, and
-;; appends an `ai-title' record to the session log.  The log parser takes
-;; the last `aiTitle' (see `sprig--log-title'), so the appended record wins
-;; over the CLI's own.  One caveat: a session you keep working in may have
-;; the CLI re-emit its old title on a later turn and bury the override; the
-;; agent title is meant for a settled session, and re-running fixes it.
+;; A retitle writes the session a user title.  On disk that title is the
+;; `custom-title'/`agent-name' pair the CLI's own `/rename' appends, so
+;; Sprig writes the same records directly (`sprig--title-persist') rather
+;; than driving `claude': the effect is identical and it costs no process,
+;; no turn, and works on a closed session.  A user title is never
+;; regenerated, so it always beats the CLI's `aiTitle' (see
+;; `sprig--log-title'), and unlike an appended `aiTitle' it is not buried
+;; when work continues.  The agent variant additionally forks the session
+;; the way `c b' does (`--fork-session --no-session-persistence') only to
+;; *propose* a title, which you then confirm or edit before it is written.
 
 (defvar sprig--title-process nil
   "The live retitle one-shot, or nil.  Guards one retitle at a time.")
@@ -1541,35 +1543,44 @@ at a time (`sprig--title-process')."
              (if remote-host "remote" "local"))))
 
 (defun sprig--title-persist (id remote-host title)
-  "Append an `ai-title' record naming TITLE to session ID's log.
-The log is found by id under the projects directory on REMOTE-HOST (nil for
-local); the parser takes the last `aiTitle', so the appended record
-overrides the CLI's own.  Returns non-nil on a successful write."
-  (let ((line (concat (json-serialize `(:type "ai-title" :aiTitle ,title))
-                      "\n")))
+  "Write TITLE as session ID's user title, into its log.
+Appends the `custom-title' and `agent-name' records the CLI's own `/rename'
+writes, rather than driving `claude' to run it: on disk `/rename' does no
+more than append this pair, and there is no separate name index.  Unlike
+`ai-title' (the CLI's generated title, re-emitted every turn), a user title
+is never regenerated, so it always wins (see `sprig--log-title').  The log
+is found by id under the projects directory on REMOTE-HOST (nil for local);
+returns non-nil on a successful write."
+  (let ((lines (concat
+                (json-serialize `(:type "custom-title" :customTitle ,title
+                                  :sessionId ,id))
+                "\n"
+                (json-serialize `(:type "agent-name" :agentName ,title
+                                  :sessionId ,id))
+                "\n")))
     (if remote-host
-        (sprig--title-persist-remote id line remote-host)
-      (sprig--title-persist-local id line))))
+        (sprig--title-persist-remote id lines remote-host)
+      (sprig--title-persist-local id lines))))
 
-(defun sprig--title-persist-local (id line)
-  "Append LINE to local session ID's log, returning non-nil when it lands."
+(defun sprig--title-persist-local (id text)
+  "Append TEXT to local session ID's log, returning non-nil when it lands."
   (let ((file (car (directory-files-recursively
                     (expand-file-name (sprig--projects-directory))
                     (concat "\\`" (regexp-quote id) "\\.jsonl\\'")))))
     (when file
-      (write-region line nil file 'append 'silent)
+      (write-region text nil file 'append 'silent)
       t)))
 
-(defun sprig--title-persist-remote (id line host)
-  "Append LINE to remote session ID's log on HOST, returning non-nil on success.
-One SSH round trip finds the log by id and appends the record with `>>'."
+(defun sprig--title-persist-remote (id text host)
+  "Append TEXT to remote session ID's log on HOST, returning non-nil on success.
+One SSH round trip finds the log by id and appends the records with `>>'."
   (let* ((sprig-remote host)
          (root (sprig--remote-dir-arg (sprig--projects-directory)))
          (name (shell-quote-argument (concat id ".jsonl")))
          (out (sprig--remote-sh
                (format "p=$(find %s -name %s -print -quit 2>/dev/null); \
 [ -n \"$p\" ] && printf %s >> \"$p\" && echo ok"
-                       root name (shell-quote-argument line)))))
+                       root name (shell-quote-argument text)))))
     (and out (string-match-p "ok" out))))
 
 (declare-function sprig-review-set-title "sprig-review-mode" (title))
@@ -1587,17 +1598,32 @@ next render."
   (sprig--status-scan-invalidate)
   (sprig--status-refresh))
 
+(defun sprig--title-live-buffer (id)
+  "Return a live review buffer that owns session ID with a running process, or nil."
+  (seq-find (lambda (b)
+              (and (equal (buffer-local-value 'sprig--session-id b) id)
+                   (process-live-p (buffer-local-value 'sprig--process b))))
+            (buffer-list)))
+
 (defun sprig--title-commit (id remote-host title)
-  "Persist TITLE for session ID on REMOTE-HOST (nil local) and reflect it.
-Trims TITLE; an empty one cancels.  Appends an `ai-title' record to the log,
-updates any open review buffer and the navigator, and messages the outcome.
-Shared by the agent (`sprig--title-apply') and the manual retitle commands."
-  (let ((title (string-trim title)))
+  "Set session ID's user TITLE and reflect it, trimming; an empty one cancels.
+When the session is live, sends `/rename' down the wire already open to it,
+letting the CLI write its own rename records.  Otherwise writes the same
+`custom-title'/`agent-name' records to the log directly
+\(`sprig--title-persist') on REMOTE-HOST (nil local).  Either way it updates
+any open review buffer and the navigator and messages the outcome.  Shared
+by the agent (`sprig--title-apply') and the manual retitle commands."
+  (let ((title (string-trim title))
+        (buf (sprig--title-live-buffer id)))
     (cond
      ((string-empty-p title) (message "sprig: retitle cancelled"))
+     (buf
+      (with-current-buffer buf (sprig--send-user (concat "/rename " title)))
+      (sprig--title-reflect id title)
+      (message "sprig: renamed to %s" title))
      ((sprig--title-persist id remote-host title)
       (sprig--title-reflect id title)
-      (message "sprig: retitled to %s" title))
+      (message "sprig: renamed to %s" title))
      (t (message "sprig: could not find session %s's log to retitle" id)))))
 
 (defun sprig--title-apply (id remote-host proposed)
@@ -1612,9 +1638,9 @@ edit it, then commits it (`sprig--title-commit')."
 
 (defun sprig-status-retitle ()
   "Ask the agent for a short title for the session at point, then set it.
-Forks that session without opening it (like `c b'), proposes a title, and
-once you confirm or edit it appends an `ai-title' record to its log and
-refreshes the navigator."
+Forks that session without opening it (like `c b') to propose a title, and
+once you confirm or edit it writes a user title to its log and refreshes the
+navigator."
   (interactive)
   (let* ((entry (sprig--status-entry-at-point))
          (id (plist-get entry :session))
@@ -1627,9 +1653,9 @@ refreshes the navigator."
 
 (defun sprig-status-set-title (title)
   "Set the title of the session on the row at point by hand, writing it out.
-Prompts for TITLE (seeded with the current one) and appends an `ai-title'
-record to the session's log, the way `sprig-status-retitle' persists the
-agent's suggestion but without asking the agent."
+Prompts for TITLE (seeded with the current one) and writes a user title to
+the session's log, the way `sprig-status-retitle' persists the agent's
+suggestion but without asking the agent."
   (interactive
    (let ((cur (plist-get (sprig--status-entry-at-point) :title)))
      (list (read-string "Session title: "
@@ -2181,14 +2207,26 @@ scan's mtime (see `sprig--format-time-value')."
           (encode-time
            (iso8601-parse (json-parse-string (match-string 1 text))))))))
 
-(defun sprig--log-title (text)
-  "Return the last `aiTitle' recorded in session-log TEXT, or nil.
-TEXT is either a log's head or its grepped `ai-title' lines; the CLI
-re-emits the same title each turn, so the last match wins in either."
-  (let ((title nil) (pos 0))
-    (while (string-match "\"aiTitle\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)" text pos)
+(defun sprig--log-title-field (field text)
+  "Return the last value of JSON string FIELD in TEXT, or nil.
+FIELD is a record key like \"aiTitle\" or \"customTitle\"; the last match
+wins, since both the CLI's generated title and a user rename are appended
+and re-emitted."
+  (let ((title nil) (pos 0)
+        (re (concat "\"" (regexp-quote field)
+                    "\":\\(\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\)")))
+    (while (string-match re text pos)
       (setq title (match-string 1 text) pos (match-end 0)))
     (and title (ignore-errors (json-parse-string title)))))
+
+(defun sprig--log-title (text)
+  "Return the session title in session-log TEXT: user title over generated.
+A user rename (`/rename', or Sprig's own retitle) appends a `customTitle';
+the CLI's generated title is `aiTitle', re-emitted every turn.  A custom
+title, once set, is never regenerated, so it always wins; otherwise the last
+`aiTitle' does.  TEXT is a log's head or its grepped title lines."
+  (or (sprig--log-title-field "customTitle" text)
+      (sprig--log-title-field "aiTitle" text)))
 
 (defun sprig--session-log-head (file)
   "Return the leading bytes of session-log FILE, local or remote, or nil.
@@ -2206,14 +2244,14 @@ title is not read from here (a large opening turn can push the first
         (buffer-string)))))
 
 (defun sprig--local-title-line (file)
-  "Return session-log FILE's `aiTitle' lines, grepped from the whole file.
-The title can sit anywhere (a large opening turn pushes the first one well
-past any head window), so it is grepped rather than read from a slice.
-Consulted only when the head carries no title, so the whole-file read is
-paid only for the rare session that needs it."
+  "Return session-log FILE's title lines, grepped from the whole file.
+Matches both the user `customTitle' and the generated `aiTitle'; the title
+can sit anywhere (a large opening turn pushes the first past any head
+window), so it is grepped rather than read from a slice.  Consulted for a
+log past the head window, so the whole-file read is paid only when needed."
   (ignore-errors
     (with-temp-buffer
-      (and (eq 0 (call-process "grep" nil t nil "-a" "aiTitle"
+      (and (eq 0 (call-process "grep" nil t nil "-aE" "customTitle|aiTitle"
                                (expand-file-name file)))
            (buffer-string)))))
 
@@ -2238,12 +2276,12 @@ the encoded log-directory name is not a real path (its separators are
 lossily flattened to dashes), so it is kept only as the display-only
 `:project' and never handed to a `cd'.
 
-The title is the last `aiTitle' in the log, since the CLI re-emits it and a
-retitle appends its own (see `sprig--log-title').  When HEAD is the whole
-file (WHOLE) that last title is already in HEAD.  Otherwise TITLE-FALLBACK,
-a function returning grepped `ai-title' lines from the whole file, is
-preferred, so a title past the head window, whether re-emitted or an
-appended retitle, still wins; HEAD's title is the backstop."
+The title is a user `customTitle' if set, else the last `aiTitle' (see
+`sprig--log-title').  When HEAD is the whole file (WHOLE) that title is
+already in HEAD.  Otherwise TITLE-FALLBACK, a function returning the log's
+grepped title lines (both fields) from the whole file, is preferred, so a
+title past the head window, whether a re-emitted `aiTitle' or an appended
+rename, still wins; HEAD's title is the backstop."
   (let* ((cwd (and head (sprig--log-cwd head)))
          (head-title (and head (sprig--log-title head)))
          (grep-title (and (not whole) title-fallback
@@ -2312,13 +2350,15 @@ some of the newest, so a little headroom keeps the capped set full."
   "Shell command listing the CAP newest logs under ROOT with their scan fields.
 One SSH round trip does the whole scan: `find | sort | head' picks the newest
 logs by mtime, then each is slurped for its mtime, path, head bytes (for the
-`cwd'), and its last `ai-title' line (for the title, grepped whole-file since
-it can sit anywhere).  Records are RS(\\036)-separated, fields US(\\037)-
-separated, for `sprig--parse-scan-rows'."
+`cwd'), and its title line, grepped whole-file since it can sit anywhere.  A
+user `customTitle' is preferred over the generated `aiTitle' (see
+`sprig--log-title'), so the grep looks for it first.  Records are
+RS(\\036)-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'."
   (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' 2>/dev/null \
 | sort -rn | head -n %d | while IFS='\t' read -r m p; do \
 printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; head -c %d \"$p\"; \
-printf '\\037'; grep -a aiTitle \"$p\" | tail -1; done"
+printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
+[ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; done"
           root cap sprig--status-preview-bytes))
 
 (defun sprig--parse-scan-rows (blob limit)

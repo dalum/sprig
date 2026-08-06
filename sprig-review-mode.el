@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.20.1
+;; Version: 0.21.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2389,12 +2389,10 @@ To persist a title to the log, see `sprig-review-retitle'."
 
 (defun sprig-review-retitle ()
   "Ask the agent for a short title for this session, then set it (`T a').
-Forks the session the way `c b' does, has it propose a title, and once you
-confirm or edit the suggestion appends an `ai-title' record to the log so
-the new title survives a reload.  The header updates too.  A session you
-keep working in may have the CLI re-emit its old title on a later turn and
-bury this; the agent title is meant for a settled session, and re-running
-fixes it."
+Forks the session the way `c b' does to propose a title, and once you
+confirm or edit the suggestion writes it to the log as a user title (the
+`custom-title' the CLI's own `/rename' writes) so it survives a reload and
+is never regenerated away.  The header updates too."
   (interactive)
   (unless sprig--session-id
     (user-error "This review has no stored session yet"))
@@ -2407,9 +2405,10 @@ fixes it."
 
 (defun sprig-review-retitle-manually (title)
   "Set this session's TITLE by hand and write it to the log (`T m').
-Like `sprig-review-set-title', but it appends an `ai-title' record so the
-title survives a reload, the way `sprig-review-retitle' persists the
-agent's suggestion.  The plain `t' key relabels the header only."
+Like `sprig-review-set-title', but it writes a user title (the same
+`custom-title' the CLI's `/rename' writes) so it survives a reload, the way
+`sprig-review-retitle' persists the agent's suggestion.  The plain `t' key
+relabels the header only."
   (interactive
    (list (read-string "Session title: " (plist-get sprig-review--meta :title))))
   (unless sprig--session-id

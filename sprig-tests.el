@@ -1711,9 +1711,50 @@ Return the log directory."
   (should (null (sprig--title-clean "   \n  ")))
   (should (<= (length (sprig--title-clean (make-string 200 ?a))) 80)))
 
+(ert-deftest sprig-test-log-title-prefers-custom ()
+  ;; A user `customTitle' beats the generated `aiTitle', wherever they sit,
+  ;; so a later re-emitted `aiTitle' never buries the rename.
+  (should (equal (sprig--log-title
+                  (concat "\"aiTitle\":\"Generated\"\n"
+                          "\"customTitle\":\"By the user\"\n"
+                          "\"aiTitle\":\"Generated again\"\n"))
+                 "By the user"))
+  ;; With no custom title, the last generated one wins.
+  (should (equal (sprig--log-title
+                  (concat "\"aiTitle\":\"First\"\n\"aiTitle\":\"Second\"\n"))
+                 "Second"))
+  ;; The last of several custom titles wins.
+  (should (equal (sprig--log-title
+                  (concat "\"customTitle\":\"Old\"\n\"customTitle\":\"New\"\n"))
+                 "New")))
+
+(ert-deftest sprig-test-retitle-persist-writes-custom-title ()
+  ;; A retitle writes the CLI's own rename records (`custom-title' plus
+  ;; `agent-name'), not an `ai-title', so the CLI never regenerates it away.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/records")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-rec"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi")))
+          (should (sprig--title-persist "sess-rec" nil "A tidy name"))
+          (let ((log (with-temp-buffer
+                       (insert-file-contents
+                        (car (directory-files-recursively
+                              root "\\`sess-rec\\.jsonl\\'")))
+                       (buffer-string))))
+            (should (string-match-p "\"type\":\"custom-title\"" log))
+            (should (string-match-p "\"type\":\"agent-name\"" log))
+            (should (string-match-p "A tidy name" log))
+            (should-not (string-match-p "ai-title" log))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-retitle-persist-small ()
-  ;; A retitle appends an `ai-title' record; for a log inside the head
-  ;; window the appended title is the last one and the scan shows it.
+  ;; A retitle's user title beats the CLI's generated one; for a log inside
+  ;; the head window it is read straight from the head.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/small")
          (sprig-remote nil)
@@ -1730,9 +1771,9 @@ Return the log directory."
       (delete-directory root t))))
 
 (ert-deftest sprig-test-retitle-persist-past-head ()
-  ;; The appended title wins even when the CLI's own title sits in the 64KB
-  ;; head and a large turn pushes the appended record well past it: the
-  ;; local scan greps the whole file for the last title, matching remote.
+  ;; The user title wins even when the CLI's own title sits in the 64KB head
+  ;; and a large turn pushes the appended records well past it: the local
+  ;; scan greps the whole file for the title, matching remote.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/big")
          (sprig-remote nil)
