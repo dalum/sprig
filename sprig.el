@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.20.0
+;; Version: 0.20.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1587,21 +1587,28 @@ next render."
   (sprig--status-scan-invalidate)
   (sprig--status-refresh))
 
+(defun sprig--title-commit (id remote-host title)
+  "Persist TITLE for session ID on REMOTE-HOST (nil local) and reflect it.
+Trims TITLE; an empty one cancels.  Appends an `ai-title' record to the log,
+updates any open review buffer and the navigator, and messages the outcome.
+Shared by the agent (`sprig--title-apply') and the manual retitle commands."
+  (let ((title (string-trim title)))
+    (cond
+     ((string-empty-p title) (message "sprig: retitle cancelled"))
+     ((sprig--title-persist id remote-host title)
+      (sprig--title-reflect id title)
+      (message "sprig: retitled to %s" title))
+     (t (message "sprig: could not find session %s's log to retitle" id)))))
+
 (defun sprig--title-apply (id remote-host proposed)
   "Confirm the PROPOSED title for session ID, then persist and reflect it.
 Run from the retitle fork's callback: PROPOSED is the agent's suggestion, or
 nil when the fork failed or gave nothing usable.  Prompts you to accept or
-edit it, appends it to the log on REMOTE-HOST (nil for local), and updates
-any open review buffer and the navigator."
+edit it, then commits it (`sprig--title-commit')."
   (if (not proposed)
       (message "sprig: the agent proposed no usable title")
-    (let ((title (string-trim (read-string "Session title: " proposed))))
-      (cond
-       ((string-empty-p title) (message "sprig: retitle cancelled"))
-       ((sprig--title-persist id remote-host title)
-        (sprig--title-reflect id title)
-        (message "sprig: retitled to %s" title))
-       (t (message "sprig: could not find session %s's log to retitle" id))))))
+    (sprig--title-commit id remote-host
+                         (read-string "Session title: " proposed))))
 
 (defun sprig-status-retitle ()
   "Ask the agent for a short title for the session at point, then set it.
@@ -1617,6 +1624,21 @@ refreshes the navigator."
     (sprig--title-ask id dir host
                       (lambda (proposed)
                         (sprig--title-apply id host proposed)))))
+
+(defun sprig-status-set-title (title)
+  "Set the title of the session on the row at point by hand, writing it out.
+Prompts for TITLE (seeded with the current one) and appends an `ai-title'
+record to the session's log, the way `sprig-status-retitle' persists the
+agent's suggestion but without asking the agent."
+  (interactive
+   (let ((cur (plist-get (sprig--status-entry-at-point) :title)))
+     (list (read-string "Session title: "
+                        (unless (equal cur "(untitled)") cur)))))
+  (let* ((entry (sprig--status-entry-at-point))
+         (id (plist-get entry :session))
+         (host (plist-get entry :host)))
+    (unless id (user-error "No session id on this row"))
+    (sprig--title-commit id host title)))
 
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
@@ -3436,7 +3458,7 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
 (define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
-(define-key sprig-status-mode-map (kbd "T")   #'sprig-status-retitle)
+(define-key sprig-status-mode-map (kbd "T")   #'sprig-status-title-dispatch)
 ;; The columns are unsortable to `tabulated-list', so a header click falls
 ;; through to here rather than its native sort, which would break the groups.
 (define-key sprig-status-mode-map [header-line mouse-1] #'sprig-status-sort)
@@ -3853,6 +3875,12 @@ and live, since the mode is a session-level setting the CLI tracks."
     ("e" "accept edits (auto-approve file edits)" sprig-status-accept-edits-mode)
     ("m" "manual (prompt for every tool call)" sprig-status-manual-mode)
     ("b" "bypass (auto-approve everything, incl. shell)" sprig-status-bypass-mode)]])
+
+(transient-define-prefix sprig-status-title-dispatch ()
+  "Retitle the session on the row at point, saving the new title to its log."
+  [["Title"
+    ("a" "ask the agent, then save" sprig-status-retitle)
+    ("m" "set by hand, then save" sprig-status-set-title)]])
 
 ;;; Notes
 

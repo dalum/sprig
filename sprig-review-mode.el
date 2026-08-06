@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.20.0
+;; Version: 0.20.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2385,9 +2385,10 @@ To persist a title to the log, see `sprig-review-retitle'."
 
 (declare-function sprig--title-ask "sprig" (id dir remote-host callback))
 (declare-function sprig--title-apply "sprig" (id remote-host proposed))
+(declare-function sprig--title-commit "sprig" (id remote-host title))
 
 (defun sprig-review-retitle ()
-  "Ask the agent for a short title for this session, then set it.
+  "Ask the agent for a short title for this session, then set it (`T a').
 Forks the session the way `c b' does, has it propose a title, and once you
 confirm or edit the suggestion appends an `ai-title' record to the log so
 the new title survives a reload.  The header updates too.  A session you
@@ -2403,6 +2404,26 @@ fixes it."
     (sprig--title-ask id dir host
                       (lambda (proposed)
                         (sprig--title-apply id host proposed)))))
+
+(defun sprig-review-retitle-manually (title)
+  "Set this session's TITLE by hand and write it to the log (`T m').
+Like `sprig-review-set-title', but it appends an `ai-title' record so the
+title survives a reload, the way `sprig-review-retitle' persists the
+agent's suggestion.  The plain `t' key relabels the header only."
+  (interactive
+   (list (read-string "Session title: " (plist-get sprig-review--meta :title))))
+  (unless sprig--session-id
+    (user-error "This review has no stored session yet"))
+  (sprig--title-commit sprig--session-id (sprig--remote) title))
+
+(transient-define-prefix sprig-review-title-dispatch ()
+  "Retitle this session (`T').
+`T a' / `T m' save the new title to the log so it survives a reload; `T t'
+only relabels this buffer's header, as the plain `t' key does."
+  [["Title"
+    ("a" "ask the agent, then save" sprig-review-retitle)
+    ("m" "set by hand, then save" sprig-review-retitle-manually)
+    ("t" "relabel the header only (not saved)" sprig-review-set-title)]])
 
 (declare-function sprig-review-session "sprig" (dir &optional session-id host fork))
 (declare-function sprig--remote "sprig" ())
@@ -3102,7 +3123,7 @@ navigator when it is open, so a note jotted here shows there at once."
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
 (define-key sprig-review-mode-map (kbd "RET") #'sprig-review-visit)
 (define-key sprig-review-mode-map (kbd "t")   #'sprig-review-set-title)
-(define-key sprig-review-mode-map (kbd "T")   #'sprig-review-retitle)
+(define-key sprig-review-mode-map (kbd "T")   #'sprig-review-title-dispatch)
 
 (provide 'sprig-review-mode)
 ;;; sprig-review-mode.el ends here

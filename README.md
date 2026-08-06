@@ -121,7 +121,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `+` | Notes (a personal reminder list, its own group at the top when you have any): `+ +` jot a new note, `+ t` toggle the note at point done, `+ e` edit it, `+ d` delete it (asks first), `+ o` open the notes file |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
-| `T` | Ask the agent for a short title for the session at point (without opening it) and, once you confirm it, write it to the log (see [Retitling](#retitling)) |
+| `T` | Title transient for the session at point (saves to the log): `T a` ask the agent, `T m` set by hand (see [Retitling](#retitling)) |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
 
@@ -152,7 +152,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `RET` | Visit the file the section points to (over SSH/TRAMP if remote) |
 | `g` | Re-read the session log into the buffer (its history is seeded once at open, never re-read after) |
 | `t` | Retitle the buffer's header (display only; the CLI owns the stored title) |
-| `T` | Ask the agent for a short title and, once you confirm it, write it to the log so it sticks (see [Retitling](#retitling)) |
+| `T` | Title transient (saves to the log): `T a` ask the agent, `T m` set by hand, `T t` relabel the header only (see [Retitling](#retitling)) |
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks. Steers, so a bad hunk can be called out while the turn is still running |
@@ -200,7 +200,7 @@ The one honest limit is mid-turn. A `--resume` fork sees the conversation only u
 
 ### Retitling
 
-`T` asks the agent for a fresh title for a session, in the review buffer (`sprig-review-retitle`) or on the navigator row at point (`sprig-status-retitle`). It reuses the side-question fork, so it sees the whole conversation and disturbs nothing, and asks for one short title. When the answer lands it is proposed in the minibuffer for you to accept with `RET` or edit, then written to the session's log as an `ai-title` record. The log parser takes the last `ai-title`, so the appended one overrides the CLI's own and the new title survives a reload; any open review buffer and the navigator update at once. Unlike `t`, which only relabels the open buffer's header, `T` sticks.
+`T` is the title transient, in the review buffer or on the navigator row at point. `T a` asks the agent for a fresh title: it reuses the side-question fork, so it sees the whole conversation and disturbs nothing, and asks for one short title; when the answer lands it is proposed in the minibuffer for you to accept with `RET` or edit. `T m` skips the agent and lets you type a title straight away. Either way the title is written to the session's log as an `ai-title` record. The log parser takes the last `ai-title`, so the appended one overrides the CLI's own and the new title survives a reload; any open review buffer and the navigator update at once. In the review buffer `T t` (and the plain `t` key) relabels the open buffer's header only, which does not persist; `T a` and `T m` stick.
 
 One caveat: a session you keep working in may have the CLI re-emit its old title on a later turn and bury the override. The agent title is meant for a settled session, and re-running `T` fixes it.
 

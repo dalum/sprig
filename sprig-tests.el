@@ -1766,6 +1766,27 @@ Return the log directory."
         (while (eq got 'unset) (sit-for 0.02)))
       (should (equal got "My title")))))
 
+(ert-deftest sprig-test-title-commit ()
+  ;; A manual commit (behind `T m') trims and persists the title; an empty
+  ;; one cancels, leaving the previous title in place.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/commit")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-c"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "CLI title"))
+          (sprig--title-commit "sess-c" nil "  By hand  ")
+          (should (equal (plist-get (car (sprig--scan-session-logs)) :title)
+                         "By hand"))
+          (sprig--title-commit "sess-c" nil "   ")
+          (should (equal (plist-get (car (sprig--scan-session-logs)) :title)
+                         "By hand")))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-retitle-persist-missing-log ()
   ;; Persisting against an id with no log fails cleanly rather than writing.
   (let* ((root (make-temp-file "sprig-proj" t))
