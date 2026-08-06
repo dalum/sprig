@@ -121,6 +121,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `+` | Notes (a personal reminder list, its own group at the top when you have any): `+ +` jot a new note, `+ t` toggle the note at point done, `+ e` edit it, `+ d` delete it (asks first), `+ o` open the notes file |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
+| `T` | Ask the agent for a short title for the session at point (without opening it) and, once you confirm it, write it to the log (see [Retitling](#retitling)) |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
 
@@ -151,6 +152,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `RET` | Visit the file the section points to (over SSH/TRAMP if remote) |
 | `g` | Re-read the session log into the buffer (its history is seeded once at open, never re-read after) |
 | `t` | Retitle the buffer's header (display only; the CLI owns the stored title) |
+| `T` | Ask the agent for a short title and, once you confirm it, write it to the log so it sticks (see [Retitling](#retitling)) |
 | `SPC` / `m` | Toggle the mark on the section at point |
 | `U` | Clear all marks |
 | `k` | Reject: ask the agent to undo the marked (or point) diff hunks. Steers, so a bad hunk can be called out while the turn is still running |
@@ -195,6 +197,12 @@ The choice rides back to the agent and the question settles in place, showing wh
 **It writes no log.** The fork runs with the CLI's `--no-session-persistence`, so nothing is saved to disk and no stray row appears in the navigator; the parent session's own log is never touched either. Any sections you marked ride along as context, exactly as `c c` attaches them.
 
 The one honest limit is mid-turn. A `--resume` fork sees the conversation only up to the last saved turn, because the CLI does not flush the in-flight turn to the log until it ends. So when a turn is streaming, Sprig adds that turn's live text to the question itself, from its own model, which is what lets a mid-turn side question see what the agent is doing now. The settled history keeps its real turn structure; only the in-flight tail is added as text rather than as its own turns. One side question runs at a time.
+
+### Retitling
+
+`T` asks the agent for a fresh title for a session, in the review buffer (`sprig-review-retitle`) or on the navigator row at point (`sprig-status-retitle`). It reuses the side-question fork, so it sees the whole conversation and disturbs nothing, and asks for one short title. When the answer lands it is proposed in the minibuffer for you to accept with `RET` or edit, then written to the session's log as an `ai-title` record. The log parser takes the last `ai-title`, so the appended one overrides the CLI's own and the new title survives a reload; any open review buffer and the navigator update at once. Unlike `t`, which only relabels the open buffer's header, `T` sticks.
+
+One caveat: a session you keep working in may have the CLI re-emit its old title on a later turn and bury the override. The agent title is meant for a settled session, and re-running `T` fixes it.
 
 ## Options
 

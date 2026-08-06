@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.19.1
+;; Version: 0.20.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1383,11 +1383,12 @@ running `/btw' side panel."
     (let ((stderr (process-get proc :stderr-proc)))
       (when (process-live-p stderr) (delete-process stderr)))))
 
-(defun sprig--btw-spawn (command dir remote-host buffer)
-  "Start a side-question process running COMMAND, streaming into BUFFER.
+(defun sprig--fork-spawn (command dir remote-host buffer name sentinel)
+  "Start a forked one-shot NAME running COMMAND, streaming events into BUFFER.
 DIR/REMOTE-HOST mirror the session; a local cwd and CLAUDE_CONFIG_DIR are
-bound here the way `sprig--spawn' does.  BUFFER is the `*sprig-btw*' sink;
-the reused transport filter dispatches to its buffer-local `sprig--sink'."
+bound here the way `sprig--spawn' does.  The reused transport filter
+dispatches to BUFFER's buffer-local `sprig--sink'; SENTINEL cleans up when
+the one-shot exits.  Shared by the side question and the retitle fork."
   (let* ((default-directory
           (if (and dir (not remote-host))
               (file-name-as-directory (expand-file-name dir))
@@ -1400,7 +1401,7 @@ the reused transport filter dispatches to its buffer-local `sprig--sink'."
             process-environment))
          (stderr (sprig--make-stderr))
          (proc (make-process
-                :name "sprig-btw"
+                :name name
                 :buffer nil
                 :command command
                 :connection-type 'pipe
@@ -1408,10 +1409,17 @@ the reused transport filter dispatches to its buffer-local `sprig--sink'."
                 :noquery t
                 :stderr stderr
                 :filter #'sprig--filter
-                :sentinel #'sprig--btw-sentinel)))
+                :sentinel sentinel)))
     (process-put proc :conv-buffer buffer)
     (process-put proc :stderr-proc stderr)
     proc))
+
+(defun sprig--btw-spawn (command dir remote-host buffer)
+  "Start a side-question one-shot running COMMAND, streaming into BUFFER.
+A thin wrapper over `sprig--fork-spawn' with the side question's process
+name and sentinel; the answer lands in the `*sprig-btw*' sink."
+  (sprig--fork-spawn command dir remote-host buffer
+                     "sprig-btw" #'sprig--btw-sentinel))
 
 (defun sprig--btw-send (proc text)
   "Write TEXT to PROC as the one user message, then close its stdin.
@@ -1440,6 +1448,175 @@ be nil.  Streams the answer into `*sprig-btw*'.  The one-at-a-time guard is
     (sprig--btw-send sprig--btw-process text)
     (message "sprig: side question sent (%s)"
              (if remote-host "remote" "local"))))
+
+;;; Retitle by asking the agent
+;;
+;; A retitle forks the session the way `c b' does (`--fork-session
+;; --no-session-persistence'), but instead of streaming an answer into a
+;; panel it asks for one short title, collects it, lets you edit it, and
+;; appends an `ai-title' record to the session log.  The log parser takes
+;; the last `aiTitle' (see `sprig--log-title'), so the appended record wins
+;; over the CLI's own.  One caveat: a session you keep working in may have
+;; the CLI re-emit its old title on a later turn and bury the override; the
+;; agent title is meant for a settled session, and re-running fixes it.
+
+(defvar sprig--title-process nil
+  "The live retitle one-shot, or nil.  Guards one retitle at a time.")
+
+(defvar-local sprig--title-raw ""
+  "Assistant text collected from the retitle fork, assembled on `done'.")
+
+(defvar-local sprig--title-callback nil
+  "One-argument function run with the proposed title once the fork settles.")
+
+(defun sprig--title-prompt ()
+  "The message asking a forked one-shot for a short session title."
+  "Give this session a short title: at most about six words, no quotes, no \
+trailing punctuation, plain text on a single line. Reply with the title \
+alone and nothing else.")
+
+(defun sprig--title-clean (text)
+  "Reduce the fork's answer TEXT to a single tidy title line, or nil.
+Takes the first non-blank line, strips surrounding quotes, any leading
+list/heading markup, and trailing punctuation, and caps the length so a
+chatty answer still yields a usable title."
+  (let* ((line (seq-find (lambda (l) (not (string-blank-p l)))
+                         (split-string (or text "") "\n")))
+         (s (and line (string-trim line))))
+    (when (and s (not (string-empty-p s)))
+      (setq s (replace-regexp-in-string "\\`[-*#>[:space:]]+" "" s))
+      (setq s (replace-regexp-in-string "\\`[\"'“”‘’`]+\\|[\"'“”‘’`]+\\'" "" s))
+      (setq s (string-trim s))
+      (setq s (replace-regexp-in-string "[.,;:!?[:space:]]+\\'" "" s))
+      (when (> (length s) 80) (setq s (substring s 0 80)))
+      (setq s (string-trim s))
+      (and (not (string-empty-p s)) s))))
+
+(defun sprig--title-sentinel (proc _event)
+  "Clear the retitle process and its stderr when PROC ends, killing its buffer."
+  (when (memq (process-status proc) '(exit signal))
+    (when (eq proc sprig--title-process) (setq sprig--title-process nil))
+    (let ((stderr (process-get proc :stderr-proc)))
+      (when (process-live-p stderr) (delete-process stderr)))
+    (let ((buf (process-get proc :conv-buffer)))
+      (when (buffer-live-p buf) (kill-buffer buf)))))
+
+(defun sprig--title-consume (event)
+  "Sink for a retitle fork: collect its answer, then hand it to the callback.
+Runs in the fork's hidden buffer; assembles assistant text and, on `done',
+calls the stored `sprig--title-callback' with the cleaned title (nil on
+failure).  The call is deferred with a zero timer so the confirm prompt runs
+at top level rather than inside the process filter."
+  (pcase event
+    (`(text ,s) (setq sprig--title-raw (concat sprig--title-raw s)))
+    (`(done ,_ ,err)
+     (let ((cb sprig--title-callback)
+           (proposed (and (not err) (sprig--title-clean sprig--title-raw))))
+       (setq sprig--title-callback nil)
+       (when cb (run-at-time 0 nil cb proposed))))
+    (`(error ,_)
+     (let ((cb sprig--title-callback))
+       (setq sprig--title-callback nil)
+       (when cb (run-at-time 0 nil cb nil))))
+    (_ nil)))
+
+(defun sprig--title-ask (id dir remote-host callback)
+  "Fork session ID in DIR on REMOTE-HOST to propose a title; run CALLBACK on it.
+CALLBACK gets the cleaned title string, or nil when the fork failed or gave
+nothing usable.  Reuses the side-question fork transport; one retitle runs
+at a time (`sprig--title-process')."
+  (when (process-live-p sprig--title-process)
+    (user-error "A retitle is already running; wait for it to finish"))
+  (let ((command (sprig--btw-command id dir remote-host))
+        (buffer (generate-new-buffer " *sprig-title*")))
+    (with-current-buffer buffer
+      (setq-local sprig--sink #'sprig--title-consume)
+      (setq-local sprig--title-raw "")
+      (setq-local sprig--title-callback callback))
+    (setq sprig--title-process
+          (sprig--fork-spawn command dir remote-host buffer
+                             "sprig-title" #'sprig--title-sentinel))
+    (sprig--btw-send sprig--title-process (sprig--title-prompt))
+    (message "sprig: asking the agent for a title (%s)..."
+             (if remote-host "remote" "local"))))
+
+(defun sprig--title-persist (id remote-host title)
+  "Append an `ai-title' record naming TITLE to session ID's log.
+The log is found by id under the projects directory on REMOTE-HOST (nil for
+local); the parser takes the last `aiTitle', so the appended record
+overrides the CLI's own.  Returns non-nil on a successful write."
+  (let ((line (concat (json-serialize `(:type "ai-title" :aiTitle ,title))
+                      "\n")))
+    (if remote-host
+        (sprig--title-persist-remote id line remote-host)
+      (sprig--title-persist-local id line))))
+
+(defun sprig--title-persist-local (id line)
+  "Append LINE to local session ID's log, returning non-nil when it lands."
+  (let ((file (car (directory-files-recursively
+                    (expand-file-name (sprig--projects-directory))
+                    (concat "\\`" (regexp-quote id) "\\.jsonl\\'")))))
+    (when file
+      (write-region line nil file 'append 'silent)
+      t)))
+
+(defun sprig--title-persist-remote (id line host)
+  "Append LINE to remote session ID's log on HOST, returning non-nil on success.
+One SSH round trip finds the log by id and appends the record with `>>'."
+  (let* ((sprig-remote host)
+         (root (sprig--remote-dir-arg (sprig--projects-directory)))
+         (name (shell-quote-argument (concat id ".jsonl")))
+         (out (sprig--remote-sh
+               (format "p=$(find %s -name %s -print -quit 2>/dev/null); \
+[ -n \"$p\" ] && printf %s >> \"$p\" && echo ok"
+                       root name (shell-quote-argument line)))))
+    (and out (string-match-p "ok" out))))
+
+(declare-function sprig-review-set-title "sprig-review-mode" (title))
+
+(defun sprig--title-reflect (id title)
+  "Show TITLE for session ID at once, ahead of the next disk scan.
+Updates the header of any open review buffer that owns ID and marks the
+navigator's log-scan cache stale so the row picks the new title up on its
+next render."
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when (and (derived-mode-p 'sprig-review-mode)
+                 (equal sprig--session-id id))
+        (sprig-review-set-title title))))
+  (sprig--status-scan-invalidate)
+  (sprig--status-refresh))
+
+(defun sprig--title-apply (id remote-host proposed)
+  "Confirm the PROPOSED title for session ID, then persist and reflect it.
+Run from the retitle fork's callback: PROPOSED is the agent's suggestion, or
+nil when the fork failed or gave nothing usable.  Prompts you to accept or
+edit it, appends it to the log on REMOTE-HOST (nil for local), and updates
+any open review buffer and the navigator."
+  (if (not proposed)
+      (message "sprig: the agent proposed no usable title")
+    (let ((title (string-trim (read-string "Session title: " proposed))))
+      (cond
+       ((string-empty-p title) (message "sprig: retitle cancelled"))
+       ((sprig--title-persist id remote-host title)
+        (sprig--title-reflect id title)
+        (message "sprig: retitled to %s" title))
+       (t (message "sprig: could not find session %s's log to retitle" id))))))
+
+(defun sprig-status-retitle ()
+  "Ask the agent for a short title for the session at point, then set it.
+Forks that session without opening it (like `c b'), proposes a title, and
+once you confirm or edit it appends an `ai-title' record to its log and
+refreshes the navigator."
+  (interactive)
+  (let* ((entry (sprig--status-entry-at-point))
+         (id (plist-get entry :session))
+         (dir (plist-get entry :dir))
+         (host (plist-get entry :host)))
+    (unless id (user-error "No session id on this row"))
+    (sprig--title-ask id dir host
+                      (lambda (proposed)
+                        (sprig--title-apply id host proposed)))))
 
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
@@ -2032,19 +2209,25 @@ row scan reads the head instead (see `sprig--session-log-head')."
           (insert-file-contents file nil from size))
         (buffer-string)))))
 
-(defun sprig--log-plist (file mtime head &optional title-fallback)
+(defun sprig--log-plist (file mtime head &optional title-fallback whole)
   "Build a scan plist for log FILE with MTIME and its HEAD text.
 `:dir' is the session's own recorded `cwd', or nil when HEAD carries none:
 the encoded log-directory name is not a real path (its separators are
 lossily flattened to dashes), so it is kept only as the display-only
-`:project' and never handed to a `cd'.  The title is read from HEAD when it
-is there; otherwise TITLE-FALLBACK, a function returning grepped `ai-title'
-lines, is consulted, so a title pushed past the head window is still found."
-  (let ((cwd (and head (sprig--log-cwd head)))
-        (title (or (and head (sprig--log-title head))
-                   (and title-fallback
-                        (let ((lines (funcall title-fallback)))
-                          (and lines (sprig--log-title lines)))))))
+`:project' and never handed to a `cd'.
+
+The title is the last `aiTitle' in the log, since the CLI re-emits it and a
+retitle appends its own (see `sprig--log-title').  When HEAD is the whole
+file (WHOLE) that last title is already in HEAD.  Otherwise TITLE-FALLBACK,
+a function returning grepped `ai-title' lines from the whole file, is
+preferred, so a title past the head window, whether re-emitted or an
+appended retitle, still wins; HEAD's title is the backstop."
+  (let* ((cwd (and head (sprig--log-cwd head)))
+         (head-title (and head (sprig--log-title head)))
+         (grep-title (and (not whole) title-fallback
+                          (let ((lines (funcall title-fallback)))
+                            (and lines (sprig--log-title lines)))))
+         (title (or grep-title head-title)))
     (list :session (file-name-base file)
           :file file
           :dir cwd
@@ -2083,9 +2266,15 @@ sessions still paints fast."
                       (lambda (a b) (> (car a) (car b))))))
     (when limit (setq dated (seq-take dated limit)))
     (mapcar (lambda (cell)
-              (sprig--log-plist (cdr cell) (car cell)
-                                (sprig--session-log-head (cdr cell))
-                                (lambda () (sprig--local-title-line (cdr cell)))))
+              (let* ((f (cdr cell))
+                     (size (or (file-attribute-size (file-attributes f)) 0)))
+                ;; Only a log past the head window pays the whole-file title
+                ;; grep; a smaller one carries its last title (re-emitted or an
+                ;; appended retitle) inside the head already.
+                (sprig--log-plist f (car cell)
+                                  (sprig--session-log-head f)
+                                  (lambda () (sprig--local-title-line f))
+                                  (<= size sprig--status-preview-bytes))))
             dated)))
 
 (defun sprig--remote-scan-cap (limit)
@@ -3247,6 +3436,7 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
 (define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
+(define-key sprig-status-mode-map (kbd "T")   #'sprig-status-retitle)
 ;; The columns are unsortable to `tabulated-list', so a header click falls
 ;; through to here rather than its native sort, which would break the groups.
 (define-key sprig-status-mode-map [header-line mouse-1] #'sprig-status-sort)

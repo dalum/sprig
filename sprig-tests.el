@@ -1697,6 +1697,84 @@ Return the log directory."
       (dolist (r records) (insert (json-serialize r) "\n")))
     logdir))
 
+(ert-deftest sprig-test-title-clean ()
+  ;; The agent's answer is reduced to one tidy title line: first non-blank
+  ;; line, quotes and list/heading markup stripped, trailing punctuation
+  ;; dropped, length capped, and nothing usable yields nil.
+  (should (equal (sprig--title-clean "Refactor the parser") "Refactor the parser"))
+  (should (equal (sprig--title-clean "\"Quoted title\"") "Quoted title"))
+  (should (equal (sprig--title-clean "- Fix the streaming bug.") "Fix the streaming bug"))
+  (should (equal (sprig--title-clean "## Heading title") "Heading title"))
+  (should (equal (sprig--title-clean "First line\n\nmore chatter") "First line"))
+  (should (equal (sprig--title-clean "  \n  Real title  ") "Real title"))
+  (should (null (sprig--title-clean "")))
+  (should (null (sprig--title-clean "   \n  ")))
+  (should (<= (length (sprig--title-clean (make-string 200 ?a))) 80)))
+
+(ert-deftest sprig-test-retitle-persist-small ()
+  ;; A retitle appends an `ai-title' record; for a log inside the head
+  ;; window the appended title is the last one and the scan shows it.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/small")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-small"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "CLI title"))
+          (should (sprig--title-persist "sess-small" nil "Renamed small"))
+          (should (equal (plist-get (car (sprig--scan-session-logs)) :title)
+                         "Renamed small")))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-retitle-persist-past-head ()
+  ;; The appended title wins even when the CLI's own title sits in the 64KB
+  ;; head and a large turn pushes the appended record well past it: the
+  ;; local scan greps the whole file for the last title, matching remote.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/big")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (progn
+          (sprig-tests--make-session-log
+           root proj "sess-big"
+           `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))
+           '(:type "ai-title" :aiTitle "CLI title")
+           `(:type "assistant"
+             :message (:role "assistant"
+                       :content ,(vector (list :type "text"
+                                               :text (make-string 70000 ?x))))))
+          (should (sprig--title-persist "sess-big" nil "Renamed big"))
+          (should (equal (plist-get (car (sprig--scan-session-logs)) :title)
+                         "Renamed big")))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-title-consume ()
+  ;; The retitle sink assembles streamed text and hands the cleaned title to
+  ;; the callback once the fork settles (deferred to a zero timer).
+  (with-temp-buffer
+    (let ((got 'unset))
+      (setq-local sprig--title-raw "")
+      (setq-local sprig--title-callback (lambda (p) (setq got p)))
+      (sprig--title-consume '(text "\"My "))
+      (sprig--title-consume '(text "title\"\n"))
+      (sprig--title-consume '(done nil nil))
+      (with-timeout (2 (ert-fail "retitle callback never fired"))
+        (while (eq got 'unset) (sit-for 0.02)))
+      (should (equal got "My title")))))
+
+(ert-deftest sprig-test-retitle-persist-missing-log ()
+  ;; Persisting against an id with no log fails cleanly rather than writing.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root))
+    (unwind-protect
+        (should-not (sprig--title-persist "no-such-session" nil "Nope"))
+      (delete-directory root t))))
+
 (defun sprig-tests--warm-remote-scan (host)
   "Fill the navigator scan cache for HOST synchronously, for tests.
 Production scans a cold remote host in the background (see
