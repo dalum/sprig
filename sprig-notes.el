@@ -1,7 +1,7 @@
 ;;; sprig-notes.el --- Personal notes stored in an Org file -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.19.0
+;; Version: 0.19.1
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 

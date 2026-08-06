@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.19.0
+;; Version: 0.19.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1051,6 +1051,10 @@ is visible without opening the header."
 (declare-function sprig-review-compact "sprig-review-mode" ())
 (declare-function sprig-review-btw "sprig-review-mode" (question))
 (declare-function sprig-review--fontify-markdown "sprig-review-mode" (text))
+(declare-function sprig-review--completed-prose "sprig-review-mode" (text))
+(declare-function sprig-review--paragraph-landed-p "sprig-review-mode" (delta))
+(defvar sprig-review-defer-live-prose)
+(defvar sprig-review--stream-nl)
 (declare-function sprig-review-answer "sprig-review-mode" ())
 (declare-function sprig-review-answer-recommended "sprig-review-mode" ())
 (declare-function sprig-review-answer-skip "sprig-review-mode" ())
@@ -1248,8 +1252,14 @@ first in the shared `*sprig-btw*' buffer.")
 
 (defvar-local sprig--btw-answer-beg nil
   "Where the current answer's text begins in `*sprig-btw*'.
-`sprig--btw-consume' fontifies the answer's markdown from here once the
-side turn settles; a fresh question resets it (`sprig--btw-display').")
+`sprig--btw-consume' fontifies the answer's markdown from here as it
+streams; a fresh question resets it (`sprig--btw-display').")
+
+(defvar-local sprig--btw-answer-raw ""
+  "Raw text of the answer streaming into `*sprig-btw*' so far.
+Its completed paragraphs are shown fontified and the still-typing one is
+withheld, the way `sprig-review-defer-live-prose' reveals a review reply; a
+fresh question resets it (`sprig--btw-display').")
 
 (defun sprig--btw-args (id)
   "The `claude' argument list for a side question against session ID.
@@ -1297,36 +1307,48 @@ files): %s" question)))
   "Sink for the `*sprig-btw*' buffer: stream a side question's answer in.
 Runs in that buffer (see `sprig--handle'), appending assistant text as it
 arrives and closing the entry when the turn ends."
-  (let ((inhibit-read-only t))
+  (let ((inhibit-read-only t)
+        (defer (and (bound-and-true-p sprig-review-defer-live-prose)
+                    (fboundp 'sprig-review--completed-prose))))
     (pcase event
       (`(text ,s)
-       (goto-char (point-max))
-       (insert s)
-       (dolist (win (get-buffer-window-list (current-buffer) nil t))
-         (set-window-point win (point-max))))
+       (setq sprig--btw-answer-raw (concat sprig--btw-answer-raw s))
+       (if defer
+           ;; Reveal only whole paragraphs, fontified, the way a review reply
+           ;; is deferred; withhold the one still being typed until it lands.
+           (when (sprig-review--paragraph-landed-p s)
+             (sprig--btw-repaint (sprig-review--completed-prose
+                                  sprig--btw-answer-raw)))
+         (goto-char (point-max))
+         (insert s)
+         (dolist (win (get-buffer-window-list (current-buffer) nil t))
+           (set-window-point win (point-max)))))
       (`(done ,_ ,err)
        (goto-char (point-max))
        (if err
            (insert "\n\n[the side question failed]\n")
-         (insert "\n")
-         ;; The answer streamed in raw; now it has settled, render its markdown.
-         (sprig--btw-fontify)))
+         ;; Render the whole answer, including the final paragraph the
+         ;; deferred stream was still withholding.
+         (sprig--btw-repaint sprig--btw-answer-raw)
+         (goto-char (point-max))
+         (insert "\n")))
       (`(error ,m)
        (goto-char (point-max))
        (insert (format "\n\n[error] %s\n" m)))
       (_ nil))))
 
-(defun sprig--btw-fontify ()
-  "Re-render the current answer's markdown in `*sprig-btw*'.
-The answer streams in raw; once the side turn settles this replaces it with
-its markdown-fontified form, the way a review buffer fontifies a settled
-block.  A no-op if the start was not recorded or markdown is unavailable."
-  (when (and sprig--btw-answer-beg (fboundp 'sprig-review--fontify-markdown))
-    (let ((inhibit-read-only t)
-          (raw (buffer-substring-no-properties sprig--btw-answer-beg (point-max))))
+(defun sprig--btw-repaint (text)
+  "Replace the current answer in `*sprig-btw*' with TEXT's fontified markdown.
+The answer region runs from `sprig--btw-answer-beg' to the buffer end; TEXT
+is the completed-paragraph prefix while streaming and the whole answer once
+it settles.  A no-op when TEXT is nil (nothing has landed yet), the start
+was not recorded, or markdown is unavailable."
+  (when (and text sprig--btw-answer-beg
+             (fboundp 'sprig-review--fontify-markdown))
+    (let ((inhibit-read-only t))
       (delete-region sprig--btw-answer-beg (point-max))
       (goto-char sprig--btw-answer-beg)
-      (insert (sprig-review--fontify-markdown raw))
+      (insert (sprig-review--fontify-markdown text))
       (dolist (win (get-buffer-window-list (current-buffer) nil t))
         (set-window-point win (point-max))))))
 
@@ -1343,8 +1365,12 @@ running `/btw' side panel."
         (unless (bobp) (insert "\n\n"))
         (insert (propertize (format "btw: %s" question) 'face '(:inherit bold))
                 "\n\n")
-        ;; Where this answer's text starts, so `sprig--btw-fontify' can find it.
-        (setq sprig--btw-answer-beg (point))))
+        ;; Where this answer's text starts, so `sprig--btw-repaint' can find
+        ;; it, and a clean slate for the deferred-paragraph accumulator.
+        (setq sprig--btw-answer-beg (point)
+              sprig--btw-answer-raw "")
+        (when (boundp 'sprig-review--stream-nl)
+          (setq sprig-review--stream-nl nil))))
     ;; Reuse an existing window the way `sprig-status' does, rather than
     ;; carving out a dedicated side window of its own.
     (pop-to-buffer buf)

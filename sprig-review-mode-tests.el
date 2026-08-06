@@ -1264,19 +1264,22 @@ the fold learns the id from the result rather than from the call."
         (should (null sprig-review--fontify-fresh))))))
 
 (ert-deftest sprig-review-mode-test-btw-answer-fontifies ()
-  ;; The side-question panel streams its answer raw, then fontifies its
-  ;; markdown once the turn settles: the markup gains the invisible property,
-  ;; so the propertised answer is no longer the bare string.
+  ;; With the deferred stream off, the panel streams its answer raw, then
+  ;; fontifies its markdown once the turn settles: the markup gains the
+  ;; invisible property, so the propertised answer is no longer the bare
+  ;; string.
   (skip-unless (require 'markdown-mode nil t))
   (skip-unless (fboundp 'sprig-btw-mode))
   (let ((sprig-review-fontify-markdown t)
+        (sprig-review-defer-live-prose nil)
         (sprig-review--fontify-cache (make-hash-table :test 'equal))
         (sprig-review--fontify-cache-flag 'unset))
     (with-temp-buffer
       (sprig-btw-mode)
       (let ((inhibit-read-only t))
         (insert "btw: why?\n\n")
-        (setq sprig--btw-answer-beg (point)))       ; as `sprig--btw-display' does
+        (setq sprig--btw-answer-beg (point)        ; as `sprig--btw-display' does
+              sprig--btw-answer-raw ""))
       (sprig--btw-consume '(text "**bold** answer"))
       ;; Raw while streaming.
       (should (string-match-p "\\*\\*bold\\*\\*"
@@ -1285,6 +1288,40 @@ the fold learns the id from the result rather than from the call."
       ;; Settled: fontified, so the answer region is no longer the raw string.
       (let ((ans (buffer-substring sprig--btw-answer-beg (point-max))))
         (should-not (equal-including-properties ans "**bold** answer\n"))))))
+
+(ert-deftest sprig-review-mode-test-btw-answer-defers ()
+  ;; With `sprig-review-defer-live-prose' the panel reveals a completed
+  ;; paragraph fontified and withholds the one still being typed, the way a
+  ;; review reply is deferred, so no half-typed markup ever shows raw.
+  (skip-unless (require 'markdown-mode nil t))
+  (skip-unless (fboundp 'sprig-btw-mode))
+  (let ((sprig-review-fontify-markdown t)
+        (sprig-review-defer-live-prose t)
+        (sprig-review--fontify-cache (make-hash-table :test 'equal))
+        (sprig-review--fontify-cache-flag 'unset))
+    (with-temp-buffer
+      (sprig-btw-mode)
+      (let ((inhibit-read-only t))
+        (insert "btw: why?\n\n")
+        (setq sprig--btw-answer-beg (point)
+              sprig--btw-answer-raw ""))
+      ;; A completed paragraph lands: shown, and fontified (not the bare
+      ;; string, since its markup gained the invisible property).
+      (sprig--btw-consume '(text "**done** para\n\n"))
+      (let ((shown (buffer-substring sprig--btw-answer-beg (point-max))))
+        (should (string-match-p "done" (substring-no-properties shown)))
+        (should-not (equal-including-properties (substring-no-properties shown)
+                                                shown)))
+      ;; The next paragraph is still being typed: withheld.
+      (sprig--btw-consume '(text "typing away"))
+      (should-not (string-match-p "typing"
+                                  (buffer-substring-no-properties
+                                   sprig--btw-answer-beg (point-max))))
+      ;; Settled: the whole answer appears.
+      (sprig--btw-consume '(done nil nil))
+      (should (string-match-p "typing"
+                              (buffer-substring-no-properties
+                               sprig--btw-answer-beg (point-max)))))))
 
 (ert-deftest sprig-review-mode-test-consume-preserves-point ()
   (with-temp-buffer
