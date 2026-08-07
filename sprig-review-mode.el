@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.21.0
+;; Version: 0.23.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -34,7 +34,6 @@
 (require 'eieio)
 (require 'transient)
 (require 'seq)
-(require 'sprig-notes)                   ; the `+' note-capture transient
 
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
@@ -2290,15 +2289,19 @@ ordinary send."
 
 (defun sprig-review-compact (&optional instructions)
   "Compact this session's context, replacing its history with a summary.
-Sends the CLI's `/compact' command as a turn: the session id is unchanged
-and the conversation continues from the summary, so a context grown large
-\(see the state line) is reclaimed without starting over.  With a prefix
-argument, prompt for INSTRUCTIONS steering what the summary keeps."
+Sends the CLI's `/compact' command as a turn of its own: the session id is
+unchanged and the conversation continues from the summary, so a context
+grown large (see the state line) is reclaimed without starting over.  With
+a prefix argument, prompt for INSTRUCTIONS steering what the summary keeps.
+
+A `/compact' cannot fold into a running turn, so when one is in flight this
+queues it (as `c q' does) and compacts once the turn ends, rather than
+refusing outright."
   (interactive
    (list (and current-prefix-arg
               (read-string "Compact instructions (blank = default): "))))
   (let ((inst (and instructions (string-trim instructions))))
-    (sprig-review--send
+    (sprig-review--queue
      (if (and inst (not (string-empty-p inst)))
          (concat "/compact " inst)
        "/compact"))))
@@ -2506,22 +2509,33 @@ turn if the CLI does not honour the request (see `sprig-interrupt-timeout')."
   "Return PATH, as a TRAMP name on the session host when the session is remote."
   (if sprig-review--remote (format "/ssh:%s:%s" sprig-review--remote path) path))
 
+(defun sprig-review--question-section-p (section)
+  "Return non-nil when SECTION is, or sits within, a question section."
+  (let ((s section))
+    (while (and s (not (eq (oref s type) 'sprig-question)))
+      (setq s (oref s parent)))
+    s))
+
 (defun sprig-review-visit ()
-  "Visit the file the section at point refers to.
-On a diff hunk, best-effort move point to the first changed line."
+  "Visit the file the section at point refers to, or answer a question.
+On a question the agent is waiting on, open the answer dialog, the way
+`a a' does.  On a diff hunk, best-effort move point to the first changed
+line."
   (interactive)
-  (let* ((section (magit-current-section))
-         (file (sprig-review--section-file section)))
-    (unless file (user-error "No file to visit here"))
-    (find-file (sprig-review--file-location file))
-    (when (eq (oref section type) 'sprig-hunk)
-      (when-let* ((hunk (oref section value))
-                  (anchor (car (or (plist-get hunk :new) (plist-get hunk :old))))
-                  (needle (string-trim-left anchor)))
-        (unless (string-empty-p needle)
-          (goto-char (point-min))
-          (when (search-forward needle nil t)
-            (beginning-of-line)))))))
+  (let ((section (magit-current-section)))
+    (if (sprig-review--question-section-p section)
+        (sprig-review-answer)
+      (let ((file (sprig-review--section-file section)))
+        (unless file (user-error "No file to visit here"))
+        (find-file (sprig-review--file-location file))
+        (when (eq (oref section type) 'sprig-hunk)
+          (when-let* ((hunk (oref section value))
+                      (anchor (car (or (plist-get hunk :new) (plist-get hunk :old))))
+                      (needle (string-trim-left anchor)))
+            (unless (string-empty-p needle)
+              (goto-char (point-min))
+              (when (search-forward needle nil t)
+                (beginning-of-line)))))))))
 
 ;;;; Compose buffer (the c c message)
 
@@ -3083,27 +3097,6 @@ into its first-message prompt (plan mode for `s p')."
     ("p" "new, then compose in plan mode" sprig-review-new-message-plan)
     ("f" "fork this session" sprig-review-fork)]])
 
-;;;; Notes
-
-(declare-function sprig--status-refresh "sprig" ())
-
-(defun sprig-review-note-capture ()
-  "Capture a personal note (`+ +').
-Notes are one global list, not tied to this session; the `sprig-status'
-navigator lists them and its own `+' transient manages them.  Refreshes the
-navigator when it is open, so a note jotted here shows there at once."
-  (interactive)
-  (sprig-notes-capture)
-  (when (fboundp 'sprig--status-refresh) (sprig--status-refresh)))
-
-;; Defined after the verb it lists, as with `sprig-review-dispatch'.
-(transient-define-prefix sprig-review-notes-dispatch ()
-  "Jot a personal note.
-`+ +' captures a note appended to `sprig-notes-file'; the navigator's own
-`+' transient toggles, edits and deletes the list."
-  [["Notes"
-    ("+" "capture a new note" sprig-review-note-capture)]])
-
 ;;;; Verb keybindings
 
 (define-key sprig-review-mode-map (kbd "SPC") #'sprig-review-toggle-mark)
@@ -3112,7 +3105,6 @@ navigator when it is open, so a note jotted here shows there at once."
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
-(define-key sprig-review-mode-map (kbd "+")   #'sprig-review-notes-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

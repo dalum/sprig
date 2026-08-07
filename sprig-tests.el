@@ -19,15 +19,6 @@
 (require 'cl-lib)
 (require 'sprig)
 (require 'sprig-review)
-(require 'sprig-notes)
-
-;; Point the notes store at a path that does not exist, so a navigator render
-;; in any test sees no notes group unless that test creates one of its own
-;; (the notes-mutation tests bind their own file).  Otherwise a real
-;; `sprig-notes-file' on the machine running the suite would leak a `notes'
-;; group into the render tests, which assert on the buffer from its top.
-(setq sprig-notes-file
-      (expand-file-name (make-temp-name "sprig-tests-absent-notes-") "/tmp"))
 
 ;; Declared special so a test can dynamically bind the context thresholds,
 ;; which live in `sprig-review-mode' and are not loaded by this suite.
@@ -2978,8 +2969,7 @@ without a real SSH process."
   ;; The live-tick skip hinges on this: an unchanged render yields an identical
   ;; signature, and any visible change (a title, or the row's formatted time)
   ;; changes it.  The formatted time string is compared, not the raw value.
-  (cl-letf (((symbol-function 'sprig--status-todo-notes) (lambda () nil))
-            ((symbol-function 'sprig--status-collapsed-p) (lambda (_) nil))
+  (cl-letf (((symbol-function 'sprig--status-collapsed-p) (lambda (_) nil))
             ((symbol-function 'sprig--format-time-value)
              (lambda (m) (format "%s" m))))
     (let ((a '(:key ("h" . "s1") :host "h" :status disconnected :title "One"
@@ -2998,26 +2988,6 @@ without a real SSH process."
                      (lambda (_) "3m")))
             (should-not (equal sig (sprig--status-render-signature
                                     (list a))))))))))
-
-(ert-deftest sprig-test-status-todo-notes-caches-on-mtime ()
-  ;; The notes file is read from disk once per mtime, not once per render: a
-  ;; second read at the same mtime reuses the cache, a bumped mtime re-reads.
-  (let ((sprig--status-notes-cache nil)
-        (reads 0)
-        (mtime '(100 0)))
-    (cl-letf (((symbol-function 'file-readable-p) (lambda (_) t))
-              ((symbol-function 'file-attributes) (lambda (&rest _) 'attrs))
-              ((symbol-function 'file-attribute-modification-time)
-               (lambda (_) mtime))
-              ((symbol-function 'sprig-notes-read)
-               (lambda () (setq reads (1+ reads)) nil))
-              ((symbol-function 'sprig-notes--notes) (lambda (_) nil)))
-      (sprig--status-todo-notes)
-      (sprig--status-todo-notes)
-      (should (= reads 1))
-      (setq mtime '(200 0))
-      (sprig--status-todo-notes)
-      (should (= reads 2)))))
 
 (ert-deftest sprig-test-status-row-shows-created-column ()
   ;; The row carries the session's creation time in an outer `Created' column,
@@ -3321,157 +3291,6 @@ without a real SSH process."
           (should (eq (face-attribute face :slant nil t) 'unspecified))
           (should (eq (face-attribute face :weight nil t) 'bold)))
       (put face 'face-defface-spec nil))))
-
-;;; Notes (sprig-notes.el)
-
-(defconst sprig-test--notes-file
-  (concat "#+title: my reminders\n\n"
-          "* TODO Fix the flaky test [2026-08-04 Tue 14:03:12]\n"
-          "  a body line a human added\n"
-          "* DONE Bump the version [2026-08-01 Sat 09:12:00]\n")
-  "A canonical notes file: a preamble, a note with a body, and a done note.")
-
-(ert-deftest sprig-test-notes-roundtrip-is-exact ()
-  "Parse then serialize reproduces the file byte-for-byte, body and all."
-  (should (equal sprig-test--notes-file
-                 (sprig-notes--serialize
-                  (sprig-notes--parse-string sprig-test--notes-file)))))
-
-(ert-deftest sprig-test-notes-parse-fields ()
-  "Each note yields its text, state, id and parsed time; the preamble is kept."
-  (let* ((st (sprig-notes--parse-string sprig-test--notes-file))
-         (notes (sprig-notes--notes st))
-         (a (nth 0 notes))
-         (b (nth 1 notes)))
-    (should (equal (plist-get st :preamble) '("#+title: my reminders" "")))
-    (should (= 2 (length notes)))
-    (should (equal "Fix the flaky test" (plist-get a :text)))
-    (should (eq 'todo (plist-get a :state)))
-    (should (equal "[2026-08-04 Tue 14:03:12]" (plist-get a :id)))
-    (should (equal "2026-08-04 14:03:12"
-                   (format-time-string "%F %T" (plist-get a :time))))
-    (should (eq 'done (plist-get b :state)))
-    (should (equal "Bump the version" (plist-get b :text)))))
-
-(ert-deftest sprig-test-notes-find-by-id ()
-  "`sprig-notes--find' matches on id and returns nil when absent."
-  (let ((notes (sprig-notes--notes (sprig-notes--parse-string sprig-test--notes-file))))
-    (should (equal "Fix the flaky test"
-                   (plist-get (sprig-notes--find notes "[2026-08-04 Tue 14:03:12]")
-                              :text)))
-    (should-not (sprig-notes--find notes "[1999-01-01 Fri 00:00:00]"))
-    (should-not (sprig-notes--find notes nil))))
-
-(ert-deftest sprig-test-notes-unknown-heading-survives ()
-  "A non-note top-level heading round-trips verbatim and is not a note."
-  (let* ((s (concat "* Project ideas :tag:\n"
-                    "  - a nested bullet\n"
-                    "* TODO Real note [2026-08-04 Tue 14:03:12]\n"))
-         (st (sprig-notes--parse-string s)))
-    (should (equal s (sprig-notes--serialize st)))
-    (should (= 1 (length (sprig-notes--notes st))))
-    (should (equal "Real note" (plist-get (car (sprig-notes--notes st)) :text)))))
-
-(ert-deftest sprig-test-notes-now-id-bumps-on-collision ()
-  "A second id taken in the same second is bumped forward, so ids stay unique."
-  (let* ((first (sprig-notes--now-id nil))
-         (second (sprig-notes--now-id (list (car first)))))
-    (should-not (equal (car first) (car second)))
-    (should (time-less-p (cdr first) (cdr second)))))
-
-(ert-deftest sprig-test-notes-mid-text-bracket-is-not-the-id ()
-  "A bracket inside the text is kept as text; only a trailing one is the id."
-  (let* ((s "* TODO see [1] for details [2026-08-04 Tue 14:03:12]\n")
-         (note (car (sprig-notes--notes (sprig-notes--parse-string s)))))
-    (should (equal "see [1] for details" (plist-get note :text)))
-    (should (equal "[2026-08-04 Tue 14:03:12]" (plist-get note :id)))))
-
-(defmacro sprig-test--with-notes-file (initial &rest body)
-  "Bind `sprig-notes-file' to a fresh temp path holding INITIAL, run BODY.
-The path sits in a directory that does not exist yet, so a write must
-create it; the whole temp tree is removed afterwards."
-  (declare (indent 1))
-  `(let* ((dir (make-temp-file "sprig-notes-test" t))
-          (sprig-notes-file (expand-file-name "sub/notes.org" dir)))
-     (unwind-protect
-         (progn
-           (when ,initial
-             (make-directory (file-name-directory sprig-notes-file) t)
-             (with-temp-file sprig-notes-file (insert ,initial)))
-           ,@body)
-       (delete-directory dir t))))
-
-(defun sprig-test--notes-text ()
-  "Return the current text of the bound `sprig-notes-file'."
-  (with-temp-buffer (insert-file-contents sprig-notes-file) (buffer-string)))
-
-(ert-deftest sprig-test-notes-add-creates-file-and-parent ()
-  "Adding a note creates the (absent) parent directory and a well-formed note."
-  (sprig-test--with-notes-file nil
-    (let ((note (sprig-notes-add "Buy milk")))
-      (should (file-exists-p sprig-notes-file))
-      (should (eq 'todo (plist-get note :state)))
-      (let ((back (car (sprig-notes--notes (sprig-notes-read)))))
-        (should (equal "Buy milk" (plist-get back :text)))
-        (should (equal (plist-get note :id) (plist-get back :id)))))))
-
-(ert-deftest sprig-test-notes-toggle-flips-one-keeps-the-rest ()
-  "Toggling a note flips only its state, leaving its body and siblings intact."
-  (sprig-test--with-notes-file sprig-test--notes-file
-    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
-      (sprig-notes-toggle target)
-      (let ((notes (sprig-notes--notes (sprig-notes-read))))
-        (should (eq 'done (plist-get (nth 0 notes) :state)))
-        (should (eq 'done (plist-get (nth 1 notes) :state))))
-      ;; The human's body line under the toggled note is preserved.
-      (should (string-match-p "a body line a human added" (sprig-test--notes-text))))))
-
-(ert-deftest sprig-test-notes-edit-keeps-id-and-body ()
-  "Editing text preserves the note's id (its identity) and its body."
-  (sprig-test--with-notes-file sprig-test--notes-file
-    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
-      (sprig-notes-edit target "Fix the OTHER flaky test")
-      (let ((back (car (sprig-notes--notes (sprig-notes-read)))))
-        (should (equal "Fix the OTHER flaky test" (plist-get back :text)))
-        (should (equal (plist-get target :id) (plist-get back :id))))
-      (should (string-match-p "a body line a human added" (sprig-test--notes-text))))))
-
-(ert-deftest sprig-test-notes-delete-drops-only-the-target ()
-  "Deleting a note removes just its block; the sibling and preamble remain."
-  (sprig-test--with-notes-file sprig-test--notes-file
-    (let ((target (car (sprig-notes--notes (sprig-notes-read)))))
-      (sprig-notes-delete target)
-      (let ((notes (sprig-notes--notes (sprig-notes-read))))
-        (should (= 1 (length notes)))
-        (should (equal "Bump the version" (plist-get (car notes) :text))))
-      (let ((text (sprig-test--notes-text)))
-        (should (string-match-p "#\\+title: my reminders" text))
-        (should-not (string-match-p "Fix the flaky test" text))))))
-
-(ert-deftest sprig-test-notes-mutating-a-vanished-note-aborts ()
-  "A note deleted from the file out of band is not silently recreated."
-  (sprig-test--with-notes-file sprig-test--notes-file
-    (let ((ghost '(:id "[2000-01-01 Sat 00:00:00]" :text "gone" :state todo)))
-      (should-error (sprig-notes-toggle ghost) :type 'user-error)
-      (should-error (sprig-notes-delete ghost) :type 'user-error))))
-
-(ert-deftest sprig-test-notes-navigator-commands ()
-  "`+' is the notes transient and each note verb is a real command."
-  (should (eq (lookup-key sprig-status-mode-map (kbd "+"))
-              'sprig-status-notes-dispatch))
-  (dolist (c '(sprig-status-note-capture sprig-status-note-toggle
-               sprig-status-note-edit sprig-status-note-delete
-               sprig-status-note-open))
-    (should (commandp c))))
-
-(ert-deftest sprig-test-notes-row-string ()
-  "The navigator row shows the checkbox glyph for the state and the text."
-  (should (string-match-p
-           "☐ Fix it"
-           (sprig--status-note-row-string '(:state todo :text "Fix it" :time nil))))
-  (should (string-match-p
-           "☑ Done it"
-           (sprig--status-note-row-string '(:state done :text "Done it" :time nil)))))
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

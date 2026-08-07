@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.22.0
+;; Version: 0.23.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -46,7 +46,6 @@
 (require 'transient)                     ; the navigator's c / a dispatch menus
 (require 'iso8601)                       ; parse the log's own timestamps
 (require 'sprig-review)                  ; pure data layer; no magit-section
-(require 'sprig-notes)                   ; personal notes shown in the navigator
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
@@ -2887,17 +2886,6 @@ Matching is case-insensitive."
 The printed rows are in this order, so `sprig--status-decorate' can head
 each group by walking the two in step.")
 
-(defconst sprig--status-notes-host 'sprig--notes
-  "Sentinel `host' for the notes group, folded like a real host group.
-Never a real SSH destination, so it never reaches `sprig--status-collect'
-or a session verb; it keys the notes group's fold state and stamps its
-lines so TAB folds them the way it folds a host group.")
-
-(defvar-local sprig--status-notes nil
-  "The open notes of the current render, cached for point resolution.
-Filled by `sprig--status-insert-notes' from `sprig-notes-file', so
-`sprig--status-note-at-point' can resolve the note a row stands for.")
-
 (defvar sprig--status-render-rows nil
   "Rows already collected for the render in progress, or nil.
 `sprig--status-render-if-live' collects once for its signature check, then
@@ -3212,83 +3200,6 @@ sitting on a foldable heading rather than a session row."
     (sprig--status-stamp-group from (point) host)
     (put-text-property from (point) 'sprig--status-heading t)))
 
-(defun sprig--status-note-row-string (note)
-  "Return the navigator display line for NOTE, no trailing newline.
-A checkbox glyph, the note's text, and its creation time, laid out to sit
-under the session rows above it.  A done note reads muted, though the group
-lists only open ones by default."
-  (let* ((done (eq (plist-get note :state) 'done))
-         (glyph (propertize (if done "☑" "☐")
-                            'face (if done 'sprig-status-preview 'default)))
-         (text (or (plist-get note :text) ""))
-         (time (sprig--format-time-value (plist-get note :time))))
-    (concat "  " glyph " "
-            (if done (propertize text 'face 'sprig-status-preview) text)
-            (and time (concat "  " (propertize time 'face 'sprig-status-preview))))))
-
-(defvar sprig--status-notes-cache nil
-  "Cache of the open notes as (MTIME . NOTES), or nil.
-`sprig--status-insert-notes' runs on every navigator render, including each
-coalesced live tick; without this it would read and parse `sprig-notes-file'
-from disk every time.  Keyed on the file's modification time, so an external
-edit still surfaces on the next render, but an unchanged file is parsed once.
-A note verb rewrites the file, bumping the mtime, so its change surfaces too.")
-
-(defun sprig--status-todo-notes ()
-  "Return the open (todo) notes, re-reading `sprig-notes-file' only when changed.
-Guards the render path against a fresh disk read and parse on every tick, via
-`sprig--status-notes-cache' keyed on the file's mtime."
-  (let ((mtime (and (file-readable-p sprig-notes-file)
-                    (file-attribute-modification-time
-                     (file-attributes sprig-notes-file)))))
-    (unless (and sprig--status-notes-cache
-                 (equal (car sprig--status-notes-cache) mtime))
-      (setq sprig--status-notes-cache
-            (cons mtime
-                  (seq-filter (lambda (n) (eq (plist-get n :state) 'todo))
-                              (sprig-notes--notes (sprig-notes-read))))))
-    (cdr sprig--status-notes-cache)))
-
-(defun sprig--status-insert-notes ()
-  "Insert the notes group (its heading and open-note rows) at point.
-Reads the open notes (cached against `sprig-notes-file's mtime, see
-`sprig--status-todo-notes') into `sprig--status-notes' so
-`sprig--status-note-at-point' can resolve a row.
-Only TODO notes are listed; a done note stays in the file (see `+ o').
-
-Unlike a host group, an empty notes group is not headed: a host with no
-sessions still heads because its heading is where you press `s' to start
-one there, but there is nothing to start on the notes group, so with no
-open notes it leaves the navigator exactly as it was.  With notes, the
-heading carries the notes sentinel as its host and `sprig--status-heading',
-so TAB folds the group the way it folds a host group; each row carries its
-note's id for point resolution."
-  (setq sprig--status-notes (sprig--status-todo-notes))
-  (when sprig--status-notes
-    (let* ((host sprig--status-notes-host)
-           (from (point)))
-      (insert (propertize (format "%s notes (%s)"
-                                  (if (sprig--status-collapsed-p host) "▸" "▾")
-                                  (length sprig--status-notes))
-                          'face 'sprig-status-group)
-              "\n")
-      (sprig--status-stamp-group from (point) host)
-      (put-text-property from (point) 'sprig--status-heading t)
-      (unless (sprig--status-collapsed-p host)
-        (dolist (note sprig--status-notes)
-          (let ((rfrom (point)))
-            (insert (sprig--status-note-row-string note) "\n")
-            (sprig--status-stamp-group rfrom (point) host)
-            (put-text-property rfrom (point)
-                               'sprig--status-note (plist-get note :id))))))))
-
-(defun sprig--status-note-at-point ()
-  "Return the note plist for the note row at point, or nil.
-Reads the id a note row carries and looks it up in `sprig--status-notes',
-the way `sprig--status-id-at-point' resolves a session row."
-  (let ((id (get-text-property (line-beginning-position) 'sprig--status-note)))
-    (and id (sprig-notes--find sprig--status-notes id))))
-
 (defun sprig--status-decorate ()
   "Head each host group and insert the active rows' inline previews.
 Runs after `tabulated-list-print', which erases both.  The printed rows
@@ -3350,18 +3261,7 @@ on its row rather than stranding it on the heading."
           (unless (bolp) (insert "\n"))
           (while pending
             (sprig--status-insert-group (car pending) counts)
-            (pop pending))
-          ;; The notes group rides at the very top, above every host group, so
-          ;; your reminders are the first thing the navigator shows.  Inserted
-          ;; last, at point-min: the host walk above reads its `:host'
-          ;; bookkeeping from point-min down and is undisturbed by a block put
-          ;; there afterwards, and the id-less note lines are skipped by
-          ;; navigation and the next reprint the way the headings are.  The
-          ;; `home' marker has insertion type t, so this top insert advances it
-          ;; and point still lands on its row.
-          (save-excursion
-            (goto-char (point-min))
-            (sprig--status-insert-notes)))
+            (pop pending)))
       (goto-char home)
       (set-marker home nil))))
 
@@ -3459,16 +3359,14 @@ the first tick always renders.")
   "Return a value capturing everything COLLECTED would paint in the navigator.
 Compared with `equal' to decide whether a live tick can skip its reprint (see
 `sprig--status-render-if-live').  Covers each row's visible fields, its group's
-fold state, its inline preview when active, plus the view flags and open notes,
-so any change that alters the display changes the signature.  The row's own
-time is its creation time, which never moves; the times that do change ride the
-inline preview lines (the last exchange's stamps), captured with the preview."
+fold state, its inline preview when active, plus the view flags, so any change
+that alters the display changes the signature.  The row's own time is its
+creation time, which never moves; the times that do change ride the inline
+preview lines (the last exchange's stamps), captured with the preview."
   (list sprig--status-filter
         sprig--status-show-all
         sprig--status-hide-disconnected
         sprig--status-sort
-        (sprig--status-collapsed-p sprig--status-notes-host)
-        (sprig--status-todo-notes)
         (mapcar
          (lambda (e)
            (let ((host (plist-get e :host)))
@@ -3515,16 +3413,13 @@ to the buffer's head."
 ;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
 ;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
-;; live-only, `l a' show all, `l g' show subagents).  `+' jots and manages
-;; personal notes (`+ +' captures, `+ t' toggles done, `+ d' deletes), listed
-;; in their own group.
+;; live-only, `l a' show all, `l g' show subagents).
 ;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
 ;; top-level, being the frequent ones.
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
 (define-key sprig-status-mode-map (kbd "P")   #'sprig-status-permission-mode)
-(define-key sprig-status-mode-map (kbd "+")   #'sprig-status-notes-dispatch)
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-remove)
 (define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
@@ -3556,9 +3451,7 @@ an already-open navigator, whose header is otherwise fixed at mode init."
 \\<sprig-status-mode-map>Open with \\[sprig-status-open], steer the session
 under point with \\[sprig-status-dispatch] (its `c c' composes, `c o'
 connects), answer its waiting question with \\[sprig-status-answer-dispatch],
-interrupt with \\[sprig-status-interrupt], jot and manage personal notes with
-\\[sprig-status-notes-dispatch] (its `+ +' captures), refresh with
-\\[revert-buffer]."
+interrupt with \\[sprig-status-interrupt], refresh with \\[revert-buffer]."
   (setq-local revert-buffer-function #'sprig--status-revert)
   (sprig--status-apply-format))
 
@@ -3742,15 +3635,13 @@ command's docstring."
   "Put the row's session into bypass mode (`P b').")
 
 (defun sprig--status-goto-row (dir)
-  "Move point DIR (+1 or -1) session or note rows, skipping preview lines.
-A note row carries no session id but is still a landing place for the `+'
-verbs, so it counts; only the id-less inline preview lines are skipped.
-Return non-nil on success; leave point put when there is no further row."
+  "Move point DIR (+1 or -1) session rows, skipping preview lines.
+The id-less inline preview lines are skipped.  Return non-nil on success;
+leave point put when there is no further row."
   (let ((origin (point))
         found)
     (while (and (not found) (zerop (forward-line dir)))
-      (when (or (tabulated-list-get-id)
-                (get-text-property (line-beginning-position) 'sprig--status-note))
+      (when (tabulated-list-get-id)
         (setq found t)))
     (if found
         (progn (beginning-of-line) t)
@@ -3776,18 +3667,14 @@ N defaults to 1; a negative N moves to previous rows."
 Reuses an open owning buffer, or replays the stored log into a new one.
 Point lands on the last message, so the newest reply is what you see, and
 the view keeps following the tail as a live turn streams in, rather than
-opening at the top of a long transcript.  On a note row, opens
-`sprig-notes-file' at that note instead, the way `+ o' does, since a note
-has no session to open."
+opening at the top of a long transcript."
   (interactive)
-  (if (sprig--status-note-at-point)
-      (sprig-status-note-open)
-    (let ((buf (sprig--status-review-buffer (sprig--status-entry-at-point))))
-      (pop-to-buffer buf)
-      (goto-char (point-max))
-      (let ((win (get-buffer-window buf)))
-        (when win (set-window-point win (point-max))))
-      (sprig--status-refresh))))
+  (let ((buf (sprig--status-review-buffer (sprig--status-entry-at-point))))
+    (pop-to-buffer buf)
+    (goto-char (point-max))
+    (let ((win (get-buffer-window buf)))
+      (when win (set-window-point win (point-max))))
+    (sprig--status-refresh)))
 
 (defun sprig-status-connect ()
   "Open the session on the current line and start or resume it."
@@ -3953,71 +3840,6 @@ and live, since the mode is a session-level setting the CLI tracks."
     ("a" "ask the agent, then save" sprig-status-retitle)
     ("m" "set by hand, then save" sprig-status-set-title)]])
 
-;;; Notes
-
-(defun sprig--status-note-at-point-or-error ()
-  "Return the note at point, or signal that there is none."
-  (or (sprig--status-note-at-point)
-      (user-error "No note on this line")))
-
-(defun sprig-status-note-capture ()
-  "Capture a new note and refresh the list (`+ +').
-The note is global, not tied to any session; it lands in the notes group."
-  (interactive)
-  (sprig-notes-capture)
-  (sprig--status-refresh))
-
-(defun sprig-status-note-toggle ()
-  "Toggle the note at point between TODO and DONE (`+ t').
-A note toggled done drops from the list, but stays in `sprig-notes-file'."
-  (interactive)
-  (sprig-notes-toggle (sprig--status-note-at-point-or-error))
-  (sprig--status-refresh))
-
-(defun sprig-status-note-edit ()
-  "Edit the text of the note at point (`+ e')."
-  (interactive)
-  (let* ((note (sprig--status-note-at-point-or-error))
-         (text (string-trim (read-string "Note: " (plist-get note :text)))))
-    (when (string-empty-p text) (user-error "Empty note"))
-    (sprig-notes-edit note text)
-    (sprig--status-refresh)))
-
-(defun sprig-status-note-delete ()
-  "Delete the note at point from `sprig-notes-file', asking first (`+ d')."
-  (interactive)
-  (let ((note (sprig--status-note-at-point-or-error)))
-    (when (yes-or-no-p (format "Delete note %S? " (plist-get note :text)))
-      (sprig-notes-delete note)
-      (sprig--status-refresh))))
-
-(defun sprig-status-note-open ()
-  "Open `sprig-notes-file', at the note at point when there is one (`+ o').
-The one note verb that pops the Org file up, for editing the list by hand
-or reading the notes already ticked done."
-  (interactive)
-  (let ((note (sprig--status-note-at-point)))
-    (find-file sprig-notes-file)
-    (when note
-      (goto-char (point-min))
-      (when (search-forward (plist-get note :id) nil t)
-        (beginning-of-line)))))
-
-;; Defined after the verbs it lists, as with `sprig-status-dispatch'.
-(transient-define-prefix sprig-status-notes-dispatch ()
-  "Jot and manage personal notes from the navigator.
-`+ +' captures a new note (appended to `sprig-notes-file'); the rest act on
-the note at point: `+ t' toggles it done (dropping it from the list, but
-keeping it in the file), `+ e' edits its text, `+ d' deletes it (asks
-first), and `+ o' opens the notes file at it.  Notes are one global list,
-not tied to any session."
-  [["Notes"
-    ("+" "capture a new note" sprig-status-note-capture)
-    ("t" "toggle done" sprig-status-note-toggle)
-    ("e" "edit text" sprig-status-note-edit)
-    ("d" "delete (asks first)" sprig-status-note-delete)
-    ("o" "open the notes file" sprig-status-note-open)]])
-
 (defun sprig-status-toggle-preview ()
   "Fold the host group under point to its heading, or unfold it again.
 On a host heading (`local' or `remote HOST') or any row within a group, TAB
@@ -4039,10 +3861,6 @@ there is one, so a fresh session starts alongside it in the same place."
   (let* ((host (unless local (sprig--status-host-at-point)))
          (id (sprig--status-id-at-point))
          (entry (and id sprig--status-index (gethash id sprig--status-index))))
-    ;; The notes group sits above the host groups but names no real host, so
-    ;; starting a session from inside it falls back to this machine rather
-    ;; than the sentinel.
-    (when (eq host sprig--status-notes-host) (setq host nil))
     (cons host (and entry (plist-get entry :dir)))))
 
 (defun sprig-status-new (&optional local)
@@ -4249,7 +4067,7 @@ live session.  Narrow with `/', lift the cap with `l a'."
   "Directory sprig's own source files were loaded from, for `sprig-reload'.")
 
 (defvar sprig--source-files
-  '("sprig-review" "sprig-notes" "sprig" "sprig-review-mode")
+  '("sprig-review" "sprig" "sprig-review-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()

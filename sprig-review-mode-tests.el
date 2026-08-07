@@ -724,6 +724,36 @@ the fold learns the id from the result rather than from the call."
     (should (equal (cdar (cadr answered)) "Patch it")))
   (kill-buffer "*sprig-answer*"))
 
+(ert-deftest sprig-review-mode-test-visit-on-question-answers ()
+  ;; RET on a question the agent is waiting on opens the answer dialog,
+  ;; the way `a a' does, rather than trying to visit a file.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-review-tests--dialog-input)))
+    (sprig-review-flush)
+    (goto-char (point-min))
+    (should (re-search-forward "Which approach?" nil t))
+    (let (opened)
+      (cl-letf (((symbol-function 'sprig-review-answer)
+                 (lambda () (setq opened t))))
+        (sprig-review-visit))
+      (should opened))))
+
+(ert-deftest sprig-review-mode-test-visit-off-question-keeps-visiting ()
+  ;; Away from a question, RET still routes to file-visiting: on plain prose
+  ;; there is nothing to visit, so it says so and does not answer anything.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "just prose, no question"))
+    (sprig-review-flush)
+    (goto-char (point-min))
+    (let (opened)
+      (cl-letf (((symbol-function 'sprig-review-answer)
+                 (lambda () (setq opened t))))
+        (should-error (sprig-review-visit) :type 'user-error)
+        (should-not opened)))))
+
 (ert-deftest sprig-review-mode-test-answer-buffer-multi-select ()
   ;; A multi-select question toggles rather than settling, and takes what is
   ;; picked on C-c C-c, joined the way the CLI joins them.
@@ -1905,18 +1935,45 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "commit" sent)))))
 
 (ert-deftest sprig-review-mode-test-compact-verb ()
-  ;; Compact sends the CLI's own /compact command as a turn; a prefix arg's
-  ;; instructions ride along to steer the summary.
-  (let (sent)
-    (cl-letf (((symbol-function 'sprig-review--send)
-               (lambda (text &optional _mode) (setq sent text))))
+  ;; Compact sends the CLI's own /compact command; a prefix arg's instructions
+  ;; ride along to steer the summary.  It routes through the queue, so a turn
+  ;; in flight holds it rather than refusing it.
+  (let (queued)
+    (cl-letf (((symbol-function 'sprig-review--queue)
+               (lambda (text) (setq queued text))))
       (sprig-review-compact)
-      (should (equal sent "/compact"))
+      (should (equal queued "/compact"))
       (sprig-review-compact "keep the design decisions")
-      (should (equal sent "/compact keep the design decisions"))
+      (should (equal queued "/compact keep the design decisions"))
       ;; A blank instruction falls back to the bare command.
       (sprig-review-compact "   ")
-      (should (equal sent "/compact")))))
+      (should (equal queued "/compact")))))
+
+(ert-deftest sprig-review-mode-test-compact-queues-mid-turn ()
+  ;; A /compact cannot fold into a running turn, so mid-turn it queues (as
+  ;; `c q' does) and compacts when the turn ends, rather than erroring; with
+  ;; no turn running it just sends.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        ;; Mid-turn: held, nothing on the wire yet.
+        (setq sprig--busy t)
+        (sprig-review-compact)
+        (should-not sent)
+        (should (equal sprig--queued '("/compact")))
+        ;; The turn ends: the queued /compact goes as its own turn.
+        (sprig--review-sink '(done nil nil))
+        (should (equal sent '("/compact")))
+        (should-not sprig--queued)
+        ;; Idle: it sends outright.
+        (setq sent nil sprig--busy nil)
+        (sprig-review-compact "keep decisions")
+        (should (equal sent '("/compact keep decisions")))))))
 
 (ert-deftest sprig-review-mode-test-yes-and-no-verbs ()
   ;; Yes/no affirm and decline the agent's last prose question: each sends its
@@ -2298,12 +2355,6 @@ tearing the process down; the turn's `done' does the clearing later."
             (should sprig--busy)
             (should (timerp sprig--interrupt-timer)))
         (sprig--clear-interrupt)))))
-
-(ert-deftest sprig-review-mode-test-notes-capture-is-bound ()
-  "`+' in the review buffer is the note-capture transient, a real command."
-  (should (eq (lookup-key sprig-review-mode-map (kbd "+"))
-              'sprig-review-notes-dispatch))
-  (should (commandp 'sprig-review-note-capture)))
 
 (provide 'sprig-review-mode-tests)
 ;;; sprig-review-mode-tests.el ends here
