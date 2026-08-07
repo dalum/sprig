@@ -1883,6 +1883,52 @@ without a real SSH process."
               (should (= 1 (length rows))))))
       (delete-directory root t))))
 
+(ert-deftest sprig-test-scan-hides-subagent-transcripts ()
+  ;; The CLI writes each subagent it spawns as its own `agent-*' log one level
+  ;; deeper, under `<project>/<id>/subagents/'.  Those are not sessions you
+  ;; drive, so the local scan drops them by default and lists only the real
+  ;; session, then lists them too once `sprig--status-show-subagents' is set.
+  (let* ((root (make-temp-file "sprig-proj" t))
+         (proj "/tmp/whatever/myproj")
+         (sprig-remote nil)
+         (sprig-claude-projects-directory root)
+         (logdir (sprig-tests--make-session-log
+                  root proj "sess-main"
+                  `(:type "user" :cwd ,proj :message (:role "user" :content "hi"))))
+         (subdir (expand-file-name "sess-main/subagents" logdir)))
+    (unwind-protect
+        (progn
+          (make-directory subdir t)
+          (with-temp-file (expand-file-name "agent-deadbeef.jsonl" subdir)
+            (insert (json-serialize
+                     `(:type "user" :cwd ,proj
+                       :message (:role "user" :content "sub")))
+                    "\n"))
+          (should (sprig--log-subagent-p
+                   (expand-file-name "agent-deadbeef.jsonl" subdir)))
+          (should-not (sprig--log-subagent-p
+                       (expand-file-name "sess-main.jsonl" logdir)))
+          ;; Default: only the real session shows.
+          (let ((rows (sprig--scan-session-logs)))
+            (should (= 1 (length rows)))
+            (should (equal (plist-get (car rows) :session) "sess-main")))
+          ;; Toggled on: the subagent transcript joins the list.
+          (let* ((sprig--status-show-subagents t)
+                 (rows (sprig--scan-session-logs)))
+            (should (= 2 (length rows)))
+            (should (seq-find (lambda (r) (equal (plist-get r :session)
+                                                 "agent-deadbeef"))
+                              rows))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-remote-scan-command-prunes-subagents ()
+  ;; The remote scan prunes subagent transcripts in the `find' itself, so they
+  ;; never eat into the newest-N cap; the toggle drops the exclusion.
+  (should (string-search "-not -path '*/subagents/*'"
+                         (sprig--remote-scan-all-command "~/p" 30)))
+  (should-not (string-search "subagents"
+                             (sprig--remote-scan-all-command "~/p" 30 t))))
+
 (ert-deftest sprig-test-scan-session-logs-without-cwd ()
   ;; A log whose scanned tail carries no cwd yields a nil :dir, never the
   ;; encoded log-dir name: that name is not a real path, so it survives

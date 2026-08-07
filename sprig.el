@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.21.0
+;; Version: 0.22.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2093,6 +2093,13 @@ It lifts the `sprig-status-max-sessions' cap for its buffer.")
 `l' toggles it, leaving a live-only view; the hidden sessions' logs are
 untouched and return on the next toggle.")
 
+(defvar-local sprig--status-show-subagents nil
+  "When non-nil, the navigator also lists subagents' transcripts.
+The CLI logs each subagent it spawns as its own `agent-*' JSONL beside the
+session that spawned it (see `sprig--log-subagent-p'); these are not
+sessions you drive, so they are hidden by default and `l g' toggles them
+in.  It changes the scan itself, so the toggle re-reads the logs.")
+
 ;;; Enumerating stored CLI sessions as branches (option A)
 ;;
 ;; A branch is a `claude' session; the CLI already stores each as a JSONL
@@ -2186,6 +2193,17 @@ before the newest-N cap."
                     (directory-file-name (file-name-directory file)))))
          (seq-some (lambda (re) (string-match-p re proj))
                    sprig-status-ignore-directories))))
+
+(defun sprig--log-subagent-p (file)
+  "Non-nil when log FILE is a subagent's transcript, not a top-level session.
+A real session's log sits directly in its project dir (`<project>/<id>.jsonl');
+the CLI writes each subagent it spawns one level deeper, under
+`<project>/<id>/subagents/agent-*.jsonl'.  Detected by that parent `subagents'
+directory, so it costs no log content: the navigator lists sessions you drive,
+so these are dropped unless `l g' (`sprig--status-show-subagents') shows them."
+  (string= "subagents"
+           (file-name-nondirectory
+            (directory-file-name (file-name-directory file)))))
 
 (defun sprig--log-cwd (text)
   "Return the working directory recorded in session-log TEXT, or nil.
@@ -2314,7 +2332,10 @@ sessions still paints fast."
   "Scan the LIMIT newest local logs under the session host's projects dir."
   (let* ((root (expand-file-name (sprig--projects-directory)))
          (files (seq-remove
-                 #'sprig--log-ignored-p
+                 (lambda (f)
+                   (or (sprig--log-ignored-p f)
+                       (and (not sprig--status-show-subagents)
+                            (sprig--log-subagent-p f))))
                  (and (file-directory-p root)
                       (directory-files-recursively root "\\.jsonl\\'"))))
          (dated (sort (mapcar (lambda (f)
@@ -2346,20 +2367,26 @@ some of the newest, so a little headroom keeps the capped set full."
         (sprig-status-ignore-directories (* 2 limit))
         (t limit)))
 
-(defun sprig--remote-scan-all-command (root cap)
+(defun sprig--remote-scan-all-command (root cap &optional subagents)
   "Shell command listing the CAP newest logs under ROOT with their scan fields.
 One SSH round trip does the whole scan: `find | sort | head' picks the newest
 logs by mtime, then each is slurped for its mtime, path, head bytes (for the
 `cwd'), and its title line, grepped whole-file since it can sit anywhere.  A
 user `customTitle' is preferred over the generated `aiTitle' (see
 `sprig--log-title'), so the grep looks for it first.  Records are
-RS(\\036)-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'."
-  (format "find %s -name '*.jsonl' -printf '%%T@\\t%%p\\n' 2>/dev/null \
+RS(\\036)-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'.
+
+Subagent transcripts (`.../subagents/agent-*.jsonl', see
+`sprig--log-subagent-p') are pruned in the `find' itself unless SUBAGENTS is
+non-nil, so they never eat into the newest-N cap."
+  (format "find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
 | sort -rn | head -n %d | while IFS='\t' read -r m p; do \
 printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 [ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; done"
-          root cap sprig--status-preview-bytes))
+          root
+          (if subagents "" " -not -path '*/subagents/*'")
+          cap sprig--status-preview-bytes))
 
 (defun sprig--parse-scan-rows (blob limit)
   "Parse BLOB from `sprig--remote-scan-all-command' into scan plists.
@@ -2399,7 +2426,8 @@ round trip); the navigator drives the same scan in the background instead (see
          (blob (ignore-errors
                  (sprig--remote-sh
                   (sprig--remote-scan-all-command
-                   root (sprig--remote-scan-cap limit))))))
+                   root (sprig--remote-scan-cap limit)
+                   sprig--status-show-subagents)))))
     (sprig--parse-scan-rows blob limit)))
 
 ;;; Last-reply preview
@@ -2619,7 +2647,8 @@ mark, caches the parsed rows, and refreshes the open navigator."
                     (directory-file-name
                      (expand-file-name (sprig--projects-directory))))))
            (command (sprig--remote-scan-all-command
-                     root (sprig--remote-scan-cap limit)))
+                     root (sprig--remote-scan-cap limit)
+                     sprig--status-show-subagents))
            ;; A local scan must launch from a local directory: a remote
            ;; `default-directory' would send the `sh' through TRAMP and defeat
            ;; the point.  The `ssh' command is explicit, so a local cwd suits
@@ -2918,6 +2947,7 @@ survives."
           (concat (and sprig--status-filter
                        (format " /%s" sprig--status-filter))
                   (and sprig--status-show-all " [all]")
+                  (and sprig--status-show-subagents " [+sub]")
                   (and sprig--status-hide-disconnected " [live]")
                   (when sprig--status-sort
                     (format " %s%s" (if (cdr sprig--status-sort) "↓" "↑")
@@ -3485,8 +3515,9 @@ to the buffer's head."
 ;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
 ;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
-;; live-only, `l a' show all).  `+' jots and manages personal notes (`+ +'
-;; captures, `+ t' toggles done, `+ d' deletes), listed in their own group.
+;; live-only, `l a' show all, `l g' show subagents).  `+' jots and manages
+;; personal notes (`+ +' captures, `+ t' toggles done, `+ d' deletes), listed
+;; in their own group.
 ;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
 ;; top-level, being the frequent ones.
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
@@ -4130,6 +4161,21 @@ listed; an empty string clears the filter."
                "Listing every session"
              (format "Listing the %s newest sessions" sprig-status-max-sessions))))
 
+(defun sprig-status-show-subagents ()
+  "Toggle listing subagents' `agent-*' transcripts alongside real sessions.
+They are hidden by default (they are not sessions you drive); see
+`sprig--log-subagent-p'.  It changes the scan set, so a fresh read runs."
+  (interactive)
+  (setq sprig--status-show-subagents (not sprig--status-show-subagents))
+  ;; The subagent logs are pruned in the scan itself (the `find', and the
+  ;; local `directory-files-recursively' filter), so showing them needs a
+  ;; fresh read; the cached scan holds only the pruned set.
+  (sprig--status-scan-invalidate)
+  (sprig--status-render)
+  (message (if sprig--status-show-subagents
+               "Listing subagents too"
+             "Hiding subagents")))
+
 ;; Defined after the verbs they list, so every suffix command is known by the
 ;; time the prefix is compiled (as with `sprig-status-dispatch').
 (transient-define-prefix sprig-status-remove ()
@@ -4153,9 +4199,10 @@ description runs with its own popup buffer current, not the navigator's."
 (transient-define-prefix sprig-status-view ()
   "Switch how the navigator lists its sessions.
 Pure view state; no session is touched.  `l l' toggles a live-only view
-that hides disconnected sessions and `l a' toggles the newest-N cap; each
-shows `[on]' while active.  Sort and filter are here too, and also stay on
-`S' and `/' as the frequent ones."
+that hides disconnected sessions, `l a' toggles the newest-N cap, and `l g'
+toggles the CLI's subagent (`agent-*') transcripts in; each shows `[on]'
+while active.  Sort and filter are here too, and also stay on `S' and `/'
+as the frequent ones."
   [["View"
     ("l" sprig-status-toggle-disconnected
      :description (lambda () (sprig--status-view-desc
@@ -4165,6 +4212,10 @@ shows `[on]' while active.  Sort and filter are here too, and also stay on
      :description (lambda () (sprig--status-view-desc
                              "show all (lift the cap)"
                              'sprig--status-show-all)))
+    ("g" sprig-status-show-subagents
+     :description (lambda () (sprig--status-view-desc
+                             "show subagents (agent-* transcripts)"
+                             'sprig--status-show-subagents)))
     ("s" "sort by column" sprig-status-sort)
     ("/" "filter by project or title" sprig-status-filter)]])
 
