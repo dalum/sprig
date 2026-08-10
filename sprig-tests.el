@@ -1012,6 +1012,114 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
     (should (equal (sprig-review-format-change change)
                    "x\n-a\n-b\n+c"))))
 
+;;;; Ground-truth diff parser
+
+(ert-deftest sprig-review-test-parse-diff-modified ()
+  "A modified file yields an `edit' change with one hunk per change run."
+  (let* ((diff (concat "diff --git a/x.el b/x.el\n"
+                       "index abc..def 100644\n"
+                       "--- a/x.el\n"
+                       "+++ b/x.el\n"
+                       "@@ -1,3 +1,3 @@\n"
+                       " keep\n"
+                       "-old\n"
+                       "+new\n"
+                       " tail\n"))
+         (changes (sprig-review-parse-diff diff))
+         (change (car changes)))
+    (should (= (length changes) 1))
+    (should (equal (plist-get change :file) "x.el"))
+    (should (eq (plist-get change :kind) 'edit))
+    (should (= (length (plist-get change :hunks)) 1))
+    (let ((hunk (car (plist-get change :hunks))))
+      ;; Context lines are dropped, matching the tool-payload model.
+      (should (equal (plist-get hunk :old) '("old")))
+      (should (equal (plist-get hunk :new) '("new"))))
+    (should (equal (sprig-review-change-stat change) '(1 . 1)))))
+
+(ert-deftest sprig-review-test-parse-diff-splits-runs ()
+  "Two change runs separated by context in one hunk become two hunks."
+  (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
+                       "@@ -1,6 +1,6 @@\n a\n-b\n+B\n c\n d\n-e\n+E\n f\n"))
+         (hunks (plist-get (car (sprig-review-parse-diff diff)) :hunks)))
+    (should (= (length hunks) 2))
+    (should (equal (plist-get (nth 0 hunks) :old) '("b")))
+    (should (equal (plist-get (nth 0 hunks) :new) '("B")))
+    (should (equal (plist-get (nth 1 hunks) :old) '("e")))
+    (should (equal (plist-get (nth 1 hunks) :new) '("E")))))
+
+(ert-deftest sprig-review-test-parse-diff-new-file ()
+  "A new file is a `write': /dev/null old side, all lines added."
+  (let* ((diff (concat "diff --git a/n.el b/n.el\n"
+                       "new file mode 100644\n"
+                       "index 000..abc\n"
+                       "--- /dev/null\n"
+                       "+++ b/n.el\n"
+                       "@@ -0,0 +1,2 @@\n+line1\n+line2\n"))
+         (change (car (sprig-review-parse-diff diff)))
+         (hunk (car (plist-get change :hunks))))
+    (should (equal (plist-get change :file) "n.el"))
+    (should (eq (plist-get change :kind) 'write))
+    (should (null (plist-get hunk :old)))
+    (should (equal (plist-get hunk :new) '("line1" "line2")))
+    (should (equal (sprig-review-change-stat change) '(2 . 0)))))
+
+(ert-deftest sprig-review-test-parse-diff-deleted-file ()
+  "A deleted file is an `edit' with a nil new side (a pure deletion)."
+  (let* ((diff (concat "diff --git a/d.el b/d.el\n"
+                       "deleted file mode 100644\n"
+                       "--- a/d.el\n"
+                       "+++ /dev/null\n"
+                       "@@ -1,2 +0,0 @@\n-line1\n-line2\n"))
+         (change (car (sprig-review-parse-diff diff)))
+         (hunk (car (plist-get change :hunks))))
+    (should (equal (plist-get change :file) "d.el"))
+    (should (eq (plist-get change :kind) 'edit))
+    (should (equal (plist-get hunk :old) '("line1" "line2")))
+    (should (null (plist-get hunk :new)))
+    (should (equal (sprig-review-change-stat change) '(0 . 2)))))
+
+(ert-deftest sprig-review-test-parse-diff-multi-file ()
+  "Each `diff --git' header starts a fresh file."
+  (let* ((diff (concat "diff --git a/one b/one\n--- a/one\n+++ b/one\n"
+                       "@@ -1 +1 @@\n-a\n+A\n"
+                       "diff --git a/two b/two\n--- a/two\n+++ b/two\n"
+                       "@@ -1 +1 @@\n-b\n+B\n"))
+         (changes (sprig-review-parse-diff diff)))
+    (should (equal (mapcar (lambda (c) (plist-get c :file)) changes)
+                   '("one" "two")))))
+
+(ert-deftest sprig-review-test-parse-diff-content-looks-like-header ()
+  "A removed/added line reading `--- '/`+++ ' is content, not a header.
+Position disambiguates: once inside a hunk a `-'/`+' line is a change."
+  (let* ((diff (concat "diff --git a/md b/md\n--- a/md\n+++ b/md\n"
+                       "@@ -1,2 +1,2 @@\n"
+                       "---- old rule\n"          ; a removed line "--- old rule"
+                       "++++ new rule\n"))        ; an added line "+++ new rule"
+         (change (car (sprig-review-parse-diff diff)))
+         (hunk (car (plist-get change :hunks))))
+    (should (= (length (sprig-review-parse-diff diff)) 1))
+    (should (equal (plist-get change :file) "md"))
+    (should (equal (plist-get hunk :old) '("--- old rule")))
+    (should (equal (plist-get hunk :new) '("+++ new rule")))))
+
+(ert-deftest sprig-review-test-parse-diff-binary-skipped ()
+  "Binary files carry no hunks and are dropped."
+  (let ((diff (concat "diff --git a/img.png b/img.png\n"
+                      "Binary files a/img.png and b/img.png differ\n")))
+    (should (null (sprig-review-parse-diff diff)))))
+
+(ert-deftest sprig-review-test-parse-diff-empty ()
+  (should (null (sprig-review-parse-diff "")))
+  (should (null (sprig-review-parse-diff nil))))
+
+(ert-deftest sprig-review-test-parse-diff-round-trips-format ()
+  "Parsing then formatting a single-run edit matches the payload path."
+  (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
+                       "@@ -1,2 +1,1 @@\n-a\n-b\n+c\n"))
+         (change (car (sprig-review-parse-diff diff))))
+    (should (equal (sprig-review-format-change change) "x\n-a\n-b\n+c"))))
+
 (ert-deftest sprig-review-test-build-coalesces-text ()
   (let* ((model (sprig-review-build
                  '((session "s1") (text "Hello, ") (text "world")

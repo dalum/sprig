@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.23.0
+;; Version: 0.24.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -29,6 +29,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'json)
 (require 'seq)
 (require 'subr-x)
@@ -118,6 +119,96 @@ for tools that touch no files, or when INPUT lacks a file path."
   (concat (plist-get change :file) "\n"
           (mapconcat #'sprig-review--format-hunk
                      (plist-get change :hunks) "\n")))
+
+;;;; Ground-truth diff parser
+;;
+;; Source 2 in DESIGN.md ("The crux: diff review"): the real working-tree
+;; diff, which the agent produces by running `git diff' and reporting it
+;; (Sprig never runs git itself; see the instruction invariant).  It
+;; catches changes no tool payload explains (a `Bash' formatter, a `sed'),
+;; and it is the subject of navigator mode, where the human's own edits
+;; have no `Edit'/`Write' payload to reconstruct from.
+;;
+;; `sprig-review-parse-diff' folds a unified git diff into the SAME change
+;; shape the tool-payload engine emits (:file/:kind/:hunks), so the stat,
+;; formatter, and renderer all consume it unchanged.  The model carries no
+;; context lines, matching the payload path, so each contiguous run of
+;; -/+ lines inside a hunk becomes one hunk and the surrounding context is
+;; dropped.  The input is expected to be `git diff' output (one
+;; `diff --git' header per file, which is the file boundary).  Limits, all
+;; deferred: binary files are skipped; a rename with no content change is
+;; reported at its new path with no hunks; a plain `diff -u' stream with no
+;; `diff --git' headers reconstructs only its first file.
+
+(defun sprig-review--diff-strip-prefix (path)
+  "Strip a leading `a/' or `b/' from git diff PATH; leave others alone."
+  (cond
+   ((null path) nil)
+   ((string-prefix-p "a/" path) (substring path 2))
+   ((string-prefix-p "b/" path) (substring path 2))
+   (t path)))
+
+(defun sprig-review--diff-header-path (line)
+  "Return the path from a `--- ' or `+++ ' diff LINE, nil for /dev/null.
+The leading marker and any trailing tab-separated timestamp are dropped."
+  (let* ((body (substring line 4))              ; past "--- " / "+++ "
+         (field (car (split-string body "\t"))))
+    (if (equal field "/dev/null") nil
+      (sprig-review--diff-strip-prefix field))))
+
+(defun sprig-review-parse-diff (text)
+  "Parse unified git-diff TEXT into a list of change plists.
+Each element matches the shape `sprig-review-tool-changes' returns,
+\(:file PATH :kind edit|write :hunks HUNKS); see this section's
+commentary for the mapping and its limits."
+  (let ((changes nil)
+        (path nil) (kind 'edit) (hunks nil) (binary nil)
+        (a-path nil) (b-path nil)              ; the file's --- / +++ paths
+        (old-run nil) (new-run nil) (in-hunk nil))
+    (cl-flet* ((flush-run
+                 ()
+                 (when (or old-run new-run)
+                   (push (list :old (nreverse old-run)
+                               :new (nreverse new-run)
+                               :replace-all nil)
+                         hunks)
+                   (setq old-run nil new-run nil)))
+               (flush-file
+                 ()
+                 (flush-run)
+                 (when (and path (not binary))
+                   (push (list :file path :kind kind :hunks (nreverse hunks))
+                         changes))
+                 (setq path nil kind 'edit hunks nil binary nil
+                       a-path nil b-path nil in-hunk nil)))
+      (dolist (line (split-string (or text "") "\n"))
+        (cond
+         ((string-prefix-p "diff --git " line) (flush-file))
+         ((string-prefix-p "new file mode" line) (setq kind 'write))
+         ((string-prefix-p "Binary files " line) (setq binary t))
+         ((string-prefix-p "rename to " line)
+          (setq path (sprig-review--diff-strip-prefix
+                      (string-trim (substring line (length "rename to "))))))
+         ;; `--- '/`+++ ' are file headers only before the first `@@'; once
+         ;; in a hunk a `-'/`+' line is content, even one reading `--- x'.
+         ((and (not in-hunk) (string-prefix-p "--- " line))
+          (setq a-path (sprig-review--diff-header-path line)))
+         ((and (not in-hunk) (string-prefix-p "+++ " line))
+          (setq b-path (sprig-review--diff-header-path line))
+          ;; b is the live path unless it is /dev/null (a deletion); a
+          ;; /dev/null old path means a new file even absent `new file mode'.
+          (setq path (or b-path a-path))
+          (when (null a-path) (setq kind 'write)))
+         ((string-prefix-p "@@" line) (flush-run) (setq in-hunk t))
+         (in-hunk
+          (pcase (and (> (length line) 0) (aref line 0))
+            (?- (push (substring line 1) old-run))
+            (?+ (push (substring line 1) new-run))
+            (?\\ nil)                    ; "\ No newline at end of file"
+            (_ (flush-run))))            ; context (incl. blank " ") ends a run
+         (t nil)))                       ; index/mode/similarity headers
+      (flush-file)
+      (nreverse changes))))
 
 ;;;; Review model
 ;;
