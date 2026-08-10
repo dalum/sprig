@@ -153,7 +153,7 @@ So Sprig keeps essentially no local store: just a pointer (session id plus cwd) 
 
 ## Status
 
-Everything above the "Navigator mode" heading is **shipped**. Navigator mode itself is designed but not yet built; it is the next major slice.
+Everything above the "Navigator mode" heading is **shipped**, and navigator mode's foundation now is too: the role toggle, the hard block, and the ground-truth diff parser. What remains of navigator mode is the on-demand feedback verb and the staging-buffer authoring surface.
 
 ### Shipped
 
@@ -164,17 +164,18 @@ Everything above the "Navigator mode" heading is **shipped**. Navigator mode its
 - **Plan mode.** `c p` sets the CLI permission mode over stdin (`set_permission_mode`) for one turn.
 - **Navigator** (`sprig-status`). Lists the CLI's session logs per project directory across every host (local plus `sprig-remote`), grouped and foldable, with live status glyphs (including `?` waiting-on-you) and a markdown-rendered preview of the last exchange with a time column and sort. Steers a session from the list without opening it (`c` / `a` act on the row's session).
 - **Performance.** Settled prose fontification is memoised, and the structural-render coalescing timer adapts to the last render's measured cost.
+- **Navigator role (foundation).** `V` toggles a session between driver and navigator. Navigator switches the CLI to `manual` permission mode, and a role-gated handler (`sprig--navigator-tool-response`) denies the edit family while allowing reads and `git`, so the agent is held to feedback with no respawn; the role shows in the state line, and each denial carries the posture reminder back to the agent. The ground-truth diff parser (`sprig-review-parse-diff`) folds `git diff` into the tool-payload change shape, ready for the feedback and staging slices to render the human's own diff.
 
 ### Known gaps
 
 - **Thinking is replay-only:** the live stream parser has no thinking branch, so a turn's reasoning appears only on the next replay.
-- A change made by **`Bash` rather than `Edit` / `Write` leaves no diff**, since attribution is from tool payloads and the git ground-truth source (source 2) is deferred.
+- A change made by **`Bash` rather than `Edit` / `Write` still shows no diff**: the ground-truth parser (source 2) now exists, but nothing yet runs `git diff` and renders its result, so display is tool-payload only.
 - **`/model` and `/clear` have no live verb** (`sprig-model` feeds `--model` at spawn only).
 - A **remote** session's `Agent` rows replay without their subagents' steps: those transcripts are files beside the log, and a remote log is read by shell rather than by path, so there is no name to find them by.
 
 ### Next
 
-- **Navigator mode**, the whole mixed-initiative design above: the role toggle and hard block, on-demand feedback on the human's `git diff` (which needs the ground-truth diff source), and the staging-buffer / change-set authoring surface.
+- **Navigator mode, remaining:** the on-demand feedback verb over the human's `git diff` (the parser exists; the verb wires it to render), and the staging-buffer / change-set authoring surface with the byte-for-byte courier carve-out. The role toggle and hard block are shipped (above).
 - The richer **markable plan-tree review** from the plan-mode section.
 - Finer **`x` granularity** (a code block inside prose, not just a tool command).
 - **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.

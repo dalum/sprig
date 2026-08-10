@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.24.0
+;; Version: 0.25.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -52,6 +52,7 @@
 (declare-function sprig--remote "sprig" ())
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
+(declare-function sprig--set-role "sprig" (role))
 (declare-function sprig--notable-mode "sprig" (mode))
 (declare-function sprig--state-parts "sprig" (state))
 ;; Transport state, defined in sprig.el; a session-owning review buffer
@@ -65,6 +66,7 @@
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
 (defvar sprig--permission-mode)
+(defvar sprig--role)
 (defvar sprig--btw-process)
 
 ;;;; Faces
@@ -1292,9 +1294,16 @@ the turn as plainly as the line does."
               (ctx (sprig-review--context-indicator (plist-get model :context)))
               (plan (sprig-review--plan-indicator model))
               (queued (and (boundp 'sprig--queued) (length sprig--queued)))
+              (role (and (boundp 'sprig--role) sprig--role))
               (start (point)))
     (magit-insert-section (sprig-state)
       (insert (sprig-review--face (format "%s  %s" glyph text) face))
+      ;; The pair-programming role, shown only when it is the notable one:
+      ;; navigator rotates the posture (you write, the agent advises), so it
+      ;; earns a tag the way plan mode does; driver is the silent default.
+      (when (eq role 'navigator)
+        (insert (sprig-review--face "  ·  " face)
+                (sprig-review--face "navigator" 'sprig-mode-tag)))
       ;; Nearest the state, since it qualifies it: `working…' says something is
       ;; happening, `☑ 4/5' says how much of it is left to happen.
       (when plan
@@ -3073,6 +3082,25 @@ all, so reach for it only where that is genuinely what you want."
   (interactive)
   (sprig-review--set-mode "bypassPermissions"))
 
+(defun sprig-review-toggle-role ()
+  "Toggle this session between the driver and navigator roles (`V').
+Driver, the default, is the agent-edits-you-review posture.  Navigator
+rotates it: you write the code and the agent is held to feedback, its
+file-writing tools denied at the permission channel and the session put in
+`manual' permission mode so they route there (see DESIGN.md, \"Navigator
+mode\").  The switch is live, needing no respawn, and the role shows in the
+state line.  Flip back to driver to let the agent write again."
+  (interactive)
+  (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
+    (user-error "No live session to set the role on; send a message first"))
+  (let ((navigator (not (eq sprig--role 'navigator))))
+    (sprig--set-role (if navigator 'navigator 'driver))
+    (sprig-review--refresh)
+    (message
+     (if navigator
+         "sprig: navigator — you write the code, the agent advises (its edits are blocked)"
+       "sprig: driver — the agent edits, you review"))))
+
 (transient-define-prefix sprig-review-permission-mode ()
   "Set the session's permission mode (`P').
 The mode is sticky: it holds until you change it here or the agent leaves
@@ -3105,6 +3133,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
+(define-key sprig-review-mode-map (kbd "V")   #'sprig-review-toggle-role)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

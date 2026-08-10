@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.24.0
+;; Version: 0.25.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -152,6 +152,26 @@ does not already allow; adding `--permission-prompt-tool stdio' routes
 those escalations to sprig instead of the headless auto-deny."
   :type '(choice (const :tag "Ask in the review buffer" nil) function))
 
+(defcustom sprig-navigator-blocked-tools
+  '("Edit" "Write" "MultiEdit" "NotebookEdit")
+  "Tools the agent may not use while a session is in the navigator role.
+In navigator mode (see DESIGN.md, \"Navigator mode\") the human writes the
+code and the agent only advises, so these file-writing tools are denied at
+the permission channel while every other tool is allowed.  `Bash' is
+deliberately absent: the agent needs it to run `git diff', which also
+leaves it an escape hatch, so the block is belt-and-braces, not airtight."
+  :type '(repeat string))
+
+(defcustom sprig-navigator-deny-message
+  "You are the navigator, not the driver: the human writes the code here. \
+Do not modify files.  Give feedback, spot issues, and suggest approaches; \
+offer hints rather than whole solutions."
+  "Reason sent to the agent when a write is denied in the navigator role.
+It doubles as the reminder of the posture, delivered exactly when the agent
+tries to act against it, so a live role toggle needs no separate system
+prompt to keep the agent on task."
+  :type 'string)
+
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
 When a session exits abnormally, its command, exit status, and captured
@@ -264,6 +284,13 @@ the streamed `input_json_delta' fragments until the block closes.")
 (defvar-local sprig--permission-mode nil
   "The session's current permission mode, tracked from `status' events.
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
+(defvar-local sprig--role 'driver
+  "This session's pair-programming role: `driver' or `navigator'.
+In `driver' (the default) the agent edits and you review its work; in
+`navigator' the agent is held to feedback only, its file-writing tools
+denied at the permission channel (see `sprig--navigator-tool-response'
+and DESIGN.md, \"Navigator mode\").  Live-session state, not persisted:
+a reopened session starts as `driver'.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
@@ -864,6 +891,27 @@ does with the interrupt receipt."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
 
+(defun sprig--navigator-tool-response (request-id tool-name)
+  "Answer a `can_use_tool' REQUEST-ID for TOOL-NAME in the navigator role.
+Denies a file-writing tool (`sprig-navigator-blocked-tools') with the
+posture reminder, so the agent cannot write; allows anything else so it
+can still read the tree and run `git'.  Runs inside the process filter,
+so it never prompts.  The courier carve-out that allows one
+human-authored write is a later slice."
+  (sprig--send-control-response
+   request-id
+   (if (member tool-name sprig-navigator-blocked-tools)
+       (list :behavior "deny" :message sprig-navigator-deny-message)
+     (list :behavior "allow"))))
+
+(defun sprig--set-role (role)
+  "Set this session's ROLE (`driver' or `navigator') and align the CLI mode.
+Navigator puts the session in `manual' permission mode so every tool call
+routes to `sprig--navigator-tool-response'; driver returns it to `auto'.
+The role gate is Sprig-side, so this toggles live with no respawn."
+  (setq sprig--role role)
+  (sprig--set-permission-mode (if (eq role 'navigator) "manual" "auto")))
+
 (defun sprig--send-interrupt ()
   "Ask the session to interrupt the turn in flight, returning the request id.
 The CLI aborts the current turn and ends it with a `result', so the turn
@@ -923,6 +971,12 @@ session never hangs on an unanswered request."
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "ExitPlanMode"))
           (sprig--offer-plan request-id .input))
+         ;; Navigator role: hold the agent to feedback by denying its
+         ;; file-writing tools and letting the rest (reads, `git') run.
+         ;; After the interactive-tool cases above, so a question or plan
+         ;; still renders; before the generic gate, so no per-tool prompt.
+         ((and (equal .subtype "can_use_tool") (eq sprig--role 'navigator))
+          (sprig--navigator-tool-response request-id .tool_name))
          ((equal .subtype "can_use_tool")
           (if sprig-permission-function
               (sprig--send-control-response
