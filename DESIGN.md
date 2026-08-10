@@ -1,44 +1,44 @@
-# Design: Sprig - non-linear agent conversations in Markdown
+# Design: Sprig
 
 ## Name
 
-**Sprig**. Package `sprig`, function prefix `sprig-`, editing minor mode `sprig-mode`, navigator major mode `sprig-status-mode`. Model-agnostic: the agent backend is not fixed. Rejected: `org-agent` (reserved `org-` prefix, crowded), `owl-mode` (collides with OWL/ontology modes). A sprig is a small shoot off a branch, which matches the fork-by-copy model below.
+**Sprig**. Package `sprig`, function prefix `sprig-`, review major mode `sprig-review-mode`, navigator major mode `sprig-status-mode`. Model-agnostic: the agent backend is not fixed. Rejected: `org-agent` (reserved `org-` prefix, crowded), `owl-mode` (collides with OWL/ontology modes). A sprig is a small shoot off a branch.
 
-## Goal
+## What Sprig is
 
-An Emacs package for conversing with an LLM agent, breaking out of linear chat. You hold many conversations at once and fork any of them to explore several directions in parallel. Conversations are plain Markdown files you edit directly. The non-linear structure lives between files and is driven from a Magit-like control buffer.
+An Emacs interface for **reviewing and steering** an LLM agent's work, aimed at breaking out of linear chat. A conversation is a read-only, **Magit-like review buffer** (built on `magit-section`) whose one job is to review and steer the agent efficiently: the agent's file edits render inline as a foldable diff, you mark what you care about, and single-key verbs send the agent instructions. There is no chat input line and no Markdown file to edit. The whole set of conversations is driven from a `sprig-status` navigator.
 
-## Current direction: the review buffer (2026-07)
+A conversation *is* a `claude` session, and Sprig keeps no store of its own. The CLI already persists each session as JSONL under `~/.claude/projects/<cwd>/<id>.jsonl` on the host where it runs, so history is replayed from that log and survives an Emacs restart because the session id names the file. The transport is a persistent Claude Code session, local or over SSH, via the `claude` CLI's stream-json protocol.
 
-A pivot, driven by how the tool is actually used. In practice the workflow is a single, linear history that is never hand-edited and never forked. So editing-in-place and the fork forest are shelved for now. The sections below this one (editable Markdown, fork by copy, the forest) describe the earlier direction and are kept for context, not because they are the plan.
+**The ownership crux.** Agentic coding has a problem it does not solve: the author of record understands the code least. The agent writes, the human skims and approves, and ownership erodes along with understanding. Sprig's default posture, reviewing and steering the agent's edits, is the fast path and lives with this. Navigator mode is the deliberate counterweight: a slower posture that trades throughput for the one thing skimming cannot buy, which is that the human has engaged with every line, because the human wrote it. The two postures are the same buffer with the roles rotated, so you move between speed and ownership without changing tools.
 
-What replaces them: the conversation stops being an editable Markdown file and becomes a **read-only, Magit-like review buffer** whose one job is to review and steer agent work efficiently. Not a chat client. No input line at the bottom. A projection of state you move a cursor around, with convenient shortcuts.
+## The review buffer
 
 ### Shape
 
 - Built on `magit-section`: foldable sections, free cursor movement over read-only text, an actionable metadata header, marks, and a transient for verbs.
 - Section kinds: the metadata header, user turns, assistant turns, thinking blocks, tool calls and results, plan steps, and diff hunks.
-- The metadata header carries title, project directory, model, session id, live status, cost, and tool-render level. It is actionable, not chrome: transients retitle, change the project dir, switch model, the way Magit's header popups work.
+- The metadata header carries title, project directory, model, session id, live status, cost, and tool-render level. It is actionable, not chrome: transients retitle, change the project dir, and switch model, the way Magit's header popups work.
 
 ### The crux: diff review
 
-The agent operates on a real repository, so the transcript and a review of the agent's diffs are the *same surface*. You read what it did and reject or reference parts of it without leaving the buffer. This is the centre of the design, everything else serves it.
+The agent operates on a real repository, so the transcript and a review of the agent's diffs are the *same surface*. You read what it did and reject or reference parts of it without leaving the buffer. This is the centre of the design; everything else serves it.
 
 The hard problem is attribution: a conversation is turn-by-turn, but a git working tree is one cumulative diff against `HEAD`. They do not line up. The model is **two sources**:
 
 1. **Tool-call payloads = attribution.** Every `Edit` / `Write` / `MultiEdit` is a before/after already present in the stream-json. Reconstruct per-turn hunks from these. Precise, cheap, turn-attributed, and works even when the target is not a git repo.
-2. **Git working tree = ground truth.** The real uncommitted diff. Catches what payloads cannot: a `Bash` call that runs a formatter, a `sed`, codegen. Changes git shows but no payload explains surface as an **"unattributed changes"** section, which is exactly where the agent did something off-book worth an eyeball.
+2. **Git working tree = ground truth.** The real uncommitted diff. Catches what payloads cannot: a `Bash` call that runs a formatter, a `sed`, codegen. Changes git shows but no payload explains surface as an **"unattributed changes"** section, exactly where the agent did something off-book worth an eyeball.
 
-**v1 uses source 1 only** (tool-payload reconstruction). It needs no git plumbing, works over SSH, and delivers most of the review value. Ground truth via git is a later slice.
+The shipped review buffer uses source 1 only. It needs no git plumbing, works over SSH, and delivers most of the review value. Source 2 is a later slice, and navigator mode (below) is what first brings it in, since the human's own diff has no tool payload to reconstruct from.
 
-A possible phase-2 upgrade makes the metaphor literal: mirror each completed turn as a commit on a hidden ref (`refs/sprig/<session>`), one commit per turn. Turns become commits, attribution and revert come free from git. Costs to weigh first: isolating the user's own uncommitted changes from the agent's, and per-turn snapshot overhead. Note that under the instruction invariant below, Sprig cannot run this git machinery itself, so even the shadow ref would have to be the agent's doing (a per-turn "record a snapshot" instruction), or the invariant relaxed. This tension is why it is deferred.
+A possible upgrade makes the metaphor literal: mirror each completed turn as a commit on a hidden ref (`refs/sprig/<session>`), one commit per turn, so attribution and revert come free from git. Costs to weigh first: isolating the user's own uncommitted changes from the agent's, and per-turn snapshot overhead. Under the instruction invariant below, Sprig cannot run this git machinery itself, so even the shadow ref would have to be the agent's doing (a per-turn "record a snapshot" instruction) or the invariant relaxed. That tension is why it is deferred.
 
 ### Marks as the universal primitive
 
 Marking is the one gesture everything composes through, the way Magit's region-and-stage selects hunks.
 
 - Marking is the index. `c c` attaches whatever is marked as the context of the next message: a hunk, a plan step, a tool result, a paragraph.
-- Marks also drive **actions on the transcript**, with the verb section-type-aware. `c c` is type-agnostic. Type-specific verbs act on the applicable subset: `k` rejects marked hunks (instructs the agent to undo them, see below), `RET` visits, `x` runs a marked code block.
+- Marks also drive **actions on the transcript**, with the verb section-type-aware. `c c` is type-agnostic. Type-specific verbs act on the applicable subset: `k` rejects marked hunks (instructs the agent to undo them), `RET` visits, `x` runs a marked code block.
 - Verbs marks unlock: re-send a marked past user turn as a fresh turn (`c r`, no history rewrite); mark a hunk then `c c` to frame the message as "about this change" with the hunk inlined, so reviewing-by-replying is one gesture.
 
 ### Sending is committing
@@ -48,7 +48,7 @@ There is no input area. Sending mirrors Magit's commit gesture. `c` opens a tran
 - `c c` compose and send, which **steers a turn already in flight**. Pops a dedicated `SPRIG_MSG` buffer: your prose on top, a commented preamble below showing exactly what context is attached and what the agent last said, the way `COMMIT_EDITMSG` shows the diff. `C-c C-c` fires, `C-c C-k` aborts. You never guess what you sent. The CLI's stdin stays open across a turn, so a message sent into one is handed to the agent at its next tool-call boundary: it changes course inside the same turn, with no interrupt and no restart. This is what makes watching a turn worthwhile rather than merely tense; the choice on a turn going wrong stops being "let it finish" or "kill it". With no turn running, the same verb opens one. There is deliberately no separate steer verb: whether a turn happens to be running is the transport's business, not a distinction the user should have to hold in their head and press a different key for.
 - `c q` compose and queue, held until the running turn ends and then sent as a turn of its own. The counterpart to `c c`, and what makes it safe to merge steering into it: `c c` is for the correction worth interrupting the agent's train of thought for, `c q` for the follow-up that is not. Without `c q` the merge would leave nothing that means "not now", and `c c` mid-turn would have to keep refusing, which is the worst of the three answers.
 - `c Q` drop the queued messages, leaving the turn to run. Deliberately not folded into `c i`, which sends them: a queued message is the next thing, not the rest of this thing, so stopping the turn does not unmake it, and interrupting with one queued is the useful "stop, do this instead". That leaves `c Q` as the only way to take a queued message back, which it has to be anyway: nothing was sent, so there is nothing to steer or interrupt, and without it a queue would be a thing you could start and never stop. Stopping the turn and meaning it is then `c Q c i`, two gestures that each say one thing, rather than a compound verb that says two.
-- `c p` send in plan mode (the agent must return a plan, not act).  The plan comes back as a dialog in the buffer, rendered in full: you read it where it is, then `a a` approves or rejects it. The one verb that still refuses mid-turn: it sets the permission mode first, so it cannot fold into a turn running under another one.
+- `c p` send in plan mode (the agent must return a plan, not act). The plan comes back as a dialog in the buffer, rendered in full: you read it where it is, then `a a` approves or rejects it. The one verb that still refuses mid-turn: it sets the permission mode first, so it cannot fold into a turn running under another one.
 - `c r` retry or re-send.
 - `c i` interrupt the streaming turn.
 
@@ -56,26 +56,18 @@ There is no input area. Sending mirrors Magit's commit gesture. `c` opens a tran
 
 The plan comes back as a markable section tree. Navigate, `TAB` to expand a step, `SPC` / `m` to mark a subset. Annotate a marked step inline ("do this, but keep the old names"). Sending returns a *structured* review: approved steps in order, each with its note, the rest rejected. Plan review becomes staging, not a pasted paragraph of feedback.
 
-### Store versus view
-
-A read-only projection no longer needs the file to double as the editable surface, so store and view separate. The buffer becomes a pure render of an append-only event log.
-
-The endgame resolution: **that log already exists, and sprig does not own it.** The `claude` CLI persists every session as JSONL under `~/.claude/projects/<cwd>/<session-id>.jsonl` on the host where it runs, where `<cwd>` is the working directory with each `/` and `.` turned into `-`. For a remote session that file is on the SSH host, so the store is durable and remote-side with no work from us. A review buffer replays full history by reading that file and mapping its records onto the shared event vocabulary (`sprig-review-session-model`), the store counterpart of the wire parser. The log is really a tree (records link by `uuid`/`parentUuid`) and subagent transcripts are flagged `isSidechain`; v1 reads the main thread and skips sidechains.
-
-So sprig keeps essentially no local store: just a pointer (session id plus cwd) to locate the file, and even that the navigator could rediscover by scanning the projects directory. The `sprig:` sentinels and the edit guard, which existed only to make an editable Markdown file safely re-parseable, lose their reason to exist. Markdown becomes at most an *export*, not the live truth.
-
-### Sprig sends instructions, the agent acts
+## The invariant: Sprig sends instructions, the agent acts
 
 The governing invariant: **Sprig never touches the repository itself.** Every effect on the working tree is mediated through the agent over the stream-json channel that is already open. Review verbs compile to instructions, not local git commands.
 
 - **Reject a hunk** (`k`): an instruction to the agent to undo that change, not a local `git apply -R`. Batch with marks: mark the bad hunks, `c c`, "undo these", one turn.
 - **Accept changes**: keep them and clear the review state. A local acknowledgement, no side effect, no commit. Accepting never triggers a commit.
 - **Commit** is a *separate* verb: an explicit instruction to the agent to commit the changes. Kept distinct from accept so accepting can never surprise you with a commit.
-- **Ground truth diff** (the phase-2 git source) also comes from the agent running `git diff` and reporting it, not from Sprig shelling out.
+- **Ground truth diff** (source 2) also comes from the agent running `git diff` and reporting it, not from Sprig shelling out.
 
 Two consequences fall out for free:
 
-- **Remote works from day one.** Nothing Sprig does needs a local or TRAMP git process, because the agent already sits on the repo's host. Sprig only ever sends text down the channel it already has. This is why the design targets SSH from the start rather than bolting it on. It also retires the earlier "drop into `magit-status` to commit" seam, which never worked cleanly against a remote repo.
+- **Remote works from day one.** Nothing Sprig does needs a local or TRAMP git process, because the agent already sits on the repo's host. Sprig only ever sends text down the channel it already has. This is why the design targets SSH from the start rather than bolting it on.
 - **Reject is a steer, not an instant revert.** Rejecting costs a round-trip, since the agent does the undo. Marking makes it a batch, but it is still a turn, not a local `git checkout`. That is the honest tradeoff for the invariant.
 
 ### Verbs are canned instructions
@@ -84,13 +76,13 @@ There is no separate execution engine. Every type-specific verb is sugar over `c
 
 - `k` reject = the marked hunk plus a canned "undo this".
 - commit = a canned "commit these changes".
-- `x` run = the marked code block plus a canned "run this". In v1: it needs no new machinery, it is the same shortcut as `k` and commit with a different pre-filled instruction, so there is no reason to defer it.
+- `x` run = the marked code block plus a canned "run this".
 
 The payoff is that the model stays tiny. Sprig does exactly one thing, send an instruction with attached context. The verbs are pre-written messages, not special paths, so a new shortcut is cheap and there is no code executor to build or secure.
 
 ### Scope discipline
 
-v1 does not replicate Magit. Diff sections support **visit** (`RET`), **reject** (`k`, an instruction to undo), **accept** (keep and clear the review state), **commit** (a separate explicit instruction), **run** (`x`, an instruction to run a marked code block), and **mark**. The job is to review and steer agent work efficiently, not to be Magit and not to do git.
+The review buffer does not replicate Magit. Diff sections support **visit** (`RET`), **reject** (`k`), **accept** (keep and clear the review state), **commit** (a separate explicit instruction), **run** (`x`), and **mark**. The job is to review and steer agent work efficiently, not to be Magit and not to do git.
 
 ### Verb dispatch on mixed marks
 
@@ -102,203 +94,100 @@ Only *type-specific set verbs* (`k` and `x`) face this. `c c` is type-agnostic, 
 
 In one sentence: type-specific set verbs act on the applicable subset, report and (for destructive ones) confirm on a mixed set, and consume only the marks they touched.
 
-### Build progress
+## Navigator mode (mixed-initiative)
 
-- **Done (2026-07-13):** the data foundation and the renderer.
-  - `sprig-review.el` (pure, offline-tested): the tool-payload diff engine (`sprig-review-tool-changes`) reconstructs per-file, per-hunk changes from `Edit` / `MultiEdit` / `Write` payloads, with add/remove stats and a unified-diff formatter; the review model (`sprig-review-build`) folds the transport event vocabulary into an ordered block model (coalesced assistant text, tool calls with reconstructed changes and paired results, errors). Reuses sprig.el's transport, needs no live session or git.
-  - `sprig-review-mode.el`: a read-only `magit-section` major mode that projects the model into rows, a metadata header, assistant prose, tool calls whose file changes render as a foldable coloured diff with their (folded) result. Each section carries its model plist on the `value` slot, so the verbs can read the object under point without re-parsing. Its ERT suite loads magit-section and runs separately from the process-free suite.
-  - Packaging: `magit-section` declared in `Package-Requires`; the Emacs floor moved to 28.1 to match. magit-section and its deps (`compat`, `cond-let`, `llama`) are vendored under a gitignored `.deps/` for offline byte-compile and tests only.
-  - Live sink: `sprig-review-consume` folds each transport event into the buffer's accumulated model and re-renders, the counterpart of the Markdown sink's `sprig--dispatch`. Re-rendering from the whole event list keeps the buffer a pure projection; magit-section's visibility cache preserves user folds across the refresh and point is carried to the same section. Offline-tested (incremental build, fold and point preservation, reset).
-  - Store reader: `sprig-review-session-model` replays the CLI's stored session JSONL (see "Store versus view") into the model, skipping subagent sidechains. The model and renderer gained `user`, `thinking`, and `title` blocks, since the log carries them. Validated against real logs (a 480-line session reconstructed 42 hunks from 39 Edits and 3 Writes). This settles the store-vs-view split: history comes from the CLI's own log, not a sprig store.
-  - Entry command: `sprig-review` (`C-c C-a C-r`) locates the session log by id under `~/.claude/projects` on the session host (local, or `ssh find` + `cat` when `sprig-remote`, so the cwd encoding never has to be reproduced), replays history into a read-only review buffer, and attaches it (`sprig--review-buffer`) so `sprig--handle` tees the live turn in, including the user's own turn on send. Validated end to end against a real local session.
-  - Streaming cost: a full re-render is O(conversation) (~135ms on a 340-block session), so streamed text deltas append in place at a tail marker (~0.015ms each, size-independent) instead of re-rendering, and only structural events (tool call/result, user turn, done) trigger a render, coalesced by a short timer (`sprig-review-refresh-delay`). The open text block renders raw so the fast path and a later rebuild agree. Over half of that full render was redundant markdown font-lock: every settled prose block was re-fontified on every structural render though only the streaming block's text had moved, so the fontified form is now memoised on the block text (`sprig-review--fontify-cache`), which halves the render on a long history (a 340-block session's structural render drops from ~680ms to ~245ms once the cache is warm). What is left is the magit-section re-insert itself, still O(conversation), so the coalescing timer now adapts rather than firing flat: the wait widens toward the last render's measured cost (`sprig-review--last-render-cost`), floored at `sprig-review-refresh-delay` and capped at `sprig-review-refresh-delay-max`, so a heavy render is never re-armed before it has drawn and at most half a busy turn goes on rendering. Residual: incremental section append (render only the new turn), the real O(turn) fix, is the next step if it bites.
-  - Marks and verbs: marking (`SPC`/`m`) is the one selection primitive; a verb acts on the marked sections, or the section at point when none are marked, and marks survive a re-render (stored as idents). Every change-touching verb is a canned instruction routed through the conversation by `sprig--send-text`: `k` reject (undo hunks), `x` run (re-run a command), `C` commit, `a` accept (clear marks, no send). `c` is a transient: `c c` compose-and-send (a compose buffer that attaches marked context), `c r` resend, `c i` interrupt. Instruction builders are pure and tested; each verb's extract-build-send path is tested with the send stubbed and validated against a real session.
-  - Visit and retitle: `RET` visits the file a hunk/change/file-tool section points to, over TRAMP when the session is remote (the destination is captured at attach), best-effort jumping to the first changed line. `t` retitles, updating the header and the conversation's `title:` frontmatter.
-  - Plan mode: `c p` composes and sends a turn in plan mode. Investigation confirmed the CLI switches permission mode mid-session over the stream-json stdin via a `control_request` (`set_permission_mode`), acked with a `control_response` and a `system/status` echoing the mode (verified against 2.1.207, and a real session mixes auto/plan). `c p` sends that control request before the turn; a plain send returns to auto, so plan is one-shot-sticky. The transport surfaces `system/status` as a `mode` event, shown in the header when not auto, and replayed from the log's per-turn `permissionMode`.
-- **Done (2026-07-14):** the review buffer is now the *only* conversation surface (option A: CLI sessions are the branches). The transport became buffer-agnostic (a per-buffer `sprig--sink`, a shared `sprig--spawn`), so a review buffer owns its session outright: `sprig-review-session` opens one that starts or resumes a session with no Markdown behind it, and its verbs steer it directly. The navigator was repointed off `.md` files onto the CLI's stored session logs, listing them per project directory with titles from each log's `ai-title` record and the last-reply preview read from the log tail. `sprig-mode` and the whole editable-Markdown surface (chrome, folding, sentinels, the Markdown sink, the frontmatter store, auto-titling) were then deleted, along with the rename / prune navigator verbs (the CLI owns the log and its title, so steering them would break the "never touch what it doesn't own" invariant). `sprig.el` dropped ~1300 lines.
-- **Done (2026-07-16):** graceful interrupt. `c i` sends an `interrupt` control request over the same stdin channel, so the CLI aborts the turn and ends it with a `result`; the turn closes through the normal `done` path and the process stays live, needing no `--resume` on the next send (the old behaviour killed the process). Two fallbacks keep it from hanging when the CLI cannot honour it: the CLI's `control_response` receipt is matched by request id, and an error receipt kills the turn the hard way at once; a timer (`sprig-interrupt-timeout`, default 5s) catches the case where no receipt and no `done` ever arrive. `done`, teardown, and a settled interrupt all clear the outstanding state.
-- **Done (2026-07-16):** the todo list reads as a checklist. A `TodoWrite` tool call, which otherwise folded to a bare heading with a bookkeeping result, now shows the agent's plan of work: the heading carries the progress count (`2/5 done`, the way a diff heading carries its line counts) and the body renders the checklist itself, each item marked completed (struck through), in progress, or pending, in place of the reminder the tool returns. Rendering-only, off the tool-call payload already in the model; no protocol work.
-- **Done (2026-07-17):** session lifecycle gets a prefix of its own. `c` steers the conversation a buffer already owns, so the verbs that *start* one moved under `s`: `s n` opens a fresh conversation in this session's directory, `s f` forks this one. Forking is a reversal of the pivot's "the user never forks" call, and is deliberately the shape the CLI actually supports: `--resume <parent> --fork-session` carries the replayed history on under a new id, so it branches from where the conversation stands rather than from point, and the parent's log is never written to again. Two things make it work rather than quietly resume the parent: the fork's buffer must be uniquified (it holds the *parent's* id until the CLI answers, so it would otherwise reuse — and stomp — the very buffer it forked from), and `sprig--review-sink` must take the CLI's new id *over* the parent's and clear the flag, since the old "only capture an id when we have none" rule would have kept the parent id and re-forked on every later send.
-- **Done (2026-08-03):** the navigator lists both hosts, grouped. `sprig-remote` was a single global switch: the navigator scanned exactly one host, so seeing the other side meant a `setq` and a refresh, and a `C-u s` local session dropped off the list the moment its review buffer was closed (its log being on the wrong host to scan). It now scans every host in `sprig--status-hosts` (the local machine, plus `sprig-remote` when set) and heads each group, `local` and `remote HOST`, with its count. Three things had to change under that. Rows key on the host *paired* with the session id, because an id is only unique on the host that issued it. The scan and everything it reaches keys off `sprig-remote`, so a pass binds it rather than threading a host through six functions. And opening a row now pins its buffer's `sprig--remote-override` to the host the row came from, rather than leaving it `inherit`: a session only resumes where its log is, and with both hosts listed the row's host and the global are routinely different. That pinning is what `sprig-review-session`'s third argument became (a string is a destination, any other non-nil value is local, nil still inherits), which also fixed `s n` and `s f` quietly bringing a locally-forced session back onto `sprig-remote`. The payoff is that `s` needs no prefix argument to choose a host: the group point is in decides, which is why an empty group is still headed. Cost: every refresh now scans both hosts, so the remote round trips are paid whether or not you are looking at that group.
-- **Done (2026-08-03):** the inline preview shows the last exchange, not just the last paragraph. `TAB` on a row expanded to a single collapsed paragraph, the tail of the agent's final text block, which is too little to tell what a session is doing without opening it. It now shows the last user prompt as a lead line and the agent's whole reply since it: every text block after that prompt joined (so prose split by a tool call reads whole), each paragraph collapsed for re-wrapping but the paragraph breaks kept, and the reply shown in full by default. `sprig-status-preview-max-lines` (once 3, then a raised default, now nil) bounds the prompt and reply together only when set to a number, cutting the reply with an ellipsis; nil, the default, shows the whole reply however long, since the point of expanding a row is to read what a session actually said. When the newest turn carried no prose of its own (it ended on a tool call or a question), the reply falls back to the last assistant text anywhere, so the preview is never blank over a busy session. The prompt lead is weighted (`sprig-status-preview-prompt`) so it reads as the question the reply answers rather than more of the reply.
-- **Done (2026-08-03):** the navigator steers a session without opening it. Answering a question or sending a message meant `RET` into the buffer first, then the verb; with both hosts listed and several sessions waiting, that is a lot of round trips. The navigator's `c` and `a` are now the review buffer's own `c`/`a` transients, each acting on the session under point: `c c` composes for it, `c y`/`c n` answer yes/no, `a a` answers its structured question, and so on. The mechanism is a thin wrapper per verb (`sprig--status-steer`) that resolves the row's review buffer and runs the real review command there with `call-interactively`, so there is one implementation of each verb, not two. The buffer is built undisplayed when the session is not already open (`sprig-review-session` split into a builder that returns the buffer and a thin command that pops it), so steering from the list stays in the list: only the verb's own compose or answer buffer shows, and it sends back to the undisplayed review buffer just as it would to a visible one. The change-touching verbs (reject, commit, run) are deliberately left out of the navigator: they act on a diff section, which a session row is not. Connect, which `c` alone used to be, is now `c o`; `k` and `d` stay as quick single keys.
-- **Done (2026-08-03):** a host group folds to its heading. With both hosts listed, a busy remote can bury the local work you came for, so `TAB` on a heading collapses that group and expands it again, the way `magit` folds a section (`▾` open, `▸` collapsed). It reuses the walk that already heads groups: a collapsed host keeps its rows in `sprig--status-index` but contributes none to `tabulated-list-entries`, so they simply do not print, while the heading still counts them (`▸ remote HOST (12)` says what is hidden) and a later unfold finds them again. Two small things earned their keep. The heading carries a `sprig--status-heading` property, which is what lets one `TAB` command tell a foldable heading from a session row (a row toggles its reply preview, a heading its group) without a second binding. And the toggle re-lands point on the heading itself: `tabulated-list-print`'s point-restore keys off the row id under point, and a heading has none, so left alone it would strand point after a fold; instead the fold state is the navigator's, held buffer-local so it survives a background refresh's reprint.
-- **Done (2026-08-03):** the inline preview renders markdown and dates the exchange. The reply came through as raw prose, so a `**bold**`, a `## heading`, or a `` `code` `` span showed its markers rather than the formatting they stand for, and there was no sign of *when* the exchange happened. The reply now fontifies through `markdown-mode` (gated on `sprig-status-preview-markdown`, mirroring `sprig-review-fontify-markdown`): it is filled in a hidden markdown buffer, the markup characters markdown marks invisible are deleted so `**`/backticks neither show nor eat width, and `sprig-status-preview` is under-laid so plain prose stays muted while bold, headings, lists and code keep their markdown faces. It matches the review buffer by construction, down to markdown keeping header hashes and list bullets visible while hiding emphasis markers. Two things had to give. The reply is no longer collapsed to prose before it reaches the preview (`sprig--tidy-prose` replaces `sprig--normalize-prose` in `sprig--events-preview`), since collapsing a list to one line is exactly what markdown needs the newlines to avoid; the plain-text fallback still collapses, so a box without markdown reads as before. And the exchange's time rides an outer `Time` column on the row itself (the log's mtime, already scanned and what the list sorts by), formatted today-as-a-clock and older-as-dated, so it stays visible with the preview collapsed rather than only inside the expanded lead line where it first lived. That column is also what the list sorts by, newest first, by default: `sprig-status-sort` (bound to `S`, and to a header-line click) orders rows *within* each host group by a column and flips the direction on a repeat, so the groups never intermix. Native `tabulated-list` sort could not do this (it reorders the whole list by one column, which would scatter the groups its headings depend on), so the columns are left unsortable to it and the sort is the navigator's own: a buffer-local `(column . descending)` applied in `sprig--status-sort-rows` ahead of the stable group sort, with the header click falling through the dead native button to `sprig-status-sort`. A live session with no log yet has no mtime and sorts to the top, since it is the freshest thing there is. The expanded preview lines also carry their row's session id as a text property, so a verb keyed on point (`c c`, `a a`, `TAB`) resolves the same session from inside the preview as from the row: `tabulated-list-get-id` has it on the printed row, and `sprig--status-id-at-point` falls back to the property everywhere the row's id was read. The preview now leads with a state line mirroring the review buffer's own (`✓  turn over  ·  134.0k`): its live streaming and waiting states come from the row's `:status` (the same signal as the row glyph), while the turn's outcome (`:done`/`:error`) and context size ride out of the model, which `sprig--events-preview` now surfaces alongside the exchange. It is built with `face`, not the review buffer's `font-lock-face`, since the navigator is a `tabulated-list` buffer with no font-lock to honour the latter.
-- **Done (2026-08-03):** the review render stops re-fontifying settled prose. A structural render rebuilds the whole buffer from the model, and profiling put over half its cost in one place: every prose block was pushed through `markdown-mode` font-lock afresh each render, though a settled block's text never changes and only the streaming block's text has moved. The fontified string is now memoised on the raw text (`sprig-review--fontify-cache`), so a settled block is fontified once and handed back on every later render (the result carries text properties, but `insert` copies them into the buffer, so returning the same object is safe). On a 340-block session a warm structural render drops from ~680ms to ~245ms, and the floor it lands on matches fontification turned off entirely, which is the proof the redundant pass is gone. The cache keys on text alone and carries the `sprig-review-fontify-markdown` value it was built under, clearing itself when that flag is toggled, since the flag changes the output. What is left is the magit-section re-insert, still O(conversation), and rather than reach straight for the harder incremental-append rewrite, the coalescing timer that batches structural events now adapts to that cost: it waited a flat `sprig-review-refresh-delay` (0.1s) whatever the buffer, so on a long history a 250ms render was re-armed a tenth of a second after it drew, stacking renders and leaving a busy turn janky. The wait now widens toward the last render's own measured time (`sprig-review--last-render-cost`), floored at that 0.1s and capped at `sprig-review-refresh-delay-max` (0.5s), so a cheap buffer keeps the snappy floor, a heavy one never fires again before it has finished drawing, and at most half a turn goes on rendering with the rest left responsive. The cost is bounded latency: a structural update can land up to the cap late on a huge session. Incremental append (render only the active turn, O(turn) not O(conversation)) is the real fix and the next lever if it still bites; it is the harder, riskier one, so it waits.
-- **Done (2026-07-17):** an `Agent` row holds its subagent's whole run. The steps nest inside it rather than joining the transcript, which is the point: they are the subagent's work, not the main agent's, and the old behaviour proved what mixing them costs. A step is modelled as an ordinary tool block, so it renders through the same code and gets a real diff when the subagent edits a file, and it folds the same way, so opening an `Agent` lists what it did without dumping the lot. Steps arrive by two routes and needed both: live they stream in tagged with `parent_tool_use_id`, but the session log mentions none of it, so a replay reads them back from the subagent's own file (`<session-id>/subagents/agent-<task-id>.jsonl`, with a `.meta.json` naming the `Agent` call it ran under). Without the replay half a refresh would erase the work you had just watched. That second route forced one design change: replayed steps fold in after the whole transcript, by which time the `Agent` call has its result, so the fold finds its row by id rather than by the "open tool" rule that pairs a result with its call. Remote sessions replay without steps and are documented as such: their log is read by shell over SSH rather than opened by path, so there is no name to find the files beside it by.
-- **Done (2026-07-17):** the `Agent` row narrates its subagent. Probing a real subagent run corrected the premise twice over. The tool is `Agent`, not `Task`; `isSidechain` is never true in a main session log, so the reader's sidechain skip was dead code guarding a shape that only appears in files it never opens; and a subagent's work was not merely invisible but *leaking*, because its own tool results arrive as top-level `user` records and were folded into the main transcript as loose, nameless rows (its `tool_use` comes as a top-level `assistant` record, which carries no deltas and so is never read, leaving every result an orphan). Those are now dropped by their `parent_tool_use_id`. What replaces them is the CLI's own subagent protocol, which nothing was reading: `task_started` / `task_progress` / `task_notification`, all keyed by `tool_use_id`, i.e. the `Agent` call already on screen. So progress lands on the row the reader is looking at: `Agent  Find note.txt contents  ▸ Explore: Reading note.txt`, moving as it works and falling quiet once the report lands. The state is live-only and correctly so: the CLI narrates a subagent but writes none of it to the session log, so a replayed `Agent` call has no progress and needs none, the work being over and its report sitting in the tool result. Deliberately dropped: `task_updated` (routes by `task_id` alone, with no row to hang it on, and says nothing `task_notification` does not), the notification's `summary` (the same prose arrives as the tool result, so keeping it would print it twice), and the token/tool counts (noise next to a description that moves).
-- **Done (2026-07-17):** `c s` folds into `c c`, and `c q` queues. The end of the trend `c x` / `c k` started: `c s` was already a strict superset of `c c` (steering falls back to a plain send when no turn is running), so the pair differed only in what they did mid-turn, and the difference was a trap. `c c` mid-turn refused, but `sprig-review-compose-send` killed the compose buffer before the send could signal, so the refusal ate the composed prose and left an error naming the verb you could no longer reach with it. Sending now precedes `quit-window`, so a refusal leaves the buffer and its text alone. What made the merge safe rather than merely simpler is `c q`: the honest reading of the old refusal was "not now", and without somewhere for that to go, merging would have removed the answer along with the question. So the pair is now `c c` say it now (steer, or open a turn) and `c q` say it when this turn ends, one queued message per turn, shown as `N queued` on the state line. `c i` sends the queue, since an interrupt ends the turn through the same `done` a normal finish does, and a queued message is the next thing rather than the rest of this thing: interrupting with one queued is "stop, do this instead". Taking one back is `c Q`, which drops the queue and spares the turn; it is the only way, since nothing was sent and there is therefore nothing to steer. The queue is live transport state beside `sprig--busy`, never in the model: a pending message is not something the log records, so a replay must not resurrect it.
-- **Done (2026-07-17):** `c x` and `c k` steer rather than send. Both are corrections to the turn you are watching, so waiting it out to make them defeats the point: a command you want run is usually a correction to what the agent is doing now, and a diff hunk *lands while the turn is still running*, so a bad one wants calling out before the agent builds further on it. Both go down the steer path, which already falls back to a plain send when no turn is running. The verbs left as plain sends are the ones whose turn is over by definition: `c y` / `c n` answer a question the agent stopped to ask, and `c r` resends a finished turn.
-- **Done (2026-07-16):** the granular task tools fold into that same checklist. Some CLI builds have no batch `TodoWrite`; they drive the plan one task at a time through `TaskCreate`/`TaskUpdate`, whose calls carry only a single task each and whose new-task id comes back in the result, not the call. `sprig-review-build` folds that stream into a running task list (learning each id from its create result, applying updates and deletes in place) and snapshots it as a `tasks` block, rendered through the `TodoWrite` checklist path. A run of adjacent task ops coalesces into one snapshot; a non-task block between them opens a fresh one, so the checklist reappears wherever the plan next moved. This is the variant the current CLI actually emits (it has no `TodoWrite`), so it is what lights the checklist up in practice.
-- **Done (2026-07-16):** the navigator flags a session stopped on you. `sprig-status` grows a `?` (`waiting`) status glyph, shown when an owning buffer has a dialog still unanswered (an `AskUserQuestion`, plan approval, or permission prompt), so a question raised in a session you are not viewing surfaces in the list. It wins over `streaming`, since the turn is not working but stopped on you, and it clears when the dialog is answered; a `dialog` / `dialog-answer` event refreshes the navigator so the glyph tracks the state line's `? waiting on you`.
-- **Next:** finer `x` granularity (a code block inside prose, not just a tool command), the richer markable plan-tree review from the design's plan-mode section. Optional: incremental section append for the large-history structural render.
+The second posture, and the answer to the ownership crux named under *What Sprig is*. Pure after-the-fact review of the agent's edits invites rubber-stamping, and rubber-stamping is how understanding and ownership erode. The literature on automation bias and overreliance names the failure; pair programming names the fix, which is to rotate roles and give the navigator an explicit job. So Sprig gains a role you toggle. In the default **driver** posture the agent drives and you review its edits, as everything above describes. In the **navigator** posture the roles rotate: you write the code yourself, and the agent's job is feedback on what you wrote, not edits of its own.
 
-## Architecture
+The inversion is clean because it flips the *subject* of the buffer, not its machinery. In the driver posture the subject is the agent's edits, reconstructed from tool payloads. In navigator mode the subject is your working-tree diff, which is exactly source 2, "ground truth via git", now made central. The agent obtains it the invariant-respecting way, by running `git diff` itself, and Sprig parses that Bash result into the same foldable hunks the tool-payload path produces. Feedback then renders as prose anchored to those hunks, and marks compose as ever: mark a hunk of your own diff, `c c`, "is this the right approach?".
 
-> **Historical.** The subsections below describe the pre-pivot editable-Markdown model, which has been removed (see "Current direction: the review buffer" above, now fully shipped). They are kept for the rationale, not as a description of the current code.
+**The wall is the permission function, not a request.** Navigator mode sets the session's `sprig-permission-function` to auto-deny `Edit` / `Write` / `MultiEdit` / `NotebookEdit`, so the agent physically cannot write code. This is the anti-laziness lever: "you must write it yourself" is enforced by the mode, not left to discipline. A `--append-system-prompt` line reinforces it, telling the agent it is the navigator, must not modify files, and should give hints rather than whole solutions (the triadic "withhold the solution" pattern). The agent keeps `Read`, `Grep`, `Glob`, and `Bash`, so it can see and reason about your work without touching it. Known gap: `Bash` is an escape hatch (`sed -i`, `echo >`), so the wall is belt-and-braces (deny the edit tools *and* instruct), not airtight; tightening it is a later slice.
 
-Two surfaces, cleanly separated.
+**Feedback is on demand, never proactive.** The trigger is a verb, not a watcher. You write, then you ask. This is the Horvitz rule that invited proactivity keeps the user's sense of control, and it is also the cheapest to build and the least token-hungry. A canned "review my changes" verb, in the family of `k` / `x` / `C`, attaches your working-tree diff (or the marked subset of it) and asks for feedback. On-save and on-green boundary triggers, and any continuous watching, are explicitly out for navigator v1.
 
-### The conversation is a plain Markdown file
+**Rotation is the mixed-initiative control.** The role toggle is one keystroke and shows in the metadata header beside the permission mode, the way plan mode's status already shows there. Getting the agent to write again is a deliberate flip back to driver, so the rotation is the discipline: there is no "just do it" that quietly relaxes the wall. Role is Sprig-side live-session state; the CLI log does not carry it, so it is not persisted, and a reopened session defaults to driver.
 
-- One *branch* is one Markdown file, a plain linear transcript.
-- You *edit it directly*: type your turns, the agent streams its replies in.
-- No in-file tree, no nesting, no drawers-as-branches. A long conversation stays a flat, readable file.
-- The model emits Markdown, so its output lands with zero conversion. This was the "models emit Markdown, not Org" friction; it is gone.
+### Authoring through staging buffers
 
-### A branch can start in memory
+Where the navigator actually writes code is the crux on a remote host, and it forces the mechanism. `RET` visits a file over TRAMP, read-only. If navigator mode let you edit that TRAMP buffer and save, Emacs itself would write the remote file, which breaks the invariant that only the agent touches the repo, and TRAMP editing is laggy besides. So the navigator never edits a file in place. You author in a local, non-file-backed **staging buffer**, and the agent is the courier that puts the bytes on disk. Editing is pure local Emacs, instant and in the correct major mode; the only remote traffic is the agent reading the region and writing it back, both over the stream-json channel already open. This is uniform: local sessions stage the same way, so there is one model and the invariant stays pure on both paths. Direct file editing outside Sprig remains available locally for those who prefer it, with the agent picking the change up from the working tree.
 
-A branch does not need a file to exist. A branch is defined by `sprig-mode` being on in a buffer, not by `buffer-file-name`. `sprig-new` opens a *scratch branch*: a live conversation in an unsaved buffer. It connects, streams, titles, and shows up in the navigator like any other branch, because all persistence (session id, title, working directory) is written into the buffer's frontmatter, which rides along the moment the buffer is saved.
+The loop:
 
-`sprig-save` writes a scratch branch to disk, defaulting the filename to a slug of its `title:` under a navigator scan directory. From then on it is an ordinary file branch. Saving is optional: a scratch branch you never save is a deliberate throwaway. To keep that from being a silent accident, killing an unsaved scratch branch that still holds a transcript or a live session asks first; an empty or already-saved buffer is killed without a prompt.
+- **Seed.** You target a region: mark a hunk or a symbol, or "let me edit `bar`". Sprig fills the staging buffer from the agent's `Read` result, which the model already parses, so there is no TRAMP read and no invariant breach. If the region is already in a recent `Read` in the transcript, seed from that with no round-trip; otherwise the seed costs one `Read` turn.
+- **Edit.** You change the buffer freely, offline and local.
+- **Apply.** Sending mirrors the `c c` commit gesture. Sprig records the exact target and content and instructs the agent to write precisely that.
+- **Review.** The change lands as a hunk in the working-tree diff, renders as your attributed change, and is now something you can ask the navigator to critique. Author, courier, review, in one loop.
 
-So the "one branch is one Markdown file" model holds for anything you keep, while a conversation can begin with zero ceremony, the Magit-scratch gesture: start now, name and file it later, or not at all. Forking (below) still produces files, since it copies frozen ancestry; scratch branches are only about deferring the file for a *new* root.
+**The agent is a courier that cannot tamper.** The apply verb is a narrow carve-out in the hard block: `Edit` / `Write` stay denied, except that the permission function approves the one resulting write whose payload matches the staging buffer byte-for-byte, and denies any deviation. The permission function already inspects every tool payload, so this reuses what exists, and it gives the courier side the same enforced guarantee the hard block gives the author side: the human writes every byte, and the agent transcribes without being able to edit under cover of transcribing. Trusting the instruction instead would be less build, but it would reopen exactly the authoring gap the mode exists to close, so the equality check is part of navigator v1, not a later hardening.
 
-### The structure is a forest of files
+**Region maps to `Edit`, whole-file to `Write`.** The primary case is a region: the section the agent presented is the `Edit` `old_string`, your edited buffer is the `new_string`, and Sprig holds both and builds the exact call. A useful property falls out, that if the file drifted since the seed read, `old_string` no longer matches and the write fails safely, which is the correct outcome. A new file or a full rewrite is a `Write` of the whole buffer, simpler but with no staleness guard, so region editing is preferred where it applies.
 
-- A *directory* is the forest: a set of branch files plus their fork links.
-- *Forking copies a file* up to the fork point, then the copy diverges. The frozen ancestry is inlined into the new file, so each file is a complete, standalone transcript.
-- Fork links live in each file's YAML frontmatter (`parent:`, `forked_at:`, `id:`). The navigator reconstructs the forest from these.
+### The staging buffer is a change set
 
-### The navigator is Magit for Sprig state
+A staging buffer holds regions from several files, not one. The case for it is the navigator's real job: an implementation usually spans files, and identifying the touch points, then narrowing each to the region that actually changes, is the strategic framing the agent should do so the human can write in one place. So the staging buffer is a **change set, not a file**: an ordered list of labelled regions, each tagged with its file and anchored to the `old_string` the agent presented, with read-only headers and editable bodies. The single-file buffer above is just the `N = 1` case, nothing special.
 
-A dedicated `sprig-status` buffer, built on `magit-section` and `transient`. It is a control surface over state, not a rendered chat.
+This rides the existing grammar rather than bolting on. The change set is the authoring dual of the multi-hunk review: you already assemble sets by marking across the transcript, so the region set is gathered the same way, and applying it is a verified batch the way `k` rejects a batch. Partial failure reuses the dispatch rule too. Each region applies as its own verified `Edit` (or `Write` for a new file), sequentially; if a region's `old_string` has drifted it fails and stays in the buffer while the rest land, reported per "act on the applicable subset, always report". There is no cross-file transaction, and drift is rare in navigator mode since only the user's own out-of-band edits can cause it.
 
-- Shows the forest of branch files: title or summary, status (idle / streaming / interrupted), fork edges.
-- Single-key transient verbs: open (jump to the file buffer), fork, new root, prune, interrupt, rename.
-- The files are the working tree; `sprig-status` is `magit-status`.
+Two tensions are worth naming rather than glossing.
 
-## Why this shape
+- **Scoping is the agent doing design.** If the navigator picks the regions, it quietly decides which files change, and a human filling in blanks the agent drew is a subtle re-entry of the anchoring the mode exists to fight. So the agent only *proposes* the region set; the human **curates** it, adding a file it missed, dropping one, resizing a region, and that curation stays a human design act. The buffer is a proposal to edit, not a fixed template.
+- **One buffer, many languages.** A single major mode gives syntax highlighting for free; a change set needs each region fontified in its own file's mode, which is polymode / mmm territory. Navigator v1 stance: best-effort per-region fontification with headers as chrome, and plain text is an acceptable fallback if it proves fiddly.
 
-- *Direct-edit Markdown* satisfies the wish for plain text files and dissolves the Markdown-vs-Org conversion problem.
-- *Fork by copy* inlines frozen ancestry, so context assembly collapses to "send the file". No recursive ancestor walk.
-- *One stream per file* makes concurrency and interrupt trivial and unambiguous, no marker registry inside a shared buffer.
-- *Complexity moves out of the text* into the navigator and the filesystem, keeping each transcript simple.
-- Branch comparison is a plain `diff` of two files.
+### The change set as dynamic literate programming
 
-## File format
+Seen from a distance, this is literate programming with the agent as the weaver. Knuth's *web* is one document ordered by the logic of the change rather than by file boundary, interleaving prose with code chunks; the *tangle* step extracts the code into real files. The change set is the web, the courier apply is the tangle, and the dynamic part is that the agent assembles the chunk set per task instead of the human maintaining a permanent literate source. The real files stay canonical, so this is a transient literate *view* over the code, not a replacement source format, which is what keeps it lightweight.
 
-A branch file is Markdown with YAML frontmatter:
+The concrete thing the lens buys is that the change set may interleave **prose chunks** with the code regions, not only code. The prose is the design intent and the running dialogue with the navigator, sitting next to the regions it explains. On apply only the code regions tangle to files; the prose never touches disk. It has a natural home instead, feeding the message to the navigator or the commit body, which folds straight back into "sending is committing".
 
-```markdown
----
-title: Chase the caching idea
-claude_session: 7f3a…            # CLI session id, for --resume
-sprig_tools: calls               # optional: none | calls | full
----
+The limit is worth stating so the analogy is not over-read: there is no counterpart to Knuth's *weave*, the published-documentation output, and the web is not canonical here, so this is literate programming as a workflow, not as a source format. The design should not be tempted into persisting the web.
 
-how should context assembly work?
+## Store versus view
 
-<!-- sprig:reply id=r1 -->
+The buffer is a pure render of an append-only event log, so store and view are separate. And that log already exists: **Sprig does not own it.** The `claude` CLI persists every session as JSONL under `~/.claude/projects/<cwd>/<session-id>.jsonl` on the host where it runs, where `<cwd>` is the working directory with each `/` and `.` turned into `-`. For a remote session that file is on the SSH host, so the store is durable and remote-side with no work from us. A review buffer replays full history by reading that file and mapping its records onto the shared event vocabulary (`sprig-review-session-model`), the store counterpart of the wire parser. The log is really a tree (records link by `uuid`/`parentUuid`) and subagent transcripts are flagged `isSidechain`; the reader follows the main thread and skips sidechains.
 
-You'd walk the transcript top to bottom…
-
-<!-- sprig:end id=r1 -->
-
-what about forks?
-
-<!-- sprig:reply id=r2 -->
-
-Each fork freezes its parent by copying…
-
-<!-- sprig:end id=r2 -->
-```
-
-- *User turns* are plain prose in the gaps. *Assistant turns* are the spans between a `sprig:reply` sentinel and its `sprig:end`.
-- Delimiters are inserted by `send`, not hand-typed. You type prose below the last reply; `send` opens a reply span and streams into it.
-- Each reply span carries a stable id (`r1`, `r2`, …) for references: fork anchors, status, and the interrupted flag.
-- Frontmatter holds the CLI session id and display settings today; the fork machinery will add branch identity and the fork link (`id:`, `parent:`, `forked_at:`).
-- A titleless branch is named automatically after its first exchange: a short throwaway agent run turns the opening user turn and reply into a `title:`, the same recipe the CLI uses to name its own sessions. A hand-written `title:` is left alone. This is what gives a scratch branch a real navigator name, and a good default filename, before it is ever saved.
-
-## In-file structure: sentinels, not prose
-
-Structure lives entirely in invisible HTML-comment *sentinels*, never in the prose. An earlier draft wrapped replies in `<details>` blocks so they would fold in Emacs and collapse on GitHub, but a tool that printed `</details>` (or any HTML) could forge the delimiter and break parsing. Moving structure into `sprig:` comment sentinels keeps agent output, which is arbitrary text, from ever being mistaken for markup. The consequence is that the files are for Emacs, not GitHub.
-
-The sentinel kinds, each an HTML comment alone on its line at column 0:
-
-- `<!-- sprig:reply id=rN -->` … `<!-- sprig:end id=rN -->` bracket one assistant turn.
-- `<!-- sprig:tool id=… name=… -->` … `<!-- sprig:tool-end id=… -->` wrap a tool call, its input in a fenced block between them.
-- `<!-- sprig:result id=… -->` … `<!-- sprig:result-end id=… -->` wrap that call's result.
-
-`sprig-mode` draws *chrome* over the raw sentinels so the buffer reads as chat, not markup:
-
-- Each sentinel line is hidden behind an overlay; a tool call shows a `🔧 name` header, a result an `↳ result` header, and a reply span a faint rule at its start and end.
-- Tool bodies fold to their header (`C-c C-f`); the full text stays in the file.
-- The user's own turns get a distinguishing face, so input reads apart from output.
-- A structural *edit guard* makes the hidden sentinels and any folded body reject interactive deletion, so a stray backspace at a boundary cannot silently corrupt the structure. Sprig's own writes opt out via `inhibit-read-only`.
-
-Because sentinels delimit everything, block boundaries are unambiguous no matter what the agent prints.
-
-## Tool activity in the transcript
-
-Tool calls and results render inline but are transcript-only: `sprig--turns` strips them from the assistant text it assembles, and the CLI keeps its own tool memory server-side, so they never feed back into the model. Results can be large, so `sprig-render-tools` sets how much is written: `none` (default: no tool blocks), `calls` (show each call, omit its result), or `full`. A file overrides the default with a `sprig_tools:` frontmatter line, set by `sprig-set-tool-display`. Because results are omitted at render time rather than hidden, the level applies to turns rendered afterwards.
-
-## Context assembly
-
-Read the file top to bottom, map user prose and reply spans to roles, strip each reply's tool and result blocks to leave the prose, send. That is the whole algorithm; `sprig--turns` produces exactly this role-tagged list. Forking froze the ancestry into the file already, so there is no ancestor walk. (Today's `claude` CLI transport keeps memory server-side and takes only the new user turn; the full-replay path that makes this literal is the deferred stateless backend.)
-
-## Interaction
-
-Core verbs, available from both the editing buffer and the navigator:
-
-- *send* - collect the file as a message list, stream the reply into a new reply span (a `sprig:reply`/`sprig:end` pair).
-- *fork* - copy this file up to the fork point into a new branch file, set frontmatter, open it.
-- *interrupt* - abort this buffer's stream (see below).
-
-Minor verbs:
-
-- *discard* - delete a reply block when the partial is junk.
-- *prune*, *rename*, *new root* - from the navigator.
-
-## Interruption
-
-Stopping a streaming reply is first class, mirroring the CLI "seen enough, stop, redirect" gesture. One stream per buffer makes this simple.
-
-- *Atomic abort.* Kill this buffer's stream and close the reply span cleanly with its `sprig:end` sentinel, so the file is never left half-written.
-- *Keep and mark the partial.* The truncated reply stays as a real turn, marked interrupted (`<!-- sprig:reply id=... interrupted -->`). Context assembly treats it as a normal turn, and the marker tells the model on the next send that its previous turn was cut off.
-- *Point drops to a fresh user turn* right after the partial, ready for an immediate redirect.
-- *Discard is separate*: interrupt keeps and marks, discard deletes.
-
-## Concurrency
-
-Many branches can stream at once, each in its own file and buffer. Emacs Lisp is single-threaded, so this is many async requests interleaving on the main loop, not true parallelism.
-
-- *One process per buffer.* No shared-buffer marker registry; each stream owns its file.
-- *Session-level registry* maps file to process so `sprig-status` can show which branches are live and route interrupt.
-- *Out-of-band status.* The navigator surfaces activity across files, so a stream finishing in a file you are not viewing is visible there. A mode-line indicator per buffer covers the focused case.
+So Sprig keeps essentially no local store: just a pointer (session id plus cwd) to locate the file, and even that the navigator could rediscover by scanning the projects directory. Markdown is at most an *export*, not the live truth.
 
 ## Modes
 
-- *Review buffer*: `sprig-review-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
-- *Navigator*: `sprig-status-mode`, a major mode on `tabulated-list`.
+- **Review buffer**: `sprig-review-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
+- **Navigator**: `sprig-status-mode`, a major mode on `tabulated-list`.
 
-## Deferred
+## Status
 
-- Merging or comparing branches beyond plain `diff`.
+Everything above the "Navigator mode" heading is **shipped**. Navigator mode itself is designed but not yet built; it is the next major slice.
+
+### Shipped
+
+- **Transport.** Parses the `claude` stream-json into a backend-neutral event vocabulary and routes it to a session-owning review buffer through a per-buffer sink. One process per session, local or over SSH (`sprig-remote`); several sessions can stream at once. Graceful `c i` interrupt over the same stdin channel, leaving the process live.
+- **Review buffer** (`sprig-review-mode`). Read-only `magit-section` render of the model. The tool-payload diff engine reconstructs per-file, per-hunk changes from `Edit` / `MultiEdit` / `Write`; file changes render as a foldable coloured diff with their folded result. Also renders assistant prose (markdown-fontified), thinking, a todo checklist (from `TodoWrite` and the granular `TaskCreate` / `TaskUpdate` stream), and `Agent` rows that nest a subagent's whole run and narrate it live.
+- **Store.** History is replayed from the CLI's own session JSONL (`sprig-review-session-model`), skipping subagent sidechains; Sprig keeps no store beyond the session id and cwd that locate the file.
+- **Marks and verbs.** `SPC` / `m` mark; a verb acts on the marked set or the section at point. `c` transient: `c c` steer-or-send, `c q` queue, `c Q` drop the queue, `c p` plan, `c r` resend, `c i` interrupt. `k` reject, `x` run, `C` commit, `a` accept, `RET` visit (over TRAMP when remote), `t` retitle. `s n` new conversation, `s f` fork (`--resume --fork-session`).
+- **Plan mode.** `c p` sets the CLI permission mode over stdin (`set_permission_mode`) for one turn.
+- **Navigator** (`sprig-status`). Lists the CLI's session logs per project directory across every host (local plus `sprig-remote`), grouped and foldable, with live status glyphs (including `?` waiting-on-you) and a markdown-rendered preview of the last exchange with a time column and sort. Steers a session from the list without opening it (`c` / `a` act on the row's session).
+- **Performance.** Settled prose fontification is memoised, and the structural-render coalescing timer adapts to the last render's measured cost.
+
+### Known gaps
+
+- **Thinking is replay-only:** the live stream parser has no thinking branch, so a turn's reasoning appears only on the next replay.
+- A change made by **`Bash` rather than `Edit` / `Write` leaves no diff**, since attribution is from tool payloads and the git ground-truth source (source 2) is deferred.
+- **`/model` and `/clear` have no live verb** (`sprig-model` feeds `--model` at spawn only).
+- A **remote** session's `Agent` rows replay without their subagents' steps: those transcripts are files beside the log, and a remote log is read by shell rather than by path, so there is no name to find them by.
+
+### Next
+
+- **Navigator mode**, the whole mixed-initiative design above: the role toggle and hard block, on-demand feedback on the human's `git diff` (which needs the ground-truth diff source), and the staging-buffer / change-set authoring surface.
+- The richer **markable plan-tree review** from the plan-mode section.
+- Finer **`x` granularity** (a code block inside prose, not just a tool command).
+- **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.
+- Drawing the **fork forest** in the navigator, now that `s f` makes forks real.
+
+### Deferred
+
+- Merging or comparing branches beyond a plain `diff`.
 - Summarising a long transcript to fit the context window.
-- Roles beyond user and assistant (system, tool).
-- Running code blocks: not Babel; a section or buffer action on a code block ("run this").
-- Reference-style forks (store only the divergent tail) if copy duplication ever bites. Copy is the default.
+- Reference-style forks (store only the divergent tail) if copy duplication ever bites.
+- Backend abstraction: a stateless messages backend would want the whole transcript replayed, where the `claude` CLI keeps memory server-side and takes only the new turn.
 
-## Open questions
+### Open questions
 
-- Backend abstraction: how thin an interface over different agent providers. The `claude` CLI keeps memory server-side and resumes by session id, so it wants only the new user turn; a stateless messages backend wants the whole transcript replayed. Fork-by-copy needs the replay path.
+- How thin a backend interface can be while spanning providers that differ this much on memory and resume.
 - Whether a subagent's work is reviewable or merely visible: `k` on a hunk a subagent wrote is an instruction to the *main* agent, which did not make the edit itself.
-
-Resolved: turn delimiting (invisible `sprig:` sentinels, chosen over `<details>` so agent output cannot forge a delimiter); tool-call representation (sentinel-delimited fenced blocks with header chrome and a render level); keybindings for the verbs (see the transient sections above); and how thinking is represented (its own block type, coalesced like text, rendered folded by default since it is verbose).
-
-Known gap, not a question: thinking renders on **replay only**. The log's assistant records carry `thinking` content blocks and `sprig-review-session-record-events` reads them, but the live stream parser has no thinking branch (it handles `text_delta` and `input_json_delta` alone), so a turn's reasoning is invisible while it streams and then appears on the next `g`. Beware when checking this against the logs in this repo's own project directory: they contain sessions *about* the protocol, so grepping them for wire shapes like `thinking_delta` finds sprig's own probe output rather than evidence the CLI emits it.
-
-## Build status
-
-- **Done:** the read-only review buffer is the whole conversation surface (see "Current direction" above for the detailed progress log). The transport parses the `claude` stream-json into a neutral event vocabulary and routes it to a session-owning review buffer; history and the store are the CLI's own session logs; the `sprig-status` navigator lists those logs per project directory with live status, titles, and last-reply previews (open / connect / interrupt / disconnect). One turn at a time per session, over the CLI (local or via SSH with `sprig-remote`); several sessions can stream at once.
-- **Next slice:** subagent visibility (the biggest hole: a `Task` call renders as a tool call with nothing inside it, see below), then richer plan-mode review and finer run granularity. The navigator's fork forest is still a flat list: `s f` made forking real again, so sessions now have a parent worth drawing, but nothing yet draws it.
-- **Known holes**, roughly in the order they bite: **thinking is replay-only** (see Open questions); a change made by **`Bash` rather than `Edit`/`Write` leaves no diff**, since diffs are attributed from tool-call payloads and git ground truth is deferred; **`/model` and `/clear` have no verb** (`sprig-model` is a defcustom feeding `--model`, but nothing changes it live); a **remote** session's `Agent` rows replay without their subagents' steps (those transcripts are files beside the log, and a remote log is read by shell rather than by path, so there is no name to find them by).
-
-## First build slice (as shipped)
-
-Context assembly plus send against one file: parse a Markdown branch file into a role-tagged message list, stream a reply into a sentinel-delimited reply span. It is the heart of the design and testable on a single file, with no navigator or fork machinery yet.
-
-## Superseded
-
-Earlier drafts put the whole tree inside one Org file: branches as headings, turns as `:reply:` drawers, `:FORK_FROM:` property anchors, and concurrent streams multiplexed into one buffer via markers. Replaced by one Markdown file per branch and fork-by-copy. Kept from that draft: the verbs (`send` / `fork` / `interrupt`) and the principle that a fork freezes its parent, now realized as a file copy.
