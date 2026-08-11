@@ -604,9 +604,9 @@ the fold learns the id from the result rather than from the call."
       (should (< (string-match "⤷ use B instead" s)
                  (string-match "⧖ and then commit" s))))))
 
-(ert-deftest sprig-review-mode-test-unqueue-takes-the-message-at-point ()
-  ;; Point on a floated `c q' message and `c u' drops just that one, leaving
-  ;; the rest of the queue in place.
+(ert-deftest sprig-review-mode-test-reject-unstages-the-queued-at-point ()
+  ;; `k' is the take-it-back gesture: on a floated `c q' message it drops just
+  ;; that one, leaving the rest of the queue in place.
   (with-temp-buffer
     (sprig-review-mode)
     (sprig-review-consume '(text "on it"))
@@ -615,12 +615,12 @@ the fold learns the id from the result rather than from the call."
     (goto-char (point-min))
     (re-search-forward "drop me")
     (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
-      (sprig-review-unqueue))
+      (sprig-review-reject))
     (should (equal sprig--queued '("keep me")))))
 
-(ert-deftest sprig-review-mode-test-unqueue-refuses-a-steer ()
-  ;; A steer is already on the wire, so it cannot be taken back this way; the
-  ;; command says so rather than silently hiding a message the agent will get.
+(ert-deftest sprig-review-mode-test-reject-refuses-a-steer ()
+  ;; A steer is already on the wire, so `k' cannot take it back; it says so
+  ;; rather than silently hiding a message the agent will get.
   (with-temp-buffer
     (sprig-review-mode)
     (sprig-review-consume '(text "on it"))
@@ -628,7 +628,7 @@ the fold learns the id from the result rather than from the call."
     (sprig-review-flush)
     (goto-char (point-min))
     (re-search-forward "already sent")
-    (should-error (sprig-review-unqueue) :type 'user-error)))
+    (should-error (sprig-review-reject) :type 'user-error)))
 
 (ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
   ;; A conversation read from disk carries no `done', but nothing is running

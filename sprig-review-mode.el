@@ -1385,13 +1385,13 @@ teaser, since its full text is about to become a real user turn."
 A `c q' message waits here, tinted as yours and marked with an hourglass, so
 a queued follow-up is visible while it waits for the running turn to end (a
 steer, by contrast, is on the wire already and shows a `⤷').  Point on one of
-these and `sprig-review-unqueue' takes it back.  Drawn straight from
+these and `k' (`sprig-review-reject') takes it back.  Drawn straight from
 `sprig--queued', the list that actually sends, so the float never promises a
 message the queue will not deliver.  Each is collapsed to one ellipsised
 line, since its full text becomes a real user turn once the queue flushes."
   (dolist (text (and (boundp 'sprig--queued) sprig--queued))
-    ;; The text is the section value, so `sprig-review-unqueue' knows which
-    ;; message the point sits on.
+    ;; The text is the section value, so `k' (`sprig-review-reject') knows
+    ;; which message the point sits on.
     (magit-insert-section (sprig-pending-queue text)
       (let ((beg (point))
             (line (sprig-review--truncate
@@ -2384,25 +2384,38 @@ Falls back to a plain send when no turn is running, for the same reason
                 sections)))
 
 (defun sprig-review-reject ()
-  "Ask the agent to undo the marked diff hunks, or the hunk at point.
-On a mixed mark set, confirms and acts only on the hunks (see DESIGN.md).
+  "Undo the diff hunks at point, or unstage the floated message at point (`k').
+`k' is the take-it-back gesture, and what it takes back depends on what
+point sits on.  On a floated `c q' queued message it drops just that one
+from the queue, the way `c Q' drops them all.  On a floated `c c' steer it
+cannot help: the steer is already on the wire, so it says so and points at
+`c i' (interrupt), which is the only way to stop mid-turn input and stops
+the whole turn.  Otherwise it asks the agent to undo the marked diff hunks,
+or the hunk at point (on a mixed mark set, confirms and acts only on the
+hunks; see DESIGN.md).
 
-Steers rather than sends: hunks land while the turn is still running, so
-a bad one is usually spotted mid-turn, and waiting the turn out to say so
-lets the agent keep building on it.  With no turn running this is an
-ordinary send."
+The hunk case steers rather than sends: a bad hunk is usually spotted while
+the turn is still running, and waiting it out to say so lets the agent keep
+building on it.  With no turn running that is an ordinary send."
   (interactive)
-  (let* ((sections (sprig-review--marked-sections))
-         (pairs (sprig-review--reject-pairs sections)))
-    (unless pairs (user-error "No diff hunk marked or at point"))
-    (when (and sprig-review--marks (< (length pairs) (length sections))
-               (not (y-or-n-p
-                     (format "Reject %d hunk(s), ignoring %d other mark(s)? "
-                             (length pairs) (- (length sections) (length pairs))))))
-      (user-error "Cancelled"))
-    (sprig-review--steer (sprig-review-reject-instruction pairs))
-    (sprig-review--unmark-sections
-     (sprig-review--sections-of-type sections 'sprig-hunk))))
+  (let ((section (magit-current-section)))
+    (cond
+     ((and section (eq (oref section type) 'sprig-pending-queue))
+      (sprig--review-unqueue (oref section value)))
+     ((and section (eq (oref section type) 'sprig-pending-steer))
+      (user-error "A steer is already sent; interrupt with `c i' to stop it"))
+     (t
+      (let* ((sections (sprig-review--marked-sections))
+             (pairs (sprig-review--reject-pairs sections)))
+        (unless pairs (user-error "No diff hunk marked or at point"))
+        (when (and sprig-review--marks (< (length pairs) (length sections))
+                   (not (y-or-n-p
+                         (format "Reject %d hunk(s), ignoring %d other mark(s)? "
+                                 (length pairs) (- (length sections) (length pairs))))))
+          (user-error "Cancelled"))
+        (sprig-review--steer (sprig-review-reject-instruction pairs))
+        (sprig-review--unmark-sections
+         (sprig-review--sections-of-type sections 'sprig-hunk)))))))
 
 (defun sprig-review-commit ()
   "Ask the agent to commit the current changes."
@@ -2777,21 +2790,6 @@ there is nothing to steer or interrupt.  `c i' does not do this, on
 purpose (see `sprig--review-drop-queue')."
   (interactive)
   (sprig--review-drop-queue))
-
-(defun sprig-review-unqueue ()
-  "Take the queued message under point back out of the queue (`c u').
-Point must sit on a floated `c q' message: the hourglass lines above the
-state line.  Drops just that one, where `c Q' drops the whole queue.  A
-steer cannot go this way; it is already on the wire, so `c i' (interrupt)
-is the only way to stop mid-turn input, and it stops the whole turn."
-  (interactive)
-  (let ((section (magit-current-section)))
-    (cond
-     ((and section (eq (oref section type) 'sprig-pending-queue))
-      (sprig--review-unqueue (oref section value)))
-     ((and section (eq (oref section type) 'sprig-pending-steer))
-      (user-error "A steer is already sent; interrupt with `c i' to stop it"))
-     (t (user-error "Point is not on a queued message")))))
 
 (declare-function sprig--btw-ask "sprig"
                   (id dir remote-host question context tail))
@@ -3390,7 +3388,6 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("c" "compose & send (steers a running turn)" sprig-review-message)
     ("q" "compose & queue (after this turn)" sprig-review-queue)
     ("Q" "drop the queued messages" sprig-review-drop-queue)
-    ("u" "unqueue the message at point" sprig-review-unqueue)
     ("y" "yes / accept" sprig-review-accept)
     ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
@@ -3400,7 +3397,7 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("z" "compact context" sprig-review-compact)
     ("b" "by the way: side question (writes no log)" sprig-review-btw)]
    ["Changes (agent instructions)"
-    ("k" "reject / undo" sprig-review-reject)
+    ("k" "reject / undo (or unstage a floated message)" sprig-review-reject)
     ("C" "commit" sprig-review-commit)
     ("x" "run command / fenced block" sprig-review-run)]])
 

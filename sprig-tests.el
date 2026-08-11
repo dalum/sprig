@@ -266,9 +266,9 @@
     (should (equal (sprig--review-drop-queue) "sprig: nothing queued"))))
 
 (ert-deftest sprig-test-unqueue-drops-just-the-one ()
-  ;; `c u' takes a single queued message back, where `c Q' drops the lot; the
-  ;; rest of the queue and the running turn are untouched, and the survivor
-  ;; still flushes on the next `done'.
+  ;; `k' on a floated message takes a single queued message back, where `c Q'
+  ;; drops the lot; the rest of the queue and the running turn are untouched,
+  ;; and the survivor still flushes on the next `done'.
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
@@ -286,7 +286,7 @@
         (should (equal sent '("second")))))))
 
 (ert-deftest sprig-test-unqueue-drops-one-copy-of-a-duplicate ()
-  ;; Two of the same text is two separate queued turns, so a single `c u'
+  ;; Two of the same text is two separate queued turns, so a single unqueue
   ;; drops one copy, not both.
   (with-temp-buffer
     (setq-local sprig--queued '("dup" "dup"))
