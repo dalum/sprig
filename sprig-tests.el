@@ -3246,6 +3246,57 @@ without a real SSH process."
          (sorted (sprig--status-sort-rows rows)))
     (should (equal (plist-get (car sorted) :session) "fresh"))))
 
+(ert-deftest sprig-test-status-sort-rows-starred-floats ()
+  ;; A starred session floats above the rest of its group, keeping the column
+  ;; order among the starred and among the unstarred alike.
+  (let* ((sprig-status-starred '((nil . "old")))
+         (sprig--status-sort '("Created" . t))
+         (rows (list '(:session "old" :created 100 :host nil)
+                     '(:session "new" :created 300 :host nil)
+                     '(:session "mid" :created 200 :host nil)))
+         (sorted (sprig--status-sort-rows rows)))
+    ;; "old" is oldest, yet its star lifts it over the newer unstarred pair.
+    (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
+                   '("old" "new" "mid")))))
+
+(ert-deftest sprig-test-status-sort-rows-starred-honours-host ()
+  ;; The star key is host-scoped: the same id on another host is not starred.
+  (let* ((sprig-status-starred '(("a@h" . "dup")))
+         (sprig--status-sort '("Created" . t))
+         (rows (list '(:session "dup" :created 100 :host nil)
+                     '(:session "top" :created 300 :host nil)))
+         (sorted (sprig--status-sort-rows rows)))
+    ;; The local "dup" is a different session from the starred remote one, so
+    ;; it does not float; the newest wins on the column alone.
+    (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
+                   '("top" "dup")))))
+
+(ert-deftest sprig-test-status-star-key-needs-an-id ()
+  ;; A row with no session id has no star key, so it cannot be starred.
+  (should (equal (sprig--status-star-key '(:host nil :session "s1"))
+                 '(nil . "s1")))
+  (should-not (sprig--status-star-key '(:host nil :session nil))))
+
+(ert-deftest sprig-test-status-star-command-toggles-and-persists ()
+  ;; `*' adds the row's key when absent and removes it when present, saving
+  ;; each time; a row with no id errors instead.
+  (let ((sprig-status-starred nil)
+        (saved '()))
+    (cl-letf (((symbol-function 'customize-save-variable)
+               (lambda (sym val) (push (cons sym val) saved)))
+              ((symbol-function 'sprig--status-render) #'ignore)
+              ((symbol-function 'sprig--status-entry-at-point)
+               (lambda () '(:host "a@h" :session "s1"))))
+      (sprig-status-star)
+      (should (equal sprig-status-starred '(("a@h" . "s1"))))
+      (should (equal (cdar saved) '(("a@h" . "s1"))))
+      (sprig-status-star)
+      (should (null sprig-status-starred))
+      (should (equal (cdar saved) nil)))
+    (cl-letf (((symbol-function 'sprig--status-entry-at-point)
+               (lambda () '(:host nil :session nil))))
+      (should-error (sprig-status-star) :type 'user-error))))
+
 (ert-deftest sprig-test-status-sort-command-flips-direction ()
   ;; The command sets the sort, and a second call on the same column flips it;
   ;; a text column defaults ascending, Created descending.

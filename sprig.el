@@ -222,6 +222,19 @@ Example, hiding /tmp and everything under it:
   (setq sprig-status-ignore-directories \\='(\"\\\\`-tmp\\\\(-\\\\|\\\\'\\\\)\"))"
   :type '(repeat regexp))
 
+(defcustom sprig-status-starred nil
+  "Session keys pinned to the top of their host group in the navigator.
+Each is a cons of the session's host (nil for local, else its SSH
+destination) and its session id, the same host-and-id pairing the
+navigator keys a row by, since an id is only unique on its own host.
+`*' in the navigator stars or unstars the session under point and saves
+this; a starred session floats above the rest of its group and carries a
+`★' by its title."
+  :type '(repeat (cons (choice (const :tag "Local" nil) string) string)))
+
+(defface sprig-status-star '((t :inherit warning))
+  "Face for the star marking a pinned navigator session.")
+
 (defface sprig-status-preview '((t :inherit shadow))
   "Face for the inline reply preview shown under an active navigator row.")
 
@@ -1732,6 +1745,22 @@ suggestion but without asking the agent."
     (unless id (user-error "No session id on this row"))
     (sprig--title-commit id host title)))
 
+(defun sprig-status-star ()
+  "Star or unstar the session on the row at point, floating it up its group.
+A starred session sorts above the rest of its host group whatever the
+active column, and shows a `★' by its title.  The set persists across
+Emacs sessions in `sprig-status-starred', keyed by the session's host and
+id, so a row with no id yet (a fork mid-handover) cannot be starred."
+  (interactive)
+  (let* ((entry (sprig--status-entry-at-point))
+         (key (and entry (sprig--status-star-key entry))))
+    (unless key (user-error "No session id on this row"))
+    (if (member key sprig-status-starred)
+        (setq sprig-status-starred (delete key sprig-status-starred))
+      (push key sprig-status-starred))
+    (customize-save-variable 'sprig-status-starred sprig-status-starred)
+    (sprig--status-render)))
+
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
 HOST is the resolved session host: nil for the local machine, else an SSH
@@ -2928,13 +2957,34 @@ sorts to the top of a newest-first list rather than the bottom."
          (lambda (a b) (string-lessp (downcase (or (plist-get a k) ""))
                                      (downcase (or (plist-get b k) ""))))))))
 
+(defun sprig--status-star-key (entry)
+  "Return ENTRY's star key, (HOST . SESSION-ID), or nil if it has no id.
+A row with no session id (a fork still awaiting the CLI's own) cannot be
+starred: the id is what a star outlives a restart by, and a buffer object
+would not."
+  (let ((id (plist-get entry :session)))
+    (and id (cons (plist-get entry :host) id))))
+
+(defun sprig--status-starred-p (entry)
+  "Non-nil when ENTRY names a session in `sprig-status-starred'."
+  (let ((key (sprig--status-star-key entry)))
+    (and key (member key sprig-status-starred) t)))
+
 (defun sprig--status-sort-rows (rows)
   "Sort ROWS by `sprig--status-sort' ahead of the stable group sort, so the
-column order becomes the order within each host group."
+column order becomes the order within each host group.  Starred sessions
+float above the rest of their group whatever the column and direction,
+keeping the column order among themselves."
   (pcase-let ((`(,name . ,desc) (or sprig--status-sort '("Created" . t))))
     (let ((less (sprig--status-row-less name)))
       (sort (copy-sequence rows)
-            (if desc (lambda (a b) (funcall less b a)) less)))))
+            (lambda (a b)
+              (let ((sa (sprig--status-starred-p a))
+                    (sb (sprig--status-starred-p b)))
+                (cond ((and sa (not sb)) t)
+                      ((and sb (not sa)) nil)
+                      (desc (funcall less b a))
+                      (t (funcall less a b)))))))))
 
 (defun sprig--entry-matches-filter (entry filter)
   "Non-nil if ENTRY's project label or title contains FILTER.
@@ -2999,7 +3049,12 @@ survives."
                               (if dir (file-name-nondirectory
                                        (directory-file-name dir))
                                 "-")
-                              (or (plist-get e :title) "")
+                              (let ((title (or (plist-get e :title) "")))
+                                (if (sprig--status-starred-p e)
+                                    (concat (propertize "★ " 'face
+                                                        'sprig-status-star)
+                                            title)
+                                  title))
                               (if (and (stringp session) (> (length session) 0))
                                   (substring session 0 (min 8 (length session)))
                                 "-")
@@ -3503,6 +3558,8 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
 (define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
 (define-key sprig-status-mode-map (kbd "T")   #'sprig-status-title-dispatch)
+;; `*' pins the session under point to the top of its group and saves it.
+(define-key sprig-status-mode-map (kbd "*")   #'sprig-status-star)
 ;; The columns are unsortable to `tabulated-list', so a header click falls
 ;; through to here rather than its native sort, which would break the groups.
 (define-key sprig-status-mode-map [header-line mouse-1] #'sprig-status-sort)
