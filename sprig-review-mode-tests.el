@@ -2248,6 +2248,39 @@ the fold learns the id from the result rather than from the call."
         (should (null (get-buffer "*sprig-stage*"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
 
+(ert-deftest sprig-review-mode-test-stage-direct-sends-both-blocks ()
+  "Direct staging sends the agent the old and new text, verbatim-marked."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--send)
+                 (lambda (text &rest _) (setq sent text))))
+        (sprig-review--stage-direct "app/x.py" "OLD-REGION" "NEW-REGION")
+        (should (string-match-p "app/x.py" sent))
+        (should (string-match-p "OLD-REGION" sent))
+        (should (string-match-p "NEW-REGION" sent))
+        (should (string-match-p "character for character" sent))))))
+
+(ert-deftest sprig-review-mode-test-stage-courier-records-and-asks ()
+  "Courier staging records the bytes and asks for the placeholder Edit."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--permission-mode "default")
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--send)
+                 (lambda (text &rest _) (setq sent text))))
+        (sprig-review--stage-courier "app/x.py" "OLD" "NEW")
+        (should (equal sprig--courier '((:file "app/x.py" :old "OLD" :new "NEW"))))
+        (should (string-match-p "placeholders" sent))))))
+
+(ert-deftest sprig-review-mode-test-stage-courier-refuses-auto-approve ()
+  "Courier staging refuses a mode that would auto-run the placeholder Edit."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig--permission-mode "acceptEdits")
+    (should-error (sprig-review--stage-courier "x.py" "a" "b")
+                  :type 'user-error)))
+
 (ert-deftest sprig-review-mode-test-set-title ()
   (with-temp-buffer
     (sprig-review-mode)

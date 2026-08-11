@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.31.0
+;; Version: 0.32.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2889,10 +2889,26 @@ the CLI's own `/btw'."
   (quit-window t)
   (message "sprig: message cancelled"))
 
-;;;; Staging buffer (author an edit by hand, the courier apply)
+;;;; Staging buffer (author an edit by hand, then apply)
 
 (declare-function sprig--courier "sprig")
 (defvar sprig--courier)
+
+(defcustom sprig-courier-edits nil
+  "How a hand-authored staging edit (`C-c C-c') reaches disk.
+When nil (the default), the edit is sent to the agent directly: your
+bytes ride in the instruction and the agent writes them with one Edit.
+Simple and works in every permission mode, but the agent, generating the
+write, could in principle alter a character, so eyeball the resulting
+diff.
+
+When non-nil, the edit is couriered instead: your bytes stay in Emacs and
+are substituted into the agent's Edit at the permission prompt, so the
+agent cannot change them (see `sprig--maybe-courier').  Stronger, but it
+needs the edit to prompt, so it refuses the auto-approve modes
+\(`acceptEdits', `bypassPermissions')."
+  :type 'boolean
+  :group 'sprig)
 
 (defvar-local sprig-review--stage-target nil
   "Review buffer a staging buffer couriers its edit to.")
@@ -2939,9 +2955,9 @@ so a stray save writes no file."
 
 (defun sprig-review--stage-guard ()
   "Signal a `user-error' unless there is a live session to stage on.
-Staging reads and couriers over the session, so a dead one cannot serve it.
-No mode switch is needed: the courier rides the ordinary permission channel
-\(see `sprig--maybe-courier'), so `e' works whatever posture you are in."
+Staging reads and applies over the session, so a dead one cannot serve it.
+No mode switch is needed: the edit rides the ordinary channel, so `e' works
+whatever posture you are in."
   (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
     (user-error "No live session to stage on; send a message first")))
 
@@ -3065,7 +3081,9 @@ Clears the pending seed either way, and reports when no usable read came back."
        (sprig-review--strip-read-numbers (cdr hit))))))
 
 (defun sprig-review-stage-apply ()
-  "Stage this buffer's edit and ask the session to courier it to disk."
+  "Send this buffer's hand-authored edit to the session to apply.
+Sent to the agent directly, or couriered when `sprig-courier-edits' is
+set (see that variable for the trade-off)."
   (interactive)
   (let ((review sprig-review--stage-target)
         (file sprig-review--stage-file)
@@ -3075,26 +3093,59 @@ Clears the pending seed either way, and reports when no usable read came back."
     (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
     (with-current-buffer review
       (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
-        (user-error "No live session to courier through; send a message first"))
-      ;; The courier overrides the write at the permission prompt, so the edit
-      ;; must reach one: a mode that auto-approves edits would run the agent's
-      ;; placeholder bytes instead.  Refuse rather than write the wrong thing.
-      (when (member sprig--permission-mode '("acceptEdits" "bypassPermissions"))
-        (user-error
-         "This session auto-approves edits (%s); the courier needs them to \
-prompt, so change the mode with `P' first" sprig--permission-mode))
-      (push (list :file file :old anchor :new new) sprig--courier)
-      (sprig-review--send
-       (format "I have authored an edit to `%s' by hand and staged it in Sprig. \
+        (user-error "No live session to send to; send a message first"))
+      (if sprig-courier-edits
+          (sprig-review--stage-courier file anchor new)
+        (sprig-review--stage-direct file anchor new)))
+    (quit-window t)
+    (message "sprig: sent your edit to %s to apply" (file-name-nondirectory file))))
+
+(defun sprig-review--stage-direct (file anchor new)
+  "Ask the agent to apply a hand-authored edit of FILE directly.
+ANCHOR is the region's original text and NEW your edited version; both
+ride in the instruction so the agent writes them with one Edit, in any
+permission mode.  The agent generates the write, so it could drift from
+NEW: the resulting diff is the check.  Run in the review buffer."
+  (sprig-review--send
+   (format "I have hand-authored an edit to `%s' and want it applied exactly \
+as written.  With a single Edit on that file, replace this block verbatim:
+
+```
+%s
+```
+
+with this block verbatim:
+
+```
+%s
+```
+
+Reproduce my text character for character: do not reformat, re-indent, \
+correct, or improve any of it.  Make only this one edit and nothing else."
+           file anchor new)))
+
+(defun sprig-review--stage-courier (file anchor new)
+  "Stage a hand-authored edit of FILE for the tamper-proof courier apply.
+Records NEW (over ANCHOR) in `sprig--courier' so the permission gate can
+substitute your exact bytes into the agent's Edit (see
+`sprig--maybe-courier'), and asks the agent to make that one write.  Needs
+the edit to prompt, so it refuses the auto-approve modes.  Run in the
+review buffer."
+  (when (member sprig--permission-mode '("acceptEdits" "bypassPermissions"))
+    (user-error
+     "This session auto-approves edits (%s); the courier needs them to \
+prompt, so change the mode with `P' first, or unset `sprig-courier-edits'"
+     sprig--permission-mode))
+  (push (list :file file :old anchor :new new) sprig--courier)
+  (sprig-review--send
+   (format "I have authored an edit to `%s' by hand and staged it in Sprig. \
 Call the Edit tool on that file once now to apply it: your `old_string' and \
 `new_string' arguments are placeholders, because Sprig replaces them with the \
 exact staged bytes through the permission channel. This one write is \
 authorised; make only this single Edit and nothing else." file)))
-    (quit-window t)
-    (message "sprig: staged edit to %s; couriering" (file-name-nondirectory file))))
 
 (defun sprig-review-stage-abort ()
-  "Cancel the staged edit without couriering it."
+  "Discard the staging buffer without sending the edit."
   (interactive)
   (quit-window t)
   (message "sprig: staging cancelled"))
@@ -3458,11 +3509,10 @@ name the CLI's own modes, the ones the shift-tab cycle steps through."
 
 (transient-define-prefix sprig-review-stage-dispatch ()
   "Open a staging buffer to author an edit by hand (`e').
-You edit the seeded buffer, then `C-c C-c' stages it and the agent couriers
-your bytes to disk without editing them (see `sprig--courier'); `C-c C-k'
-cancels.  No mode switch first: the courier rides the ordinary permission
-channel.  The routes differ only in how the buffer is seeded: from the hunk
-you are on, from a file you name, or from what the agent suggests for a task."
+You edit the seeded buffer, then `C-c C-c' sends it to the agent to apply
+\(or couriers it when `sprig-courier-edits' is set); `C-c C-k' cancels.  No
+mode switch first.  The routes differ only in how the buffer is seeded: from
+the hunk you are on, from a file you name, or from what the agent suggests."
   [["Stage an edit"
     ("e" "the hunk at point" sprig-review-stage-at-point)
     ("f" "a file / region you name (agent reads it)" sprig-review-stage-file)

@@ -10,15 +10,15 @@ the review buffer or switching into any special mode.
 
 The catch on a remote machine is that Sprig must never write your files itself
 (only the agent touches the repo, which is what makes remote sessions work). So
-you author in a throwaway **staging buffer**, and the agent couriers your bytes
-to disk for you, unable to change a character of them.
+you author in a throwaway **staging buffer**, and the agent writes your bytes to
+disk for you.
 
 This tutorial covers hand-authoring as it stands today.
 
 ## The loop
 
-Authoring a change is four steps: open a staging buffer, edit it, stage it, and
-let the agent courier it.
+Authoring a change is four steps: open a staging buffer, edit it, send it, and
+let the agent apply it.
 
 ### 1. Open a staging buffer with `e`
 
@@ -48,22 +48,26 @@ highlighting and indentation. Edit it however you like. This is plain local
 Emacs, instant even when the session runs on a remote host, and it is not backed
 by a file, so a stray `C-x C-s` writes nothing.
 
-### 3. Stage with `C-c C-c`
+### 3. Send with `C-c C-c`
 
-When you are happy, press **`C-c C-c`** to stage your edit, or **`C-c C-k`** to
+When you are happy, press **`C-c C-c`** to send your edit, or **`C-c C-k`** to
 throw it away.
 
-### 4. The agent couriers it to disk
+### 4. The agent applies it
 
-On `C-c C-c`, Sprig records exactly what you wrote and asks the agent to make one
-edit to that file. When the agent's edit call comes up for permission, Sprig
-**replaces its content with your bytes**. The agent supplies nothing of its own,
-so it cannot change a character of your work; it only carries it to disk.
+On `C-c C-c`, Sprig sends the agent your exact text and asks it to make that one
+edit, verbatim. Your change lands in the working tree as a normal diff.
 
-Your change then lands in the working tree as a normal diff. From there it is
-just like any other change: review it, commit it with **`C`**, ask the agent to
-critique it with `c c`, or press **`c r`** to have it spawn a subagent that
-reviews the changes with fresh eyes and then acts on the findings.
+Because the agent does the write, glance at the resulting diff to confirm it
+matches what you typed. If you want a stronger guarantee, set
+`sprig-courier-edits`: your bytes then stay in Emacs and are substituted into the
+agent's edit at its permission prompt, so the agent cannot change a character.
+That is safer but needs the edit to prompt, so it refuses the auto-approve modes
+(more on that below).
+
+From there it is just like any other change: review it, commit it with **`C`**,
+ask the agent to critique it with `c c`, or press **`c r`** to have it spawn a
+subagent that reviews the changes with fresh eyes and then acts on the findings.
 
 ## A worked example
 
@@ -75,24 +79,30 @@ a guard clause, and you want to write it yourself.
    mode. (Or `e f`, `config.py`, `the parse_config function`, to point it
    yourself.)
 2. You add your guard clause at the top of the function.
-3. `C-c C-c`. Sprig asks the agent to write the file; your version lands.
-4. The change shows as a diff in the review buffer. You press `C` to commit, or
-   `c c` to ask "any edge cases I missed?" before committing.
+3. `C-c C-c`. Sprig sends the agent your version and asks it to apply that one
+   edit; your change lands.
+4. The change shows as a diff in the review buffer. You skim it to confirm it is
+   what you wrote, then press `C` to commit, or `c c` to ask "any edge cases I
+   missed?" before committing.
 
 ## Good to know
 
 - **No mode to enter.** `e` works from the ordinary review flow. You do not
   switch the agent into anything first.
-- **One write per stage.** A single `C-c C-c` sanctions exactly one write, with
-  your exact bytes. Nothing else is affected.
+- **One edit per send.** A single `C-c C-c` asks for exactly one edit, your text
+  applied verbatim. Nothing else is touched.
+- **Check the diff.** The agent does the write, so it could in principle drift
+  from your bytes. The resulting diff is your check; if it does not match, send
+  again. For a hard guarantee instead of a check, see the courier option below.
 - **Drift fails safe.** If the file changed under you between the read and the
-  apply (because you edited it out of band, say), the edit simply fails and
-  nothing is written. Stage it again.
-- **Auto-approve modes are refused.** The courier works by overriding the edit
-  at its permission prompt. If your session is in a mode that auto-approves
-  edits (`acceptEdits`, `bypassPermissions`), there is no prompt to override, so
-  staging refuses rather than risk writing the wrong bytes. Change the mode with
-  `P` first.
+  apply (because you edited it out of band, say), the edit simply fails to match
+  and nothing is written. Send it again.
+- **The courier option.** Set `sprig-courier-edits` to have Sprig substitute
+  your exact bytes into the agent's edit at its permission prompt, so the agent
+  cannot alter them. Stronger, but it needs the edit to prompt: in a mode that
+  auto-approves edits (`acceptEdits`, `bypassPermissions`) there is no prompt to
+  override, so it refuses rather than risk writing the wrong bytes. Change the
+  mode with `P` first, or leave `sprig-courier-edits` off.
 
 ## Why bother
 
