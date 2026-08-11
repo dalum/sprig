@@ -64,10 +64,11 @@ buffer, differing only in how the region is chosen:
   region hint. The hint is free text the agent reads, like `the save function`
   or `lines 10-40`; leave it blank to take the whole file. The agent reads that
   region, and the staging buffer opens once its read comes back.
-- **`e s` — let the agent suggest.** You describe what you want to do ("add a
-  guard clause to config parsing"). The agent works out the single most
-  relevant file and region, reads exactly that, and the staging buffer opens on
-  it. Use this when you know the change you want but not yet where it lands.
+- **`e s` — let the agent suggest.** The agent already knows the task from your
+  conversation, so it works out the single most relevant file and region to edit
+  next, reads exactly that, and the staging buffer opens on it. You can add a
+  short nudge at the prompt, or just press `RET` to lean on the conversation.
+  Use this when you know the change you want but not yet where it lands.
 
 `e f` and `e s` involve the agent, so the buffer opens once its read comes back
 (you will see a brief "…to seed a staging buffer" message meanwhile). These two
@@ -103,8 +104,8 @@ You are in a remote session and want to add a guard clause to `parse_config` in
 
 1. `V` to enter navigator mode. The state line shows `navigator`.
 2. `e f`. At the prompt, enter `config.py`, then `the parse_config function` as
-   the region hint. (Or `e s` and describe the change, to let the agent find
-   the spot for you.)
+   the region hint. (Or, if you have been discussing this change with the agent
+   already, just `e s` `RET` and let it find the spot for you.)
 3. The agent reads it; a staging buffer opens with `parse_config`'s current
    source in Python mode.
 4. You add your guard clause at the top of the function.

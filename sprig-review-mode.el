@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.28.0
+;; Version: 0.28.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2934,25 +2934,28 @@ seeds my staging buffer from your read."
              path (if (string-empty-p hint) "" (format " (just %s)" hint)))
      (format "reading %s" (file-name-nondirectory path)))))
 
-(defun sprig-review-stage-suggested (task)
-  "Describe a TASK and let the agent suggest what to put in the staging buffer.
-The agent decides the single most relevant file and region for TASK, reads
-exactly that, and Sprig seeds the staging buffer from its read when the turn
-ends: the agent scopes, you author (`e s').  This is the scoping front-end to
-staging, for when you know what you want to do but not yet where it lands."
+(defun sprig-review-stage-suggested (&optional note)
+  "Let the agent suggest what to put in the staging buffer, from context (`e s').
+The agent already knows the task from the conversation, so it decides the
+single most relevant file and region to edit next, reads exactly that, and
+Sprig seeds the staging buffer from its read when the turn ends: the agent
+scopes, you author.  NOTE, if you give one, nudges the choice; blank leans
+wholly on the conversation so far.  This is the scoping front-end to staging,
+for when you know the change but not yet where it lands."
   (interactive
    (progn (sprig-review--stage-guard)
-          (list (read-string "What do you want to edit: "))))
+          (list (read-string "Nudge (blank = use our conversation): "))))
   (sprig-review--stage-guard)
-  (let ((task (string-trim (or task ""))))
-    (when (string-empty-p task) (user-error "Describe what to edit"))
+  (let ((note (string-trim (or note ""))))
     (sprig-review--request-seed
      (list :any t)
-     (format "I want to edit code by hand for this task: %s\n\nDecide the single \
-most relevant file and the specific region within it to change, then `Read' \
-exactly that region and return only that one Read: no edits, no summary, no \
-other tools. Sprig seeds my staging buffer from your read, so read the slice \
-you would want me to be editing." task)
+     (concat
+      "Based on what we have been working on, decide the single most relevant \
+file and the specific region within it for me to edit next by hand"
+      (if (string-empty-p note) "" (format ", keeping in mind: %s" note))
+      ". Then `Read' exactly that region and return only that one Read: no \
+edits, no summary, no other tools. Sprig seeds my staging buffer from your \
+read, so read the slice you would want me to be editing.")
      "asking the agent what to stage")))
 
 (defun sprig-review--strip-read-numbers (text)
