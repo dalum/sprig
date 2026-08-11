@@ -1816,10 +1816,12 @@ starred: the marker has nowhere to sit."
     (unless log (user-error "No session log to star on this row"))
     (let ((starred (not (sprig--status-starred-p entry))))
       (sprig--star-write log host starred)
+      ;; Patch the cache too, then render now: a plain refresh would repaint
+      ;; from the pre-toggle cache and only pick the disk marker up on the next
+      ;; background scan, so the star would lag a click behind.
+      (sprig--status-scan-cache-set-star host (plist-get entry :session) starred)
       (message "sprig: %s" (if starred "starred" "unstarred")))
-    ;; The flag rides in on the log scan, so let the refresh drop the cache and
-    ;; re-read it, the way a retitle reflects through the scan.
-    (sprig--status-refresh)))
+    (sprig--status-render)))
 
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
@@ -2863,6 +2865,19 @@ nothing.  Called when the stored set can have changed under the navigator: it
 is opened or reverted, or a session starts, opens, is removed, or ends."
   (dolist (cell sprig--status-scan-cache)
     (setcar (cdr cell) 0)))
+
+(defun sprig--status-scan-cache-set-star (host session starred)
+  "Set the STARRED flag on HOST's cached scan row for SESSION, if cached.
+A star toggle has to show at once, but the next render reuses the cache
+while the scan that would confirm it runs in the background (see
+`sprig--status-scan-cached'), so the flag is patched into the cache too,
+not only written to disk beside the log."
+  (let ((cell (assoc (cons host (sprig--projects-directory))
+                     sprig--status-scan-cache)))
+    (when cell
+      (dolist (row (cddr cell))
+        (when (equal (plist-get row :session) session)
+          (plist-put row :starred starred))))))
 
 (defun sprig--status-collect ()
   "Return status plists for all branches, grouped by the host they run on.

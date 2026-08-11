@@ -144,7 +144,7 @@
   ;; set would leave the line claiming one that stopped with the turn.
   (with-temp-buffer
     (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-              ((symbol-function 'sprig--status-refresh) #'ignore))
+              ((symbol-function 'sprig--status-render) #'ignore))
       (sprig--review-sink '(compacting t))
       (sprig--review-sink '(done nil nil))
       (should-not sprig--compacting))))
@@ -154,7 +154,7 @@
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
@@ -173,7 +173,7 @@
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
@@ -188,7 +188,7 @@
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
@@ -212,7 +212,7 @@
     (let ((folded nil))
       (cl-letf (((symbol-function 'sprig-review-consume)
                  (lambda (event) (push (car-safe event) folded)))
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user) #'ignore))
         (setq-local sprig--busy t)
@@ -227,7 +227,7 @@
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-interrupt) (lambda () "req-1"))
                 ((symbol-function 'sprig--send-user)
@@ -246,7 +246,7 @@
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-                ((symbol-function 'sprig--status-refresh) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
@@ -269,7 +269,7 @@
   ;; The session is gone, so there is no turn left for the message to follow.
   (with-temp-buffer
     (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
-              ((symbol-function 'sprig--status-refresh) #'ignore))
+              ((symbol-function 'sprig--status-render) #'ignore))
       (setq-local sprig--busy t)
       (setq-local sprig--queued '("later"))
       (sprig--teardown-process)
@@ -635,7 +635,7 @@ agent's own work."
             sprig--interrupt-timer nil)
       (cl-letf (((symbol-function 'sprig--teardown-process)
                  (lambda () (setq torn t sprig--busy nil)))
-                ((symbol-function 'sprig--status-refresh) #'ignore))
+                ((symbol-function 'sprig--status-render) #'ignore))
         (sprig--interrupt-receipt "sprig-7" "error"))
       (should torn)
       (should-not sprig--interrupt-request-id))))
@@ -648,7 +648,7 @@ agent's own work."
       (setq sprig--busy t sprig--interrupt-request-id "sprig-7")
       (cl-letf (((symbol-function 'sprig--teardown-process)
                  (lambda () (setq torn t)))
-                ((symbol-function 'sprig--status-refresh) #'ignore))
+                ((symbol-function 'sprig--status-render) #'ignore))
         (sprig--interrupt-receipt "sprig-7" "success"))
       (should-not torn)
       (should sprig--busy))))
@@ -661,7 +661,7 @@ agent's own work."
       (setq sprig--busy t sprig--interrupt-request-id "sprig-7")
       (cl-letf (((symbol-function 'sprig--teardown-process)
                  (lambda () (setq torn t)))
-                ((symbol-function 'sprig--status-refresh) #'ignore))
+                ((symbol-function 'sprig--status-render) #'ignore))
         (sprig--interrupt-receipt "sprig-2" "error"))
       (should-not torn)
       (should (equal sprig--interrupt-request-id "sprig-7")))))
@@ -1557,7 +1557,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
       (setq sprig--busy nil sprig--interrupt-timer nil)
       (cl-letf (((symbol-function 'process-send-string)
                  (lambda (_proc s) (setq sent s)))
-                ((symbol-function 'sprig--status-refresh) #'ignore))
+                ((symbol-function 'sprig--status-render) #'ignore))
         (sprig--review-interrupt-owned))
       (should-not sent)
       (should-not sprig--interrupt-timer))))
@@ -1574,7 +1574,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
           (progn
             (cl-letf (((symbol-function 'process-send-string)
                        (lambda (_proc s) (setq sent s)))
-                      ((symbol-function 'sprig--status-refresh) #'ignore))
+                      ((symbol-function 'sprig--status-render) #'ignore))
               (sprig--review-interrupt-owned))
             (should (string-match-p "interrupt"
                                     (alist-get 'subtype
@@ -1585,7 +1585,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
             (should (timerp sprig--interrupt-timer))
             (should sprig--process)       ; process not torn down
             ;; The turn ends normally; done clears busy and the timer.
-            (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore)
+            (cl-letf (((symbol-function 'sprig--status-render) #'ignore)
                       ((symbol-function 'sprig-review-consume) #'ignore))
               (sprig--review-sink '(done nil nil)))
             (should-not sprig--busy)
@@ -1599,7 +1599,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
       (setq sprig--busy t sprig--interrupt-timer 'dummy-timer)
       (cl-letf (((symbol-function 'sprig--teardown-process)
                  (lambda () (setq torn t sprig--busy nil)))
-                ((symbol-function 'sprig--status-refresh) #'ignore))
+                ((symbol-function 'sprig--status-render) #'ignore))
         (sprig--interrupt-timeout (current-buffer)))
       (should torn)
       (should-not sprig--interrupt-timer))))
@@ -3359,20 +3359,37 @@ without a real SSH process."
         (should (equal (plist-get e :session) "s1"))
         (should (plist-get e :starred))))))
 
+(ert-deftest sprig-test-status-scan-cache-set-star-patches-in-place ()
+  ;; Patching the cache flips a cached row's star, so a toggle shows at once
+  ;; instead of waiting for the background re-scan; other rows are untouched.
+  (let* ((sprig-claude-projects-directory "/x")
+         (r1 (list :session "s1" :starred nil))
+         (r2 (list :session "s2" :starred nil))
+         (sprig--status-scan-cache
+          (list (cons (cons nil (sprig--projects-directory))
+                      (cons '(0 0) (list r1 r2))))))
+    (sprig--status-scan-cache-set-star nil "s1" t)
+    (should (plist-get r1 :starred))
+    (should-not (plist-get r2 :starred))
+    ;; A miss (unknown host or session) is a quiet no-op.
+    (sprig--status-scan-cache-set-star "other@host" "s1" t)
+    (sprig--status-scan-cache-set-star nil "nope" t)
+    (should (plist-get r1 :starred))))
+
 (ert-deftest sprig-test-status-star-command-writes-and-removes-a-marker ()
   ;; `*' writes the marker for an unstarred row and removes it for a starred
   ;; one, targeting the row's own log and host; a row with no log errors.
   (let (calls)
     (cl-letf (((symbol-function 'sprig--star-write)
                (lambda (log host starred) (push (list log host starred) calls)))
-              ((symbol-function 'sprig--status-refresh) #'ignore)
+              ((symbol-function 'sprig--status-render) #'ignore)
               ((symbol-function 'sprig--status-entry-at-point)
                (lambda () '(:host "a@h" :file "/p/s1.jsonl"))))
       (sprig-status-star)
       (should (equal (car calls) '("/p/s1.jsonl" "a@h" t))))
     (cl-letf (((symbol-function 'sprig--star-write)
                (lambda (log host starred) (push (list log host starred) calls)))
-              ((symbol-function 'sprig--status-refresh) #'ignore)
+              ((symbol-function 'sprig--status-render) #'ignore)
               ((symbol-function 'sprig--status-entry-at-point)
                (lambda () '(:host nil :file "/p/s1.jsonl" :starred t))))
       (sprig-status-star)
