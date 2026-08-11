@@ -3342,6 +3342,23 @@ without a real SSH process."
                            rows)
                    '(("s1" t) ("s2" nil))))))
 
+(ert-deftest sprig-test-status-collect-keeps-a-scan-only-star ()
+  ;; A disconnected row (a scanned log with no open buffer) carries its star
+  ;; through `sprig--status-collect', not only rows an open buffer owns.
+  (let ((sprig-remotes nil)
+        (sprig--status-scan-cache nil))
+    (cl-letf (((symbol-function 'sprig--owning-review-buffers) (lambda () nil))
+              ((symbol-function 'sprig--status-scan-cached)
+               (lambda (host)
+                 (when (null host)
+                   (list (list :session "s1" :file "/p/s1.jsonl" :dir "/p"
+                               :project "p" :title "One" :mtime 10 :created 10
+                               :starred t))))))
+      (let* ((rows (sprig--status-collect))
+             (e (car rows)))
+        (should (equal (plist-get e :session) "s1"))
+        (should (plist-get e :starred))))))
+
 (ert-deftest sprig-test-status-star-command-writes-and-removes-a-marker ()
   ;; `*' writes the marker for an unstarred row and removes it for a starred
   ;; one, targeting the row's own log and host; a row with no log errors.

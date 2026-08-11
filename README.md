@@ -122,7 +122,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Sort within each group by a column (or click a column header); repeat to flip direction |
 | `T` | Title transient for the session at point (saves to the log): `T a` ask the agent, `T m` set by hand (see [Retitling](#retitling)) |
-| `*` | Star or unstar the session at point: a starred session floats to the top of its host group (whatever the sort) with a `★` by its title. The star is a `<id>.sprig-star` marker written beside the session's own log, so it lives with the session on its host, survives restarts, and any navigator on that host sees it |
+| `*` | Star or unstar the session at point: a starred session floats to the top of its host group (whatever the sort) with a `★` by its project. The star is a `<id>.sprig-star` marker written beside the session's own log, so it lives with the session on its host, survives restarts, and any navigator on that host sees it |
 | `g` | Refresh the list |
 | `q` | Bury the navigator |
 

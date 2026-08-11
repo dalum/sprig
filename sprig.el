@@ -1797,7 +1797,7 @@ navigator on that host reads it back off the same scan."
 (defun sprig-status-star ()
   "Star or unstar the session on the row at point, floating it up its group.
 A starred session sorts above the rest of its host group whatever the
-active column, and shows a `★' by its title.  The star is a
+active column, and shows a `★' by its project.  The star is a
 `<id>.sprig-star' marker written beside the session's own log on its host
 \(`sprig--star-file'), so it lives with the session, survives restarts, and
 every navigator on that host sees it.  A row with no log yet cannot be
@@ -2936,6 +2936,7 @@ group filtered down to nothing keeps its heading all the same."
                            :status 'disconnected
                            :mtime (plist-get e :mtime)
                            :created (plist-get e :created)
+                           :starred (plist-get e :starred)
                            :session (plist-get e :session))
                      table))
            ;; An owning buffer borrows the log's mtime (so an open row shows
@@ -3116,15 +3117,15 @@ survives."
         (unless (sprig--status-collapsed-p (plist-get e :host))
           (push (list id
                       (vector glyph
-                              (if dir (file-name-nondirectory
-                                       (directory-file-name dir))
-                                "-")
-                              (let ((title (or (plist-get e :title) "")))
+                              (let ((project (if dir (file-name-nondirectory
+                                                      (directory-file-name dir))
+                                               "-")))
                                 (if (sprig--status-starred-p e)
                                     (concat (propertize "★ " 'face
                                                         'sprig-status-star)
-                                            title)
-                                  title))
+                                            project)
+                                  project))
+                              (or (plist-get e :title) "")
                               (if (and (stringp session) (> (length session) 0))
                                   (substring session 0 (min 8 (length session)))
                                 "-")
