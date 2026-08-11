@@ -1012,73 +1012,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
     (should (equal (sprig-review-format-change change)
                    "x\n-a\n-b\n+c"))))
 
-;;;; Navigator role
-
-(ert-deftest sprig-test-navigator-blocks-edit-allows-read ()
-  "In the navigator role a write tool is denied and a read tool allowed."
-  (let ((sent nil))
-    (cl-letf (((symbol-function 'sprig--send-control-response)
-               (lambda (id resp) (push (cons id resp) sent))))
-      (sprig--navigator-tool-response "r1" "Edit" nil)
-      (sprig--navigator-tool-response "r2" "Read" nil)
-      (let ((edit (alist-get "r1" sent nil nil #'equal))
-            (read (alist-get "r2" sent nil nil #'equal)))
-        (should (equal (plist-get edit :behavior) "deny"))
-        (should (equal (plist-get edit :message) sprig-navigator-deny-message))
-        (should (equal (plist-get read :behavior) "allow"))))))
-
-(ert-deftest sprig-test-set-role-aligns-permission-mode ()
-  "Entering navigator asks for `manual' mode; driver returns to `auto'."
-  (with-temp-buffer
-    (let ((modes nil))
-      (cl-letf (((symbol-function 'sprig--set-permission-mode)
-                 (lambda (m) (push m modes))))
-        (sprig--set-role 'navigator)
-        (should (eq sprig--role 'navigator))
-        (sprig--set-role 'driver)
-        (should (eq sprig--role 'driver))
-        (should (equal (reverse modes) '("manual" "auto")))))))
-
-(ert-deftest sprig-test-navigator-handler-denies-write ()
-  "The control-request handler routes a write to the navigator deny."
-  (with-temp-buffer
-    (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig--send-control-response)
-                 (lambda (id resp) (push (cons id resp) sent))))
-        (setq-local sprig--role 'navigator)
-        (sprig--answer-control-request
-         "r1" '((subtype . "can_use_tool") (tool_name . "Write")
-                (input . ((file_path . "x")))))
-        (should (equal (plist-get (cdar sent) :behavior) "deny"))))))
-
-(ert-deftest sprig-test-navigator-lets-a-question-through ()
-  "Navigator denies only writes: an AskUserQuestion still renders."
-  (with-temp-buffer
-    (let ((rendered nil))
-      (cl-letf (((symbol-function 'sprig--offer-user-question)
-                 (lambda (&rest _) (setq rendered t)))
-                ((symbol-function 'sprig--send-control-response) #'ignore))
-        (setq-local sprig--role 'navigator)
-        (sprig--answer-control-request
-         "r1" '((subtype . "can_use_tool") (tool_name . "AskUserQuestion")
-                (input . nil)))
-        (should rendered)))))
-
-(ert-deftest sprig-test-driver-does-not-block ()
-  "In the driver role the navigator gate is inert: a write is not denied.
-With no permission function it falls to the in-buffer offer, as before."
-  (with-temp-buffer
-    (let ((offered nil)
-          (sprig-permission-function nil))
-      (cl-letf (((symbol-function 'sprig--offer-permission)
-                 (lambda (&rest _) (setq offered t))))
-        (setq-local sprig--role 'driver)
-        (sprig--answer-control-request
-         "r1" '((subtype . "can_use_tool") (tool_name . "Edit")
-                (input . nil)))
-        (should offered)))))
-
-;;;; Navigator courier
+;;;; Courier
 
 (ert-deftest sprig-test-courier-take-matches-basename ()
   "A staged edit is taken by basename, letting an absolute path match it."
@@ -1107,42 +1041,61 @@ With no permission function it falls to the in-buffer offer, as before."
     (should (equal (alist-get 'new_string out) "MINE-NEW"))
     (should (eq (alist-get 'replace_all out) :false))))
 
-(ert-deftest sprig-test-navigator-couriers-staged-edit ()
-  "A write matching a staged edit is allowed with the staged bytes overridden."
+(ert-deftest sprig-test-maybe-courier-overrides-matching-edit ()
+  "An edit matching a staged courier is allowed with the staged bytes swapped in."
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig--send-control-response)
                  (lambda (id resp) (push (cons id resp) sent))))
         (setq-local sprig--courier (list '(:file "x.el" :old "MINE" :new "YOURS")))
-        (sprig--navigator-tool-response
-         "r1" "Edit" '((file_path . "/abs/x.el") (old_string . "a")
-                       (new_string . "b")))
+        (should (sprig--maybe-courier
+                 "r1" "Edit" '((file_path . "/abs/x.el") (old_string . "a")
+                               (new_string . "b"))))
         (let ((resp (cdar sent)))
           (should (equal (plist-get resp :behavior) "allow"))
           (let ((upd (plist-get resp :updatedInput)))
             (should (equal (alist-get 'old_string upd) "MINE"))
             (should (equal (alist-get 'new_string upd) "YOURS"))))
-        ;; The edit is consumed, so a second write is denied as usual.
+        ;; Consumed: a second edit no longer couriers, so normal handling runs.
         (setq sent nil)
-        (sprig--navigator-tool-response
-         "r2" "Edit" '((file_path . "/abs/x.el")))
-        (should (equal (plist-get (cdar sent) :behavior) "deny"))))))
+        (should-not (sprig--maybe-courier
+                     "r2" "Edit" '((file_path . "/abs/x.el"))))
+        (should (null sent))))))
 
-(ert-deftest sprig-test-navigator-courier-ignores-other-file ()
-  "A staged edit for one file does not sanction a write to another.
-The unrelated write is denied, and the staged edit stays pending."
+(ert-deftest sprig-test-maybe-courier-passes-non-edit-and-unmatched ()
+  "Only an edit tool matching a staged file couriers; else it declines quietly."
   (with-temp-buffer
     (let ((sent nil))
       (cl-letf (((symbol-function 'sprig--send-control-response)
                  (lambda (id resp) (push (cons id resp) sent))))
-        (setq-local sprig--courier (list '(:file "x.el" :old "m" :new "y")
-                                         '(:file "z.el" :old "p" :new "q")))
-        ;; Two pending, so the single-pending fallback does not fire and the
-        ;; basename must match: a write to an unlisted file is denied.
-        (sprig--navigator-tool-response
-         "r1" "Write" '((file_path . "/abs/other.el")))
-        (should (equal (plist-get (cdar sent) :behavior) "deny"))
+        (setq-local sprig--courier (list '(:file "x.el" :old "m" :new "y")))
+        ;; A read is not an edit tool: no courier, and the single pending stays.
+        (should-not (sprig--maybe-courier "r1" "Read" '((file_path . "/abs/x.el"))))
+        ;; Two pending now, so the single-pending fallback is off; an edit to an
+        ;; unlisted file does not match by basename, so it declines.
+        (push '(:file "z.el" :old "p" :new "q") sprig--courier)
+        (should-not (sprig--maybe-courier
+                     "r2" "Write" '((file_path . "/abs/other.el"))))
+        (should (null sent))
         (should (= (length sprig--courier) 2))))))
+
+(ert-deftest sprig-test-courier-fires-before-the-permission-gate ()
+  "A staged edit is couriered from the control handler, not offered for approval."
+  (with-temp-buffer
+    (let ((sent nil) (offered nil)
+          (sprig-permission-function nil))
+      (cl-letf (((symbol-function 'sprig--send-control-response)
+                 (lambda (id resp) (push (cons id resp) sent)))
+                ((symbol-function 'sprig--offer-permission)
+                 (lambda (&rest _) (setq offered t))))
+        (setq-local sprig--courier (list '(:file "x.el" :old "MINE" :new "YOURS")))
+        (sprig--answer-control-request
+         "r1" '((subtype . "can_use_tool") (tool_name . "Edit")
+                (input . ((file_path . "/abs/x.el")))))
+        (should-not offered)
+        (should (equal (plist-get (cdar sent) :behavior) "allow"))
+        (should (equal (alist-get 'new_string (plist-get (cdar sent) :updatedInput))
+                       "YOURS"))))))
 
 ;;;; Ground-truth diff parser
 

@@ -6,9 +6,9 @@ assumes only that you have Sprig installed and a session open (see the main
 
 ## Available tutorials
 
-- [Navigator mode: writing the code yourself](navigator-mode.md) — pair-program
-  with the agent held to feedback while you author every line, and let it
-  courier your edits to disk without touching the repo itself.
+- [Authoring by hand: writing code yourself](authoring-by-hand.md) — write a
+  piece of the change yourself with `e`, and let the agent courier your bytes to
+  disk without touching the repo itself.
 
 More will land here as features settle. If you write one, add it to the list
 above with a one-line description.

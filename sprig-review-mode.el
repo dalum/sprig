@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.28.1
+;; Version: 0.29.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -52,7 +52,6 @@
 (declare-function sprig--remote "sprig" ())
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
-(declare-function sprig--set-role "sprig" (role))
 (declare-function sprig--notable-mode "sprig" (mode))
 (declare-function sprig--state-parts "sprig" (state))
 ;; Transport state, defined in sprig.el; a session-owning review buffer
@@ -66,7 +65,6 @@
 (defvar sprig--working-dir)
 (defvar sprig--remote-override)
 (defvar sprig--permission-mode)
-(defvar sprig--role)
 (defvar sprig--btw-process)
 
 ;;;; Faces
@@ -1310,16 +1308,9 @@ the turn as plainly as the line does."
               (ctx (sprig-review--context-indicator (plist-get model :context)))
               (plan (sprig-review--plan-indicator model))
               (queued (and (boundp 'sprig--queued) (length sprig--queued)))
-              (role (and (boundp 'sprig--role) sprig--role))
               (start (point)))
     (magit-insert-section (sprig-state)
       (insert (sprig-review--face (format "%s  %s" glyph text) face))
-      ;; The pair-programming role, shown only when it is the notable one:
-      ;; navigator rotates the posture (you write, the agent advises), so it
-      ;; earns a tag the way plan mode does; driver is the silent default.
-      (when (eq role 'navigator)
-        (insert (sprig-review--face "  ·  " face)
-                (sprig-review--face "navigator" 'sprig-mode-tag)))
       ;; Nearest the state, since it qualifies it: `working…' says something is
       ;; happening, `☑ 4/5' says how much of it is left to happen.
       (when plan
@@ -2828,7 +2819,7 @@ the CLI's own `/btw'."
   (quit-window t)
   (message "sprig: message cancelled"))
 
-;;;; Staging buffer (navigator authoring, the courier apply)
+;;;; Staging buffer (author an edit by hand, the courier apply)
 
 (declare-function sprig--courier "sprig")
 (defvar sprig--courier)
@@ -2877,13 +2868,12 @@ so a stray save writes no file."
              (file-name-nondirectory file))))
 
 (defun sprig-review--stage-guard ()
-  "Signal a `user-error' unless this buffer can stage an edit right now.
-Staging is navigator-only (the courier rides the navigator permission gate)
-and needs a live session to read and courier through."
-  (unless (eq sprig--role 'navigator)
-    (user-error "Staging is a navigator verb; switch role with `V' first"))
-  (unless sprig--session-id
-    (user-error "No session yet; start one before staging an edit")))
+  "Signal a `user-error' unless there is a live session to stage on.
+Staging reads and couriers over the session, so a dead one cannot serve it.
+No mode switch is needed: the courier rides the ordinary permission channel
+\(see `sprig--maybe-courier'), so `e' works whatever posture you are in."
+  (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
+    (user-error "No live session to stage on; send a message first")))
 
 (defun sprig-review--request-seed (pending instruction reading)
   "Arrange to seed a staging buffer from a read the agent is about to run.
@@ -3014,8 +3004,15 @@ Clears the pending seed either way, and reports when no usable read came back."
     (unless (buffer-live-p review) (user-error "The review buffer is gone"))
     (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
     (with-current-buffer review
-      (unless (eq sprig--role 'navigator)
-        (user-error "Session left navigator; switch back with `V' to courier"))
+      (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
+        (user-error "No live session to courier through; send a message first"))
+      ;; The courier overrides the write at the permission prompt, so the edit
+      ;; must reach one: a mode that auto-approves edits would run the agent's
+      ;; placeholder bytes instead.  Refuse rather than write the wrong thing.
+      (when (member sprig--permission-mode '("acceptEdits" "bypassPermissions"))
+        (user-error
+         "This session auto-approves edits (%s); the courier needs them to \
+prompt, so change the mode with `P' first" sprig--permission-mode))
       (push (list :file file :old anchor :new new) sprig--courier)
       (sprig-review--send
        (format "I have authored an edit to `%s' by hand and staged it in Sprig. \
@@ -3375,25 +3372,6 @@ all, so reach for it only where that is genuinely what you want."
   (interactive)
   (sprig-review--set-mode "bypassPermissions"))
 
-(defun sprig-review-toggle-role ()
-  "Toggle this session between the driver and navigator roles (`V').
-Driver, the default, is the agent-edits-you-review posture.  Navigator
-rotates it: you write the code and the agent is held to feedback, its
-file-writing tools denied at the permission channel and the session put in
-`manual' permission mode so they route there (see DESIGN.md, \"Navigator
-mode\").  The switch is live, needing no respawn, and the role shows in the
-state line.  Flip back to driver to let the agent write again."
-  (interactive)
-  (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
-    (user-error "No live session to set the role on; send a message first"))
-  (let ((navigator (not (eq sprig--role 'navigator))))
-    (sprig--set-role (if navigator 'navigator 'driver))
-    (sprig-review--refresh)
-    (message
-     (if navigator
-         "sprig: navigator — you write the code, the agent advises (its edits are blocked)"
-       "sprig: driver — the agent edits, you review"))))
-
 (transient-define-prefix sprig-review-permission-mode ()
   "Set the session's permission mode (`P').
 The mode is sticky: it holds until you change it here or the agent leaves
@@ -3409,9 +3387,10 @@ name the CLI's own modes, the ones the shift-tab cycle steps through."
 
 (transient-define-prefix sprig-review-stage-dispatch ()
   "Open a staging buffer to author an edit by hand (`e').
-Navigator-only.  You edit the seeded buffer, then `C-c C-c' stages it and
-the agent couriers your bytes to disk (see `sprig--courier'); `C-c C-k'
-cancels.  The routes differ only in how the buffer is seeded: from the hunk
+You edit the seeded buffer, then `C-c C-c' stages it and the agent couriers
+your bytes to disk without editing them (see `sprig--courier'); `C-c C-k'
+cancels.  No mode switch first: the courier rides the ordinary permission
+channel.  The routes differ only in how the buffer is seeded: from the hunk
 you are on, from a file you name, or from what the agent suggests for a task."
   [["Stage an edit"
     ("e" "the hunk at point" sprig-review-stage-at-point)
@@ -3437,7 +3416,6 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "c")   #'sprig-review-dispatch)
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
-(define-key sprig-review-mode-map (kbd "V")   #'sprig-review-toggle-role)
 (define-key sprig-review-mode-map (kbd "e")   #'sprig-review-stage-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain

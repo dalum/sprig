@@ -202,7 +202,7 @@ The rename sets the session's **user title**, the same thing the CLI's own `/ren
 
 Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 
-- [Navigator mode: writing the code yourself](docs/tutorials/navigator-mode.md) — pair-program with the agent held to feedback while you author every line (press `V` in a review buffer), and let it courier your staged edits to disk without touching the repo itself.
+- [Authoring by hand: writing code yourself](docs/tutorials/authoring-by-hand.md) — write a piece of the change yourself with `e` in a review buffer, and let the agent courier your staged bytes to disk without touching the repo itself.
 
 ## Options
 

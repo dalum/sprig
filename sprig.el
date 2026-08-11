@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.28.1
+;; Version: 0.29.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -157,26 +157,6 @@ does not already allow; adding `--permission-prompt-tool stdio' routes
 those escalations to sprig instead of the headless auto-deny."
   :type '(choice (const :tag "Ask in the review buffer" nil) function))
 
-(defcustom sprig-navigator-blocked-tools
-  '("Edit" "Write" "MultiEdit" "NotebookEdit")
-  "Tools the agent may not use while a session is in the navigator role.
-In navigator mode (see DESIGN.md, \"Navigator mode\") the human writes the
-code and the agent only advises, so these file-writing tools are denied at
-the permission channel while every other tool is allowed.  `Bash' is
-deliberately absent: the agent needs it to run `git diff', which also
-leaves it an escape hatch, so the block is belt-and-braces, not airtight."
-  :type '(repeat string))
-
-(defcustom sprig-navigator-deny-message
-  "You are the navigator, not the driver: the human writes the code here. \
-Do not modify files.  Give feedback, spot issues, and suggest approaches; \
-offer hints rather than whole solutions."
-  "Reason sent to the agent when a write is denied in the navigator role.
-It doubles as the reminder of the posture, delivered exactly when the agent
-tries to act against it, so a live role toggle needs no separate system
-prompt to keep the agent on task."
-  :type 'string)
-
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
 When a session exits abnormally, its command, exit status, and captured
@@ -292,22 +272,14 @@ the streamed `input_json_delta' fragments until the block closes.")
 (defvar-local sprig--permission-mode nil
   "The session's current permission mode, tracked from `status' events.
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
-(defvar-local sprig--role 'driver
-  "This session's pair-programming role: `driver' or `navigator'.
-In `driver' (the default) the agent edits and you review its work; in
-`navigator' the agent is held to feedback only, its file-writing tools
-denied at the permission channel (see `sprig--navigator-tool-response'
-and DESIGN.md, \"Navigator mode\").  Live-session state, not persisted:
-a reopened session starts as `driver'.")
 (defvar-local sprig--courier nil
   "Human-authored edits waiting for the agent to courier to disk, newest first.
 Each entry is a plist (:file PATH :old STRING :new STRING) staged from a
-navigator staging buffer (see `sprig-review-stage').  When the agent then
-issues an edit on a matching file, `sprig--navigator-tool-response' allows
-it but replaces the tool input's strings with the staged pair via
-`updatedInput', so the human's bytes land whatever the agent proposed: a
-courier that cannot tamper.  Live state, not persisted, and consumed on
-use.")
+staging buffer (see `sprig-review-stage-dispatch').  When the agent then
+issues an edit on a matching file, `sprig--maybe-courier' allows it but
+replaces the tool input's strings with the staged pair via `updatedInput',
+so the human's bytes land whatever the agent proposed: a courier that
+cannot tamper.  Live state, not persisted, and consumed on use.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
@@ -947,34 +919,27 @@ so the couriered write carries exactly the staged bytes."
     (setf (alist-get 'new_string out) (plist-get edit :new))
     out))
 
-(defun sprig--navigator-tool-response (request-id tool-name input)
-  "Answer a `can_use_tool' REQUEST-ID for TOOL-NAME with INPUT in navigator.
-Three outcomes.  When a human staged an edit for this file (see
-`sprig--courier') and the agent reaches for an edit tool, allow it but
-replace the tool input's strings with the staged pair via `updatedInput',
-so the human's bytes land whatever the agent proposed: the courier.
-Otherwise deny a file-writing tool (`sprig-navigator-blocked-tools') with
-the posture reminder, so the agent cannot write; allow anything else so it
-can still read the tree and run `git'.  Runs inside the process filter, so
-it never prompts."
-  (let ((edit (and (member tool-name sprig-navigator-blocked-tools)
-                   (sprig--courier-take (alist-get 'file_path input)))))
+(defvar sprig--edit-tools '("Edit" "Write" "MultiEdit" "NotebookEdit")
+  "Tool names that write a file, and so can carry a staged courier edit.
+A `can_use_tool' for one of these is where `sprig--maybe-courier' steps in
+to substitute the human's staged bytes.")
+
+(defun sprig--maybe-courier (request-id tool-name input)
+  "Courier a staged edit if TOOL-NAME/INPUT matches one, answering REQUEST-ID.
+When a human staged an edit for this file (see `sprig--courier') and the
+agent reaches for an edit tool, allow the call but replace the tool input's
+strings with the staged pair via `updatedInput', so the human's bytes land
+whatever the agent proposed: the courier that cannot tamper.  Returns
+non-nil when it answered, nil to let normal permission handling take the
+call.  Works in any permission mode, since an edit reaching `can_use_tool'
+is all it needs; it rides the same channel Sprig already answers on."
+  (when-let ((_ (member tool-name sprig--edit-tools))
+             (edit (sprig--courier-take (alist-get 'file_path input))))
     (sprig--send-control-response
      request-id
-     (cond
-      (edit (list :behavior "allow"
-                  :updatedInput (sprig--courier-updated-input input edit)))
-      ((member tool-name sprig-navigator-blocked-tools)
-       (list :behavior "deny" :message sprig-navigator-deny-message))
-      (t (list :behavior "allow"))))))
-
-(defun sprig--set-role (role)
-  "Set this session's ROLE (`driver' or `navigator') and align the CLI mode.
-Navigator puts the session in `manual' permission mode so every tool call
-routes to `sprig--navigator-tool-response'; driver returns it to `auto'.
-The role gate is Sprig-side, so this toggles live with no respawn."
-  (setq sprig--role role)
-  (sprig--set-permission-mode (if (eq role 'navigator) "manual" "auto")))
+     (list :behavior "allow"
+           :updatedInput (sprig--courier-updated-input input edit)))
+    t))
 
 (defun sprig--send-interrupt ()
   "Ask the session to interrupt the turn in flight, returning the request id.
@@ -1035,12 +1000,12 @@ session never hangs on an unanswered request."
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "ExitPlanMode"))
           (sprig--offer-plan request-id .input))
-         ;; Navigator role: hold the agent to feedback by denying its
-         ;; file-writing tools and letting the rest (reads, `git') run.
-         ;; After the interactive-tool cases above, so a question or plan
-         ;; still renders; before the generic gate, so no per-tool prompt.
-         ((and (equal .subtype "can_use_tool") (eq sprig--role 'navigator))
-          (sprig--navigator-tool-response request-id .tool_name .input))
+         ;; A staged courier edit (see `sprig--courier') is applied here,
+         ;; overriding the agent's bytes with the human's.  Before the generic
+         ;; gate so the couriered write is not prompted; after the interactive
+         ;; cases so a question or plan still renders.  A no-op otherwise.
+         ((and (equal .subtype "can_use_tool")
+               (sprig--maybe-courier request-id .tool_name .input)))
          ((equal .subtype "can_use_tool")
           (if sprig-permission-function
               (sprig--send-control-response
