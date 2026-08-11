@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.25.0
+;; Version: 0.26.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2739,6 +2739,101 @@ the CLI's own `/btw'."
   (quit-window t)
   (message "sprig: message cancelled"))
 
+;;;; Staging buffer (navigator authoring, the courier apply)
+
+(declare-function sprig--courier "sprig")
+(defvar sprig--courier)
+
+(defvar-local sprig-review--stage-target nil
+  "Review buffer a staging buffer couriers its edit to.")
+(defvar-local sprig-review--stage-file nil
+  "Path of the file a staging buffer edits, as the change model records it.")
+(defvar-local sprig-review--stage-anchor nil
+  "The staged region's original text: the `old_string' the courier edit matches.")
+
+(defun sprig-review--stage-hunk (section)
+  "Return the hunk plist to stage from SECTION, or signal a `user-error'.
+Point on a hunk stages that hunk; on a file change with a single hunk,
+that hunk.  A multi-hunk change is ambiguous, so it asks for a hunk."
+  (pcase (and section (oref section type))
+    ('sprig-hunk (oref section value))
+    ('sprig-change
+     (let ((hunks (plist-get (oref section value) :hunks)))
+       (cond ((null hunks) (user-error "This change has no hunk to stage"))
+             ((cdr hunks) (user-error "Point on a single hunk to stage it"))
+             (t (car hunks)))))
+    (_ (user-error "Point on a hunk or a single-hunk change to stage it"))))
+
+(defun sprig-review-stage ()
+  "Rewrite the region at point yourself, for the agent to courier to disk.
+Opens a staging buffer seeded with the current text of the hunk at point,
+in the file's own major mode.  Edit it as you like, then `C-c C-c' stages
+the result: the agent is asked to make the write, but Sprig replaces its
+bytes with yours through the permission channel, so what you typed is what
+lands (see `sprig--courier').  `C-c C-k' cancels.
+
+Navigator-only, since the courier rides the navigator permission gate; the
+whole point is to author the change by hand rather than review the agent's."
+  (interactive)
+  (unless (eq sprig--role 'navigator)
+    (user-error "Staging is a navigator verb; switch role with `V' first"))
+  (unless sprig--session-id
+    (user-error "No session yet; start one before staging an edit"))
+  (let* ((review (current-buffer))
+         (section (magit-current-section))
+         (file (sprig-review--section-file section))
+         (hunk (sprig-review--stage-hunk section))
+         ;; The current text of the region is the post-image where the model
+         ;; has one, else the pre-image: the best guess at what is on disk,
+         ;; and so the `old_string' the couriered Edit must match.
+         (lines (or (plist-get hunk :new) (plist-get hunk :old)))
+         (anchor (mapconcat #'identity lines "\n"))
+         (buf (get-buffer-create "*sprig-stage*")))
+    (unless file (user-error "No file at point to stage"))
+    (with-current-buffer buf
+      (erase-buffer)
+      (insert anchor)
+      (let ((buffer-file-name file)) (set-auto-mode t))
+      (setq buffer-file-name nil)
+      (setq-local sprig-review--stage-target review
+                  sprig-review--stage-file file
+                  sprig-review--stage-anchor anchor)
+      (use-local-map (copy-keymap (or (current-local-map) (make-sparse-keymap))))
+      (local-set-key (kbd "C-c C-c") #'sprig-review-stage-apply)
+      (local-set-key (kbd "C-c C-k") #'sprig-review-stage-abort)
+      (goto-char (point-min)))
+    (pop-to-buffer buf)
+    (message "Edit %s, then C-c C-c to stage, C-c C-k to cancel"
+             (file-name-nondirectory file))))
+
+(defun sprig-review-stage-apply ()
+  "Stage this buffer's edit and ask the session to courier it to disk."
+  (interactive)
+  (let ((review sprig-review--stage-target)
+        (file sprig-review--stage-file)
+        (anchor sprig-review--stage-anchor)
+        (new (buffer-substring-no-properties (point-min) (point-max))))
+    (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+    (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
+    (with-current-buffer review
+      (unless (eq sprig--role 'navigator)
+        (user-error "Session left navigator; switch back with `V' to courier"))
+      (push (list :file file :old anchor :new new) sprig--courier)
+      (sprig-review--send
+       (format "I have authored an edit to `%s' by hand and staged it in Sprig. \
+Call the Edit tool on that file once now to apply it: your `old_string' and \
+`new_string' arguments are placeholders, because Sprig replaces them with the \
+exact staged bytes through the permission channel. This one write is \
+authorised; make only this single Edit and nothing else." file)))
+    (quit-window t)
+    (message "sprig: staged edit to %s; couriering" (file-name-nondirectory file))))
+
+(defun sprig-review-stage-abort ()
+  "Cancel the staged edit without couriering it."
+  (interactive)
+  (quit-window t)
+  (message "sprig: staging cancelled"))
+
 ;;;; Answering: the verbs, and the buffer they open
 
 (defvar-local sprig-answer--review nil
@@ -3134,6 +3229,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
 (define-key sprig-review-mode-map (kbd "V")   #'sprig-review-toggle-role)
+(define-key sprig-review-mode-map (kbd "e")   #'sprig-review-stage)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

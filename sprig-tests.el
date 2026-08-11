@@ -1019,8 +1019,8 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
   (let ((sent nil))
     (cl-letf (((symbol-function 'sprig--send-control-response)
                (lambda (id resp) (push (cons id resp) sent))))
-      (sprig--navigator-tool-response "r1" "Edit")
-      (sprig--navigator-tool-response "r2" "Read")
+      (sprig--navigator-tool-response "r1" "Edit" nil)
+      (sprig--navigator-tool-response "r2" "Read" nil)
       (let ((edit (alist-get "r1" sent nil nil #'equal))
             (read (alist-get "r2" sent nil nil #'equal)))
         (should (equal (plist-get edit :behavior) "deny"))
@@ -1077,6 +1077,72 @@ With no permission function it falls to the in-buffer offer, as before."
          "r1" '((subtype . "can_use_tool") (tool_name . "Edit")
                 (input . nil)))
         (should offered)))))
+
+;;;; Navigator courier
+
+(ert-deftest sprig-test-courier-take-matches-basename ()
+  "A staged edit is taken by basename, letting an absolute path match it."
+  (with-temp-buffer
+    (setq-local sprig--courier
+                (list '(:file "src/x.el" :old "a" :new "b")))
+    (let ((hit (sprig--courier-take "/home/u/repo/src/x.el")))
+      (should (equal (plist-get hit :new) "b"))
+      ;; Consumed: a second take finds nothing.
+      (should-not (sprig--courier-take "/home/u/repo/src/x.el")))))
+
+(ert-deftest sprig-test-courier-take-single-pending-any-path ()
+  "With one edit pending it is taken even when the path does not line up."
+  (with-temp-buffer
+    (setq-local sprig--courier (list '(:file "x.el" :old "a" :new "b")))
+    (should (equal (plist-get (sprig--courier-take "y.el") :new) "b"))))
+
+(ert-deftest sprig-test-courier-updated-input-overrides-strings ()
+  "The override keeps the agent's file_path but swaps in the staged strings."
+  (let* ((input '((file_path . "/abs/x.el") (old_string . "agent-old")
+                  (new_string . "agent-new") (replace_all . :false)))
+         (out (sprig--courier-updated-input
+               input '(:file "x.el" :old "MINE-OLD" :new "MINE-NEW"))))
+    (should (equal (alist-get 'file_path out) "/abs/x.el"))
+    (should (equal (alist-get 'old_string out) "MINE-OLD"))
+    (should (equal (alist-get 'new_string out) "MINE-NEW"))
+    (should (eq (alist-get 'replace_all out) :false))))
+
+(ert-deftest sprig-test-navigator-couriers-staged-edit ()
+  "A write matching a staged edit is allowed with the staged bytes overridden."
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig--send-control-response)
+                 (lambda (id resp) (push (cons id resp) sent))))
+        (setq-local sprig--courier (list '(:file "x.el" :old "MINE" :new "YOURS")))
+        (sprig--navigator-tool-response
+         "r1" "Edit" '((file_path . "/abs/x.el") (old_string . "a")
+                       (new_string . "b")))
+        (let ((resp (cdar sent)))
+          (should (equal (plist-get resp :behavior) "allow"))
+          (let ((upd (plist-get resp :updatedInput)))
+            (should (equal (alist-get 'old_string upd) "MINE"))
+            (should (equal (alist-get 'new_string upd) "YOURS"))))
+        ;; The edit is consumed, so a second write is denied as usual.
+        (setq sent nil)
+        (sprig--navigator-tool-response
+         "r2" "Edit" '((file_path . "/abs/x.el")))
+        (should (equal (plist-get (cdar sent) :behavior) "deny"))))))
+
+(ert-deftest sprig-test-navigator-courier-ignores-other-file ()
+  "A staged edit for one file does not sanction a write to another.
+The unrelated write is denied, and the staged edit stays pending."
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig--send-control-response)
+                 (lambda (id resp) (push (cons id resp) sent))))
+        (setq-local sprig--courier (list '(:file "x.el" :old "m" :new "y")
+                                         '(:file "z.el" :old "p" :new "q")))
+        ;; Two pending, so the single-pending fallback does not fire and the
+        ;; basename must match: a write to an unlisted file is denied.
+        (sprig--navigator-tool-response
+         "r1" "Write" '((file_path . "/abs/other.el")))
+        (should (equal (plist-get (cdar sent) :behavior) "deny"))
+        (should (= (length sprig--courier) 2))))))
 
 ;;;; Ground-truth diff parser
 

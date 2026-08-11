@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.25.0
+;; Version: 0.26.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -309,6 +309,15 @@ In `driver' (the default) the agent edits and you review its work; in
 denied at the permission channel (see `sprig--navigator-tool-response'
 and DESIGN.md, \"Navigator mode\").  Live-session state, not persisted:
 a reopened session starts as `driver'.")
+(defvar-local sprig--courier nil
+  "Human-authored edits waiting for the agent to courier to disk, newest first.
+Each entry is a plist (:file PATH :old STRING :new STRING) staged from a
+navigator staging buffer (see `sprig-review-stage').  When the agent then
+issues an edit on a matching file, `sprig--navigator-tool-response' allows
+it but replaces the tool input's strings with the staged pair via
+`updatedInput', so the human's bytes land whatever the agent proposed: a
+courier that cannot tamper.  Live state, not persisted, and consumed on
+use.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
@@ -917,18 +926,52 @@ does with the interrupt receipt."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
 
-(defun sprig--navigator-tool-response (request-id tool-name)
-  "Answer a `can_use_tool' REQUEST-ID for TOOL-NAME in the navigator role.
-Denies a file-writing tool (`sprig-navigator-blocked-tools') with the
-posture reminder, so the agent cannot write; allows anything else so it
-can still read the tree and run `git'.  Runs inside the process filter,
-so it never prompts.  The courier carve-out that allows one
-human-authored write is a later slice."
-  (sprig--send-control-response
-   request-id
-   (if (member tool-name sprig-navigator-blocked-tools)
-       (list :behavior "deny" :message sprig-navigator-deny-message)
-     (list :behavior "allow"))))
+(defun sprig--courier-take (file-path)
+  "Pop the staged courier edit for FILE-PATH off `sprig--courier', or nil.
+Matches on the basename, so the agent's absolute path lines up with a
+repo-relative staged path; with a single edit pending it takes that one.
+Consumes the entry, so each staged edit is couriered at most once."
+  (when sprig--courier
+    (let* ((base (and file-path (file-name-nondirectory file-path)))
+           (hit (or (seq-find (lambda (e)
+                                (equal base (file-name-nondirectory
+                                             (plist-get e :file))))
+                              sprig--courier)
+                    (and (null (cdr sprig--courier)) (car sprig--courier)))))
+      (when hit
+        (setq sprig--courier (delq hit sprig--courier))
+        hit))))
+
+(defun sprig--courier-updated-input (input edit)
+  "Return INPUT (a tool-input alist) with EDIT's staged strings substituted.
+Keeps the agent's own `file_path' (already resolved to an absolute path)
+and overrides only `old_string'/`new_string' with the human-authored pair,
+so the couriered write carries exactly the staged bytes."
+  (let ((out (copy-alist input)))
+    (setf (alist-get 'old_string out) (plist-get edit :old))
+    (setf (alist-get 'new_string out) (plist-get edit :new))
+    out))
+
+(defun sprig--navigator-tool-response (request-id tool-name input)
+  "Answer a `can_use_tool' REQUEST-ID for TOOL-NAME with INPUT in navigator.
+Three outcomes.  When a human staged an edit for this file (see
+`sprig--courier') and the agent reaches for an edit tool, allow it but
+replace the tool input's strings with the staged pair via `updatedInput',
+so the human's bytes land whatever the agent proposed: the courier.
+Otherwise deny a file-writing tool (`sprig-navigator-blocked-tools') with
+the posture reminder, so the agent cannot write; allow anything else so it
+can still read the tree and run `git'.  Runs inside the process filter, so
+it never prompts."
+  (let ((edit (and (member tool-name sprig-navigator-blocked-tools)
+                   (sprig--courier-take (alist-get 'file_path input)))))
+    (sprig--send-control-response
+     request-id
+     (cond
+      (edit (list :behavior "allow"
+                  :updatedInput (sprig--courier-updated-input input edit)))
+      ((member tool-name sprig-navigator-blocked-tools)
+       (list :behavior "deny" :message sprig-navigator-deny-message))
+      (t (list :behavior "allow"))))))
 
 (defun sprig--set-role (role)
   "Set this session's ROLE (`driver' or `navigator') and align the CLI mode.
@@ -1002,7 +1045,7 @@ session never hangs on an unanswered request."
          ;; After the interactive-tool cases above, so a question or plan
          ;; still renders; before the generic gate, so no per-tool prompt.
          ((and (equal .subtype "can_use_tool") (eq sprig--role 'navigator))
-          (sprig--navigator-tool-response request-id .tool_name))
+          (sprig--navigator-tool-response request-id .tool_name .input))
          ((equal .subtype "can_use_tool")
           (if sprig-permission-function
               (sprig--send-control-response
