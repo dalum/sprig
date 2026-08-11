@@ -2092,17 +2092,22 @@ the fold learns the id from the result rather than from the call."
                   "     1\tcode\n(a note without a number)")
                  "code")))
 
-(ert-deftest sprig-review-mode-test-read-text-for-latest ()
-  "The latest non-error Read for the file (by basename) wins; errors skip."
+(ert-deftest sprig-review-mode-test-latest-read ()
+  "The latest non-error Read wins; a file filter matches by basename."
   (let ((model (sprig-review-build
                 `((tool-call "r1" "Read"
                              ,(json-serialize (list :file_path "/repo/x.el")))
                   (tool-result "r1" nil "     1\told")
                   (tool-call "r2" "Read"
-                             ,(json-serialize (list :file_path "/repo/x.el")))
+                             ,(json-serialize (list :file_path "/repo/y.el")))
                   (tool-result "r2" nil "     1\tnew")))))
-    (should (equal (sprig-review--read-text-for model "x.el") "     1\tnew"))
-    (should (null (sprig-review--read-text-for model "other.el")))))
+    ;; Filtered to x.el by basename: its read, not the later y.el one.
+    (should (equal (sprig-review--latest-read model "x.el")
+                   '("/repo/x.el" . "     1\told")))
+    (should (null (sprig-review--latest-read model "other.el")))
+    ;; Unfiltered (agent-suggested): the latest read of any file, path and all.
+    (should (equal (sprig-review--latest-read model)
+                   '("/repo/y.el" . "     1\tnew")))))
 
 (ert-deftest sprig-review-mode-test-seed-from-read-opens-buffer ()
   "A pending seed served on a read opens the staging buffer with its bytes."
@@ -2118,7 +2123,24 @@ the fold learns the id from the result rather than from the call."
         (with-current-buffer "*sprig-stage*"
           (should (equal (buffer-substring-no-properties (point-min) (point-max))
                          "hello\nworld"))
-          (should (equal sprig-review--stage-file "x.el"))))
+          ;; Seeded at the path the agent actually read, not the request.
+          (should (equal sprig-review--stage-file "/repo/x.el"))))
+    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
+
+(ert-deftest sprig-review-mode-test-seed-from-read-any-learns-file ()
+  "An agent-suggested seed (:any) opens at whatever file the agent read."
+  (unwind-protect
+      (with-temp-buffer
+        (sprig-review-mode)
+        (setq sprig-review--pending-seed '(:any t))
+        (sprig-review-consume (list 'tool-call "r1" "Read"
+                                    (json-serialize (list :file_path "/repo/z.el"))))
+        (sprig-review-consume '(tool-result "r1" nil "     1\tpicked"))
+        (sprig-review--seed-from-read)
+        (with-current-buffer "*sprig-stage*"
+          (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                         "picked"))
+          (should (equal sprig-review--stage-file "/repo/z.el"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
 
 (ert-deftest sprig-review-mode-test-seed-from-read-missing-clears ()

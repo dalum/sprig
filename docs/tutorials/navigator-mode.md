@@ -54,19 +54,25 @@ The loop is four steps.
 
 ### 1. Open a staging buffer with `e`
 
-Press **`e`** to stage a region. There are two cases:
+Press **`e`** to open the staging menu. It offers three ways to fill the
+buffer, differing only in how the region is chosen:
 
-- **On a diff hunk** (point sits on a `+`/`-` line of a change already shown in
-  the buffer): the staging buffer opens straight away, seeded with that
-  region's current text.
-- **Anywhere else**: `e` asks you for a file, and then for an optional region
-  hint. The hint is free text the agent reads, like `the save function` or
-  `lines 10-40`; leave it blank to take the whole file. The agent reads that
-  region, and the staging buffer opens once its read comes back (you will see a
-  brief "reading… to seed a staging buffer" message while it works).
+- **`e e` — the hunk at point.** With point on a `+`/`-` line of a change
+  already shown in the buffer, the staging buffer opens straight away, seeded
+  with that region's current text.
+- **`e f` — a file you name.** Sprig asks you for a file, then for an optional
+  region hint. The hint is free text the agent reads, like `the save function`
+  or `lines 10-40`; leave it blank to take the whole file. The agent reads that
+  region, and the staging buffer opens once its read comes back.
+- **`e s` — let the agent suggest.** You describe what you want to do ("add a
+  guard clause to config parsing"). The agent works out the single most
+  relevant file and region, reads exactly that, and the staging buffer opens on
+  it. Use this when you know the change you want but not yet where it lands.
 
-The second case is the important one: it lets you edit a region the diff does
-not already show, which is most real authoring.
+`e f` and `e s` involve the agent, so the buffer opens once its read comes back
+(you will see a brief "…to seed a staging buffer" message meanwhile). These two
+are the important ones: they let you edit a region the diff does not already
+show, which is most real authoring.
 
 ### 2. Edit it
 
@@ -96,8 +102,9 @@ You are in a remote session and want to add a guard clause to `parse_config` in
 `config.py`, by hand.
 
 1. `V` to enter navigator mode. The state line shows `navigator`.
-2. `e`. At the prompt, enter `config.py`, then `the parse_config function` as
-   the region hint.
+2. `e f`. At the prompt, enter `config.py`, then `the parse_config function` as
+   the region hint. (Or `e s` and describe the change, to let the agent find
+   the spot for you.)
 3. The agent reads it; a staging buffer opens with `parse_config`'s current
    source in Python mode.
 4. You add your guard clause at the top of the function.

@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.27.0
+;; Version: 0.28.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -263,10 +263,12 @@ Liveness cannot be read off the model instead: a replayed session log
 carries no `done' event, so its last block would pass for a live tail
 forever, and a conversation read from disk would claim to be working.")
 (defvar-local sprig-review--pending-seed nil
-  "A staging seed waiting on a `Read', a plist (:file PATH), or nil.
+  "A staging seed waiting on a `Read', a plist, or nil.
 Set when `e' targets a region not already in the model: the agent is asked
-to `Read' the file, and the next turn's `done' seeds a staging buffer from
-that read (see `sprig-review--seed-from-read').  Live state, consumed on
+to `Read' it, and the next turn's `done' seeds a staging buffer from that
+read (see `sprig-review--seed-from-read').  The plist is (:file PATH) when
+you named the file (`e f'), or (:any t) when the agent chose it (`e s'), in
+which case the file is learnt from the read itself.  Live state, consumed on
 use, so a later replay never re-opens the buffer.")
 (defvar-local sprig-review--pending-steer nil
   "Steer messages written to stdin mid-turn but not yet taken, oldest first.
@@ -2874,56 +2876,84 @@ so a stray save writes no file."
     (message "Edit %s, then C-c C-c to stage, C-c C-k to cancel"
              (file-name-nondirectory file))))
 
-(defun sprig-review-stage (&optional file region)
-  "Rewrite a region yourself, for the agent to courier to disk (`e').
-On a diff hunk, opens a staging buffer seeded with the hunk's current text
-straight away.  Anywhere else, prompts for a FILE and an optional REGION
-hint (\"function foo\", \"lines 10-40\"), asks the agent to `Read' it, and
-seeds the buffer from that read when the turn ends: this is how you edit a
-region the diff does not already show.  Either way you then edit the buffer
-and `C-c C-c' stages the result; the agent is asked to make the write, but
-Sprig replaces its bytes with yours through the permission channel, so what
-you typed is what lands (see `sprig--courier').  `C-c C-k' cancels.
-
-Navigator-only, since the courier rides the navigator permission gate; the
-whole point is to author the change by hand rather than review the agent's."
-  (interactive)
+(defun sprig-review--stage-guard ()
+  "Signal a `user-error' unless this buffer can stage an edit right now.
+Staging is navigator-only (the courier rides the navigator permission gate)
+and needs a live session to read and courier through."
   (unless (eq sprig--role 'navigator)
     (user-error "Staging is a navigator verb; switch role with `V' first"))
   (unless sprig--session-id
-    (user-error "No session yet; start one before staging an edit"))
-  (let* ((review (current-buffer))
-         (section (magit-current-section))
-         (hunk (and (not file) (sprig-review--stage-hunk section))))
-    (if hunk
-        ;; The current text of the region is the post-image where the model
-        ;; has one, else the pre-image: the best guess at what is on disk,
-        ;; and so the `old_string' the couriered Edit must match.
-        (let ((path (or (sprig-review--section-file section)
-                        (user-error "No file at point to stage")))
-              (lines (or (plist-get hunk :new) (plist-get hunk :old))))
-          (sprig-review--open-stage-buffer
-           review path (mapconcat #'identity lines "\n")))
-      ;; No hunk here: name a region and let the agent read it for us.
-      (let* ((path (or file
-                       (read-string "Stage which file: "
-                                    (sprig-review--section-file section))))
-             (hint (or region
-                       (read-string "Region (blank = whole file): "))))
-        (when (string-empty-p (string-trim path))
-          (user-error "No file to stage"))
-        (setq path (string-trim path)
-              hint (string-trim hint))
-        (setq sprig-review--pending-seed (list :file path))
-        (sprig-review--send
-         (format "Read the file `%s'%s and return only that one Read, nothing \
-else: no edits, no summary, no other tools. I am about to edit it by hand and \
-Sprig seeds my staging buffer from your read."
-                 path
-                 (if (string-empty-p hint) ""
-                   (format " (just %s)" hint))))
-        (message "sprig: reading %s to seed a staging buffer…"
-                 (file-name-nondirectory path))))))
+    (user-error "No session yet; start one before staging an edit")))
+
+(defun sprig-review--request-seed (pending instruction reading)
+  "Arrange to seed a staging buffer from a read the agent is about to run.
+Records PENDING (see `sprig-review--pending-seed') as the seed to serve,
+sends INSTRUCTION as a turn, and says READING; the next turn's `done' opens
+the staging buffer from the `Read' result (see `sprig-review--seed-from-read')."
+  (setq sprig-review--pending-seed pending)
+  (sprig-review--send instruction)
+  (message "sprig: %s to seed a staging buffer…" reading))
+
+(defun sprig-review-stage-at-point ()
+  "Stage the diff hunk at point, seeded straight from the model (`e e').
+The region's current text is the post-image where the model has one, else
+the pre-image: the best guess at what is on disk, and so the `old_string'
+the couriered Edit must match."
+  (interactive)
+  (sprig-review--stage-guard)
+  (let* ((section (magit-current-section))
+         (hunk (or (sprig-review--stage-hunk section)
+                   (user-error "Point is not on a hunk; try `e f' or `e s'")))
+         (file (or (sprig-review--section-file section)
+                   (user-error "No file at point to stage")))
+         (lines (or (plist-get hunk :new) (plist-get hunk :old))))
+    (sprig-review--open-stage-buffer
+     (current-buffer) file (mapconcat #'identity lines "\n"))))
+
+(defun sprig-review-stage-file (file &optional region)
+  "Name a FILE (and optional REGION hint) for the agent to read, then stage it.
+Asks the agent to `Read' the region and seeds the staging buffer from that
+read when the turn ends, so you can edit a region the diff does not already
+show.  REGION is free text (\"function foo\", \"lines 10-40\"); blank reads
+the whole file (`e f')."
+  (interactive
+   (progn
+     (sprig-review--stage-guard)
+     (list (read-string "Stage which file: "
+                        (sprig-review--section-file (magit-current-section)))
+           (read-string "Region (blank = whole file): "))))
+  (sprig-review--stage-guard)
+  (let ((path (string-trim (or file "")))
+        (hint (string-trim (or region ""))))
+    (when (string-empty-p path) (user-error "No file to stage"))
+    (sprig-review--request-seed
+     (list :file path)
+     (format "Read the file `%s'%s and return only that one Read, nothing else: \
+no edits, no summary, no other tools. I am about to edit it by hand and Sprig \
+seeds my staging buffer from your read."
+             path (if (string-empty-p hint) "" (format " (just %s)" hint)))
+     (format "reading %s" (file-name-nondirectory path)))))
+
+(defun sprig-review-stage-suggested (task)
+  "Describe a TASK and let the agent suggest what to put in the staging buffer.
+The agent decides the single most relevant file and region for TASK, reads
+exactly that, and Sprig seeds the staging buffer from its read when the turn
+ends: the agent scopes, you author (`e s').  This is the scoping front-end to
+staging, for when you know what you want to do but not yet where it lands."
+  (interactive
+   (progn (sprig-review--stage-guard)
+          (list (read-string "What do you want to edit: "))))
+  (sprig-review--stage-guard)
+  (let ((task (string-trim (or task ""))))
+    (when (string-empty-p task) (user-error "Describe what to edit"))
+    (sprig-review--request-seed
+     (list :any t)
+     (format "I want to edit code by hand for this task: %s\n\nDecide the single \
+most relevant file and the specific region within it to change, then `Read' \
+exactly that region and return only that one Read: no edits, no summary, no \
+other tools. Sprig seeds my staging buffer from your read, so read the slice \
+you would want me to be editing." task)
+     "asking the agent what to stage")))
 
 (defun sprig-review--strip-read-numbers (text)
   "Reconstruct file content from a `Read' TEXT in cat -n form.
@@ -2936,38 +2966,40 @@ newlines.  The result is the file's bytes as read, the courier anchor."
         (push (substring line (match-end 0)) out)))
     (mapconcat #'identity (nreverse out) "\n")))
 
-(defun sprig-review--read-text-for (model file)
-  "Return the latest `Read' result text in MODEL for FILE, or nil.
-Matches on the basename, so a repo-relative request lines up with the
-agent's absolute path."
-  (let ((base (file-name-nondirectory file)) hit)
+(defun sprig-review--latest-read (model &optional file)
+  "Return (FILE-PATH . TEXT) for the latest non-error `Read' in MODEL, or nil.
+With FILE, restrict to reads whose basename matches it, so a repo-relative
+request lines up with the agent's absolute path.  Without, take the most
+recent read of any file, which is how an agent-suggested seed learns the
+file the agent chose."
+  (let ((base (and file (file-name-nondirectory file))) hit)
     (dolist (b (plist-get model :blocks))
-      (when (and (eq (plist-get b :type) 'tool)
-                 (equal (plist-get b :name) "Read")
-                 (not (plist-get (plist-get b :result) :error))
-                 (equal base (file-name-nondirectory
-                              (or (alist-get 'file_path
-                                             (sprig-review--parse-input
-                                              (plist-get b :input)))
-                                  ""))))
-        (setq hit (plist-get (plist-get b :result) :text))))
+      (let ((path (and (eq (plist-get b :type) 'tool)
+                       (equal (plist-get b :name) "Read")
+                       (not (plist-get (plist-get b :result) :error))
+                       (alist-get 'file_path
+                                  (sprig-review--parse-input
+                                   (plist-get b :input))))))
+        (when (and path (or (null base)
+                            (equal base (file-name-nondirectory path))))
+          (setq hit (cons path (plist-get (plist-get b :result) :text))))))
     hit))
 
 (defun sprig-review--seed-from-read ()
   "Seed a staging buffer from the read a `sprig-review--pending-seed' asked for.
-Called on a turn's `done': finds the file's `Read' result in the model,
-reconstructs its bytes as the anchor, and opens the staging buffer.  Clears
-the pending seed either way, and reports when no usable read came back."
+Called on a turn's `done': finds the relevant `Read' in the model (the named
+file, or the latest read for an agent-suggested seed), reconstructs its bytes
+as the anchor, and opens the staging buffer at the file the agent read.
+Clears the pending seed either way, and reports when no usable read came back."
   (let* ((seed sprig-review--pending-seed)
-         (file (plist-get seed :file))
-         (text (and seed (sprig-review--read-text-for
-                          (sprig-review--current-model) file))))
+         (hit (and seed (sprig-review--latest-read
+                         (sprig-review--current-model) (plist-get seed :file)))))
     (setq sprig-review--pending-seed nil)
-    (if (not text)
-        (message "sprig: no read of %s came back; staging cancelled"
-                 (file-name-nondirectory file))
+    (if (not hit)
+        (message "sprig: no read came back; staging cancelled")
       (sprig-review--open-stage-buffer
-       (current-buffer) file (sprig-review--strip-read-numbers text)))))
+       (current-buffer) (car hit)
+       (sprig-review--strip-read-numbers (cdr hit))))))
 
 (defun sprig-review-stage-apply ()
   "Stage this buffer's edit and ask the session to courier it to disk."
@@ -3372,6 +3404,17 @@ name the CLI's own modes, the ones the shift-tab cycle steps through."
     ("m" "manual (prompt for every tool call)" sprig-review-manual-mode)
     ("b" "bypass (auto-approve everything, incl. shell)" sprig-review-bypass-mode)]])
 
+(transient-define-prefix sprig-review-stage-dispatch ()
+  "Open a staging buffer to author an edit by hand (`e').
+Navigator-only.  You edit the seeded buffer, then `C-c C-c' stages it and
+the agent couriers your bytes to disk (see `sprig--courier'); `C-c C-k'
+cancels.  The routes differ only in how the buffer is seeded: from the hunk
+you are on, from a file you name, or from what the agent suggests for a task."
+  [["Stage an edit"
+    ("e" "the hunk at point" sprig-review-stage-at-point)
+    ("f" "a file / region you name (agent reads it)" sprig-review-stage-file)
+    ("s" "let the agent suggest what to edit" sprig-review-stage-suggested)]])
+
 (transient-define-prefix sprig-review-session-dispatch ()
   "Start or fork a session from the review buffer.
 `c' steers the conversation this buffer already owns; `s' is where a
@@ -3392,7 +3435,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "s")   #'sprig-review-session-dispatch)
 (define-key sprig-review-mode-map (kbd "P")   #'sprig-review-permission-mode)
 (define-key sprig-review-mode-map (kbd "V")   #'sprig-review-toggle-role)
-(define-key sprig-review-mode-map (kbd "e")   #'sprig-review-stage)
+(define-key sprig-review-mode-map (kbd "e")   #'sprig-review-stage-dispatch)
 (define-key sprig-review-mode-map (kbd "k")   #'sprig-review-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).
