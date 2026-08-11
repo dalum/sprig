@@ -976,15 +976,25 @@ is all it needs; it rides the same channel Sprig already answers on."
          tool-name (alist-get 'file_path input)
          (length (or (plist-get edit :old) ""))
          (length (or (plist-get edit :new) "")) request-id)
+        (message "sprig: couriered your staged edit to %s"
+                 (file-name-nondirectory (or (alist-get 'file_path input) "")))
         (sprig--send-control-response
          request-id
          (list :behavior "allow"
                :updatedInput (sprig--courier-updated-input input edit)))
         t)
-    (when (member tool-name sprig--edit-tools)
+    ;; A staged edit is pending but this edit did not match it: the human's
+    ;; bytes are about to be lost to the agent's placeholder.  Warn always,
+    ;; not just under `sprig-debug', since it is silent data loss otherwise.
+    (when (and (member tool-name sprig--edit-tools) sprig--courier)
       (sprig--debug
        "courier: %s for %s reached the gate, nothing staged matched (%d pending)"
-       tool-name (alist-get 'file_path input) (length sprig--courier)))
+       tool-name (alist-get 'file_path input) (length sprig--courier))
+      (message
+       "sprig: staged edit NOT couriered: %s did not match the %d staged; \
+check the path or re-stage"
+       (file-name-nondirectory (or (alist-get 'file_path input) "?"))
+       (length sprig--courier)))
     nil))
 
 (defun sprig--send-interrupt ()
