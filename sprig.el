@@ -2774,7 +2774,8 @@ are still two different sessions.  Rows come back ordered by
 When `sprig--status-filter' is set, only rows matching it are returned; a
 group filtered down to nothing keeps its heading all the same."
   (let ((table (make-hash-table :test 'equal))
-        (order '()))
+        (order '())
+        (buffer-hosts '()))
     (dolist (buf (sprig--owning-review-buffers))
       (let* ((host (sprig--buffer-remote buf))
              (id (buffer-local-value 'sprig--session-id buf))
@@ -2787,6 +2788,7 @@ group filtered down to nothing keeps its heading all the same."
              ;; by id like any other session.
              (forking (buffer-local-value 'sprig--fork-session buf))
              (key (cons host (if forking buf (or id buf)))))
+        (push host buffer-hosts)
         (unless (gethash key table)
           (push key order)
           (puthash key
@@ -2810,7 +2812,15 @@ group filtered down to nothing keeps its heading all the same."
                          :queued (length (buffer-local-value 'sprig--queued buf))
                          :session id)
                    table))))
-    (dolist (host (sprig--status-hosts))
+    ;; Scan the configured hosts, plus any a buffer row is pinned to that is
+    ;; not among them: a session opened on a host since dropped from
+    ;; `sprig-remotes' still has an open buffer and a group of its own (see
+    ;; `sprig--status-group-hosts'), so it must still get its log-scan pass, or
+    ;; it would render with no creation time, last-run time, or log-borrowed
+    ;; title.  `sprig--status-hosts' leads, so it keeps its order; the extras
+    ;; follow in the order their buffers were seen.
+    (dolist (host (delete-dups (append (sprig--status-hosts)
+                                       (nreverse buffer-hosts))))
       ;; The scan, and everything it reaches (the head slurp, the SSH round
       ;; trips), keys off the primary remote, which `sprig--status-scan-cached'
       ;; binds per host as the sole entry: one host per pass, each with a cap

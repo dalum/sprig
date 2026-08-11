@@ -2490,6 +2490,36 @@ without a real SSH process."
                     '((:host nil) (:host "me@host") (:host "old@host")))
                    '(nil "me@host" "old@host")))))
 
+(ert-deftest sprig-test-status-collect-scans-a-pinned-stray-host ()
+  ;; A buffer pinned to a host that is not in `sprig-remotes' (e.g. one the
+  ;; config since dropped) still gets its log-scan pass, so its creation
+  ;; time fills in from the log rather than rendering blank: the scan loop
+  ;; covers the hosts its buffers came from, not only the configured ones.
+  (let ((sprig-remotes nil)                      ; the stray host is unconfigured
+        (sprig--status-scan-cache nil)
+        (sprig-claude-projects-directory "/x"))
+    (cl-letf (((symbol-function 'sprig--remote-sh)
+               (lambda (_cmd)
+                 (concat "\03620.0\037/r/-p/stray-1.jsonl\037"
+                         "{\"cwd\":\"/home/me/p\","
+                         "\"timestamp\":\"2026-08-07T14:10:58.784Z\","
+                         "\"aiTitle\":\"Stray one\"}\037"))))
+      (sprig-tests--warm-remote-scan "old@host")
+      (with-temp-buffer
+        (setq-local sprig--sink #'sprig--review-sink
+                    sprig--session-id "stray-1"
+                    sprig--remote-override "old@host"
+                    sprig--working-dir "/home/me/p"
+                    sprig-review--meta '(:title "Stray one"))
+        (let* ((rows (sprig--status-collect))
+               (e (seq-find (lambda (r) (equal (plist-get r :session) "stray-1"))
+                            rows)))
+          (should e)
+          (should (eq (plist-get e :buffer) (current-buffer)))
+          (should (equal (plist-get e :host) "old@host"))
+          ;; The stray host's scan pass ran, so its creation time is filled.
+          (should (plist-get e :created)))))))
+
 (ert-deftest sprig-test-status-sort-by-group ()
   ;; Rows are ordered by their host's group; within a group the scan's
   ;; newest-first order survives, since `sort' is stable.
