@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.30.0
+;; Version: 0.31.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -162,6 +162,15 @@ those escalations to sprig instead of the headless auto-deny."
 When a session exits abnormally, its command, exit status, and captured
 stderr are appended here and the buffer is displayed."
   :type 'string)
+
+(defcustom sprig-debug nil
+  "When non-nil, trace courier and permission activity to `*sprig-debug*'.
+Every control response sprig sends is logged with its raw bytes, each
+courier decision (fired, or reached the gate with nothing staged) is
+noted, and the session's stderr is mirrored live, so a staged edit that
+fails to land can be traced end to end.  Off by default: the log is
+verbose and only useful when diagnosing the courier."
+  :type 'boolean)
 
 (defcustom sprig-status-max-sessions 30
   "How many of the newest stored sessions the navigator lists at once.
@@ -693,18 +702,30 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
 
 ;;;; Process lifecycle: stderr, errors, sentinel
 
+(defun sprig--debug (fmt &rest args)
+  "Append a timestamped FMT/ARGS line to `*sprig-debug*' when `sprig-debug'.
+A no-op when debugging is off, so callers can trace freely without cost."
+  (when sprig-debug
+    (with-current-buffer (get-buffer-create "*sprig-debug*")
+      (goto-char (point-max))
+      (insert (format-time-string "[%H:%M:%S] ")
+              (apply #'format fmt args)
+              "\n"))))
+
 (defun sprig--make-stderr ()
   "Return a pipe process that accumulates the session's stderr.
 Routing stderr here keeps its non-JSON diagnostics out of `sprig--filter',
 which would otherwise silently drop them.  The text is read back from the
-process property `:acc' when the main process exits."
+process property `:acc' when the main process exits (or `sprig-show-stderr'
+mid-session), and mirrored live to `*sprig-debug*' when `sprig-debug'."
   (make-pipe-process
    :name "sprig-stderr"
    :buffer nil
    :noquery t
    :coding 'utf-8-unix
    :filter (lambda (proc chunk)
-             (process-put proc :acc (concat (or (process-get proc :acc) "") chunk)))
+             (process-put proc :acc (concat (or (process-get proc :acc) "") chunk))
+             (sprig--debug "stderr: %s" (string-trim-right chunk)))
    :sentinel #'ignore))
 
 (defun sprig--log-error (conv-buffer header body)
@@ -722,6 +743,20 @@ HEADER names what failed; BODY is the captured stderr or detail text."
                             (string-trim body)
                           "(no stderr output)")))))
     (display-buffer buf)))
+
+(defun sprig-show-stderr ()
+  "Show the live session's captured stderr in `sprig-error-buffer'.
+The CLI's non-JSON diagnostics accumulate quietly until an abnormal exit;
+among them are permission-handler complaints (a rejected or empty
+`updatedInput' the courier sent, say), so surfacing them mid-session lets
+a staged edit that failed to land be diagnosed without waiting for a
+crash.  Call it from the review buffer whose session you are debugging."
+  (interactive)
+  (let ((stderr (and (process-live-p sprig--process)
+                     (process-get sprig--process :stderr-proc))))
+    (unless stderr (user-error "No live session in this buffer"))
+    (sprig--log-error (current-buffer) "stderr so far"
+                      (or (process-get stderr :acc) ""))))
 
 (defconst sprig--session-not-found-re
   "No conversation found with session ID"
@@ -933,13 +968,24 @@ whatever the agent proposed: the courier that cannot tamper.  Returns
 non-nil when it answered, nil to let normal permission handling take the
 call.  Works in any permission mode, since an edit reaching `can_use_tool'
 is all it needs; it rides the same channel Sprig already answers on."
-  (when-let ((_ (member tool-name sprig--edit-tools))
-             (edit (sprig--courier-take (alist-get 'file_path input))))
-    (sprig--send-control-response
-     request-id
-     (list :behavior "allow"
-           :updatedInput (sprig--courier-updated-input input edit)))
-    t))
+  (if-let ((_ (member tool-name sprig--edit-tools))
+           (edit (sprig--courier-take (alist-get 'file_path input))))
+      (progn
+        (sprig--debug
+         "courier: firing %s for %s (old=%d new=%d bytes, req=%s)"
+         tool-name (alist-get 'file_path input)
+         (length (or (plist-get edit :old) ""))
+         (length (or (plist-get edit :new) "")) request-id)
+        (sprig--send-control-response
+         request-id
+         (list :behavior "allow"
+               :updatedInput (sprig--courier-updated-input input edit)))
+        t)
+    (when (member tool-name sprig--edit-tools)
+      (sprig--debug
+       "courier: %s for %s reached the gate, nothing staged matched (%d pending)"
+       tool-name (alist-get 'file_path input) (length sprig--courier)))
+    nil))
 
 (defun sprig--send-interrupt ()
   "Ask the session to interrupt the turn in flight, returning the request id.
@@ -969,6 +1015,7 @@ wrapped in the success envelope the CLI expects."
                      :response (list :subtype "success"
                                      :request_id request-id
                                      :response response)))))
+    (sprig--debug "-> control_response %s: %s" request-id json)
     (process-send-string sprig--process (concat json "\n"))))
 
 (defun sprig-permission-prompt (tool-name input)
