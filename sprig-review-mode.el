@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.29.0
+;; Version: 0.30.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2568,13 +2568,37 @@ replay of this history."
   (message "sprig: forked; the branch starts at its first send"))
 
 (defun sprig-review-retry ()
-  "Re-send the most recent user turn."
+  "Re-send the most recent user turn (`c l')."
   (interactive)
   (let* ((model (sprig-review--current-model))
          (last-user (seq-find (lambda (b) (eq (plist-get b :type) 'user))
                               (reverse (plist-get model :blocks)))))
     (unless last-user (user-error "No previous user turn to resend"))
     (sprig-review--send (plist-get last-user :text))))
+
+(defun sprig-review-review ()
+  "Run an independent review of the latest changes, then act on it (`c r').
+Asks the agent to spawn a subagent (the Task tool) that looks at the
+uncommitted changes with fresh eyes and critiques them, then to address the
+subagent's valid findings.  A subagent has its own context, so the review is
+not the same agent marking its own work; Sprig renders its run inline as a
+nested `Agent' row.  Any marked sections narrow what to review, the way `c c'
+attaches them."
+  (interactive)
+  (let ((context (sprig-review--marked-context)))
+    (sprig-review--send
+     (concat
+      "Launch a subagent with the Task tool to independently review the "
+      "uncommitted changes here"
+      (if context " (the parts quoted below)" "")
+      ".  Brief it neutrally: run `git diff' and `git diff --staged', read "
+      "enough surrounding code to judge the changes, then give a focused, "
+      "critical review of correctness bugs, edge cases, unclear names, missing "
+      "or wrong tests, and anything risky.  It reviews only and edits nothing, "
+      "and it should judge cold, so do not tell it your intent or defend the "
+      "changes.  When it reports back, address its valid findings and say which "
+      "you disagree with and why."
+      (if context (format "\n\nThe parts to review:\n\n%s" context) "")))))
 
 (defun sprig-review-interrupt ()
   "Interrupt the in-flight turn on this review's session.
@@ -3321,7 +3345,8 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("y" "yes / accept" sprig-review-accept)
     ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
-    ("r" "resend last turn" sprig-review-retry)
+    ("r" "independent review of the changes (subagent)" sprig-review-review)
+    ("l" "resend last turn" sprig-review-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-review-interrupt)
     ("z" "compact context" sprig-review-compact)
     ("b" "by the way: side question (writes no log)" sprig-review-btw)]

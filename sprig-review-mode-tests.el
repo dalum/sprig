@@ -2050,6 +2050,33 @@ the fold learns the id from the result rather than from the call."
           (sprig-review-retry))
         (should (equal sent "first ask"))))))
 
+(ert-deftest sprig-review-mode-test-review-verb ()
+  "`c r' asks the agent to spawn a subagent to review the changes and act."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--marked-context) (lambda () nil))
+                ((symbol-function 'sprig-review--send)
+                 (lambda (text) (setq sent text))))
+        (sprig-review-review)
+        (should (string-match-p "subagent" sent))
+        (should (string-match-p "Task tool" sent))
+        (should (string-match-p "git diff" sent))
+        (should (string-match-p "address its valid findings" sent))))))
+
+(ert-deftest sprig-review-mode-test-review-verb-scopes-to-marks ()
+  "Marked sections are quoted into the review brief when present."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-review--marked-context)
+                 (lambda () "MARKED-HUNK"))
+                ((symbol-function 'sprig-review--send)
+                 (lambda (text) (setq sent text))))
+        (sprig-review-review)
+        (should (string-match-p "MARKED-HUNK" sent))
+        (should (string-match-p "parts quoted below" sent))))))
+
 (ert-deftest sprig-review-mode-test-file-location ()
   (with-temp-buffer
     (sprig-review-mode)

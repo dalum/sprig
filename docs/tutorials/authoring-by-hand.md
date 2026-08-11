@@ -61,8 +61,9 @@ edit to that file. When the agent's edit call comes up for permission, Sprig
 so it cannot change a character of your work; it only carries it to disk.
 
 Your change then lands in the working tree as a normal diff. From there it is
-just like any other change: review it, commit it with **`C`**, or ask the agent
-to critique it with `c c`.
+just like any other change: review it, commit it with **`C`**, ask the agent to
+critique it with `c c`, or press **`c r`** to have it spawn a subagent that
+reviews the changes with fresh eyes and then acts on the findings.
 
 ## A worked example
 
