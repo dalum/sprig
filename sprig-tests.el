@@ -2213,9 +2213,9 @@ without a real SSH process."
     (cl-letf (((symbol-function 'sprig--remote-sh)
                (lambda (cmd)
                  (push cmd calls)
-                 (concat "\03620.0\037" root "/-p/new.jsonl\037"
+                 (concat "\03620.0\037" root "/-p/new.jsonl\037\037"
                          "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Newer\"}\037\n"
-                         "\03610.0\037" root "/-p/old.jsonl\037"
+                         "\03610.0\037" root "/-p/old.jsonl\037\037"
                          "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Older\"}\037\n"))))
       (let* ((rows (sprig--scan-session-logs))
              (newer (car rows)))
@@ -2234,9 +2234,9 @@ without a real SSH process."
 (ert-deftest sprig-test-parse-scan-rows ()
   ;; The combined scan blob parses into plists: mtime, session, cwd, title,
   ;; newest first, with ignored logs dropped and the rest capped.
-  (let ((blob (concat "\03620.0\037/r/-a/x.jsonl\037"
+  (let ((blob (concat "\03620.0\037/r/-a/x.jsonl\037\037"
                       "{\"cwd\":\"/home/me/a\"}\037{\"aiTitle\":\"Fallback A\"}\n"
-                      "\03610.0\037/r/-b/y.jsonl\037"
+                      "\03610.0\037/r/-b/y.jsonl\037\037"
                       "{\"cwd\":\"/home/me/b\",\"aiTitle\":\"Head B\"}\037\n")))
     (let ((rows (sprig--parse-scan-rows blob nil)))
       (should (= 2 (length rows)))
@@ -2499,7 +2499,7 @@ without a real SSH process."
            '(:type "ai-title" :aiTitle "Local one"))
           (cl-letf (((symbol-function 'sprig--remote-sh)
                      (lambda (_cmd)
-                       (concat "\03620.0\037/r/-p/sess-remote.jsonl\037"
+                       (concat "\03620.0\037/r/-p/sess-remote.jsonl\037\037"
                                "{\"cwd\":\"/home/me/p\","
                                "\"aiTitle\":\"Remote one\"}\037\n"))))
             (sprig-tests--warm-remote-scan "me@host")
@@ -2537,7 +2537,7 @@ without a real SSH process."
            '(:type "ai-title" :aiTitle "The local one"))
           (cl-letf (((symbol-function 'sprig--remote-sh)
                      (lambda (_cmd)
-                       (concat "\03620.0\037/r/-p/same-id.jsonl\037"
+                       (concat "\03620.0\037/r/-p/same-id.jsonl\037\037"
                                "{\"cwd\":\"/home/me/p\","
                                "\"aiTitle\":\"The remote one\"}\037\n"))))
             (sprig-tests--warm-remote-scan "me@host")
@@ -2566,7 +2566,7 @@ without a real SSH process."
         (sprig-claude-projects-directory "/x"))
     (cl-letf (((symbol-function 'sprig--remote-sh)
                (lambda (_cmd)
-                 (concat "\03620.0\037/r/-p/stray-1.jsonl\037"
+                 (concat "\03620.0\037/r/-p/stray-1.jsonl\037\037"
                          "{\"cwd\":\"/home/me/p\","
                          "\"timestamp\":\"2026-08-07T14:10:58.784Z\","
                          "\"aiTitle\":\"Stray one\"}\037"))))
@@ -2652,7 +2652,7 @@ without a real SSH process."
     (unwind-protect
         (cl-letf (((symbol-function 'sprig--remote-sh)
                    (lambda (_cmd)
-                     (concat "\03620.0\037/r/-p/only-remote.jsonl\037"
+                     (concat "\03620.0\037/r/-p/only-remote.jsonl\037\037"
                              "{\"cwd\":\"/home/me/p\",\"aiTitle\":\"Remote only\"}\037\n"))))
           (sprig-tests--warm-remote-scan "me@host")
           (with-temp-buffer
@@ -3313,11 +3313,10 @@ without a real SSH process."
     (should (equal (plist-get (car sorted) :session) "fresh"))))
 
 (ert-deftest sprig-test-status-sort-rows-starred-floats ()
-  ;; A starred session floats above the rest of its group, keeping the column
+  ;; A starred row floats above the rest of its group, keeping the column
   ;; order among the starred and among the unstarred alike.
-  (let* ((sprig-status-starred '((nil . "old")))
-         (sprig--status-sort '("Created" . t))
-         (rows (list '(:session "old" :created 100 :host nil)
+  (let* ((sprig--status-sort '("Created" . t))
+         (rows (list '(:session "old" :created 100 :host nil :starred t)
                      '(:session "new" :created 300 :host nil)
                      '(:session "mid" :created 200 :host nil)))
          (sorted (sprig--status-sort-rows rows)))
@@ -3325,43 +3324,61 @@ without a real SSH process."
     (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
                    '("old" "new" "mid")))))
 
-(ert-deftest sprig-test-status-sort-rows-starred-honours-host ()
-  ;; The star key is host-scoped: the same id on another host is not starred.
-  (let* ((sprig-status-starred '(("a@h" . "dup")))
-         (sprig--status-sort '("Created" . t))
-         (rows (list '(:session "dup" :created 100 :host nil)
-                     '(:session "top" :created 300 :host nil)))
-         (sorted (sprig--status-sort-rows rows)))
-    ;; The local "dup" is a different session from the starred remote one, so
-    ;; it does not float; the newest wins on the column alone.
-    (should (equal (mapcar (lambda (e) (plist-get e :session)) sorted)
-                   '("top" "dup")))))
+(ert-deftest sprig-test-star-file-sits-beside-the-log ()
+  ;; The marker replaces the log's `.jsonl' with `.sprig-star', in place.
+  (should (equal (sprig--star-file "/p/proj/abc123.jsonl")
+                 "/p/proj/abc123.sprig-star")))
 
-(ert-deftest sprig-test-status-star-key-needs-an-id ()
-  ;; A row with no session id has no star key, so it cannot be starred.
-  (should (equal (sprig--status-star-key '(:host nil :session "s1"))
-                 '(nil . "s1")))
-  (should-not (sprig--status-star-key '(:host nil :session nil))))
+(ert-deftest sprig-test-parse-scan-reads-the-star-flag ()
+  ;; A `1' in the star field marks the row starred; an empty field does not.
+  (let* ((rec (lambda (id star head)
+                (concat "\036" "100" "\037" "/p/" id ".jsonl" "\037"
+                        star "\037" head "\037" "")))
+         (blob (concat (funcall rec "s1" "1" "{\"cwd\":\"/a\"}")
+                       (funcall rec "s2" "" "{\"cwd\":\"/b\"}")))
+         (rows (sprig--parse-scan-rows blob nil)))
+    (should (equal (mapcar (lambda (r) (list (plist-get r :session)
+                                             (plist-get r :starred)))
+                           rows)
+                   '(("s1" t) ("s2" nil))))))
 
-(ert-deftest sprig-test-status-star-command-toggles-and-persists ()
-  ;; `*' adds the row's key when absent and removes it when present, saving
-  ;; each time; a row with no id errors instead.
-  (let ((sprig-status-starred nil)
-        (saved '()))
-    (cl-letf (((symbol-function 'customize-save-variable)
-               (lambda (sym val) (push (cons sym val) saved)))
-              ((symbol-function 'sprig--status-render) #'ignore)
+(ert-deftest sprig-test-status-star-command-writes-and-removes-a-marker ()
+  ;; `*' writes the marker for an unstarred row and removes it for a starred
+  ;; one, targeting the row's own log and host; a row with no log errors.
+  (let (calls)
+    (cl-letf (((symbol-function 'sprig--star-write)
+               (lambda (log host starred) (push (list log host starred) calls)))
+              ((symbol-function 'sprig--status-refresh) #'ignore)
               ((symbol-function 'sprig--status-entry-at-point)
-               (lambda () '(:host "a@h" :session "s1"))))
+               (lambda () '(:host "a@h" :file "/p/s1.jsonl"))))
       (sprig-status-star)
-      (should (equal sprig-status-starred '(("a@h" . "s1"))))
-      (should (equal (cdar saved) '(("a@h" . "s1"))))
+      (should (equal (car calls) '("/p/s1.jsonl" "a@h" t))))
+    (cl-letf (((symbol-function 'sprig--star-write)
+               (lambda (log host starred) (push (list log host starred) calls)))
+              ((symbol-function 'sprig--status-refresh) #'ignore)
+              ((symbol-function 'sprig--status-entry-at-point)
+               (lambda () '(:host nil :file "/p/s1.jsonl" :starred t))))
       (sprig-status-star)
-      (should (null sprig-status-starred))
-      (should (equal (cdar saved) nil)))
+      (should (equal (car calls) '("/p/s1.jsonl" nil nil))))
     (cl-letf (((symbol-function 'sprig--status-entry-at-point)
-               (lambda () '(:host nil :session nil))))
+               (lambda () '(:host nil :file nil))))
       (should-error (sprig-status-star) :type 'user-error))))
+
+(ert-deftest sprig-test-star-write-round-trips-a-local-marker ()
+  ;; Local starring creates the sibling file and unstarring removes it.
+  (let* ((dir (make-temp-file "sprig-star" t))
+         (log (expand-file-name "s1.jsonl" dir))
+         (marker (sprig--star-file log)))
+    (unwind-protect
+        (progn
+          (sprig--star-write log nil t)
+          (should (file-exists-p marker))
+          (sprig--star-write log nil nil)
+          (should-not (file-exists-p marker))
+          ;; Unstarring an already-absent marker is a no-op, not an error.
+          (sprig--star-write log nil nil)
+          (should-not (file-exists-p marker)))
+      (delete-directory dir t))))
 
 (ert-deftest sprig-test-status-sort-command-flips-direction ()
   ;; The command sets the sort, and a second call on the same column flips it;

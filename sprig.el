@@ -222,16 +222,6 @@ Example, hiding /tmp and everything under it:
   (setq sprig-status-ignore-directories \\='(\"\\\\`-tmp\\\\(-\\\\|\\\\'\\\\)\"))"
   :type '(repeat regexp))
 
-(defcustom sprig-status-starred nil
-  "Session keys pinned to the top of their host group in the navigator.
-Each is a cons of the session's host (nil for local, else its SSH
-destination) and its session id, the same host-and-id pairing the
-navigator keys a row by, since an id is only unique on its own host.
-`*' in the navigator stars or unstars the session under point and saves
-this; a starred session floats above the rest of its group and carries a
-`★' by its title."
-  :type '(repeat (cons (choice (const :tag "Local" nil) string) string)))
-
 (defface sprig-status-star '((t :inherit warning))
   "Face for the star marking a pinned navigator session.")
 
@@ -1788,21 +1778,41 @@ suggestion but without asking the agent."
     (unless id (user-error "No session id on this row"))
     (sprig--title-commit id host title)))
 
+(defun sprig--star-write (log host starred)
+  "Create (STARRED non-nil) or delete session LOG's star marker on HOST.
+HOST is nil for the local machine, else the SSH destination the log lives
+on, where the `<id>.sprig-star' marker (`sprig--star-file') is written or
+removed: it sits beside the log, so it travels with the session and every
+navigator on that host reads it back off the same scan."
+  (let ((marker (sprig--star-file log)))
+    (if host
+        (let ((sprig-remotes (list host))
+              (q (shell-quote-argument marker)))
+          (sprig--remote-sh (if starred (format "touch %s" q)
+                              (format "rm -f %s" q))))
+      (if starred
+          (write-region "" nil marker nil 'silent)
+        (when (file-exists-p marker) (delete-file marker))))))
+
 (defun sprig-status-star ()
   "Star or unstar the session on the row at point, floating it up its group.
 A starred session sorts above the rest of its host group whatever the
-active column, and shows a `★' by its title.  The set persists across
-Emacs sessions in `sprig-status-starred', keyed by the session's host and
-id, so a row with no id yet (a fork mid-handover) cannot be starred."
+active column, and shows a `★' by its title.  The star is a
+`<id>.sprig-star' marker written beside the session's own log on its host
+\(`sprig--star-file'), so it lives with the session, survives restarts, and
+every navigator on that host sees it.  A row with no log yet cannot be
+starred: the marker has nowhere to sit."
   (interactive)
   (let* ((entry (sprig--status-entry-at-point))
-         (key (and entry (sprig--status-star-key entry))))
-    (unless key (user-error "No session id on this row"))
-    (if (member key sprig-status-starred)
-        (setq sprig-status-starred (delete key sprig-status-starred))
-      (push key sprig-status-starred))
-    (customize-save-variable 'sprig-status-starred sprig-status-starred)
-    (sprig--status-render)))
+         (log (plist-get entry :file))
+         (host (plist-get entry :host)))
+    (unless log (user-error "No session log to star on this row"))
+    (let ((starred (not (sprig--status-starred-p entry))))
+      (sprig--star-write log host starred)
+      (message "sprig: %s" (if starred "starred" "unstarred")))
+    ;; The flag rides in on the log scan, so let the refresh drop the cache and
+    ;; re-read it, the way a retitle reflects through the scan.
+    (sprig--status-refresh)))
 
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
@@ -2491,10 +2501,12 @@ sessions still paints fast."
                 ;; Only a log past the head window pays the whole-file title
                 ;; grep; a smaller one carries its last title (re-emitted or an
                 ;; appended retitle) inside the head already.
-                (sprig--log-plist f (car cell)
-                                  (sprig--session-log-head f)
-                                  (lambda () (sprig--local-title-line f))
-                                  (<= size sprig--status-preview-bytes))))
+                (let ((pl (sprig--log-plist
+                           f (car cell)
+                           (sprig--session-log-head f)
+                           (lambda () (sprig--local-title-line f))
+                           (<= size sprig--status-preview-bytes))))
+                  (plist-put pl :starred (file-exists-p (sprig--star-file f))))))
             dated)))
 
 (defun sprig--remote-scan-cap (limit)
@@ -2509,18 +2521,22 @@ some of the newest, so a little headroom keeps the capped set full."
 (defun sprig--remote-scan-all-command (root cap &optional subagents)
   "Shell command listing the CAP newest logs under ROOT with their scan fields.
 One SSH round trip does the whole scan: `find | sort | head' picks the newest
-logs by mtime, then each is slurped for its mtime, path, head bytes (for the
-`cwd'), and its title line, grepped whole-file since it can sit anywhere.  A
-user `customTitle' is preferred over the generated `aiTitle' (see
-`sprig--log-title'), so the grep looks for it first.  Records are
-RS(\\036)-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'.
+logs by mtime, then each is slurped for its mtime, path, star flag, head bytes
+(for the `cwd'), and its title line, grepped whole-file since it can sit
+anywhere.  A user `customTitle' is preferred over the generated `aiTitle' (see
+`sprig--log-title'), so the grep looks for it first.  The star flag is `1' when
+a `<id>.sprig-star' marker sits beside the log (see `sprig--star-file'), tested
+in the same loop so no extra round trip is paid.  Records are RS(\\036)-
+separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'.
 
 Subagent transcripts (`.../subagents/agent-*.jsonl', see
 `sprig--log-subagent-p') are pruned in the `find' itself unless SUBAGENTS is
 non-nil, so they never eat into the newest-N cap."
   (format "find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
 | sort -rn | head -n %d | while IFS='\t' read -r m p; do \
-printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; head -c %d \"$p\"; \
+printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; \
+[ -e \"${p%%.jsonl}.sprig-star\" ] && printf 1; \
+printf '\\037'; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 [ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; done"
           root
@@ -2529,10 +2545,12 @@ printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 
 (defun sprig--parse-scan-rows (blob limit)
   "Parse BLOB from `sprig--remote-scan-all-command' into scan plists.
-Records are RS(\\036)-separated; each is mtime, path, head bytes, and the
-`ai-title' line, US(\\037)-separated.  Ignored logs are dropped and the rest
-capped to LIMIT, newest first, matching `sprig--scan-session-logs'.  The head
-holds no US byte in any real log, so it is bounded by the first two."
+Records are RS(\\036)-separated; each is mtime, path, star flag, head bytes,
+and the `ai-title' line, US(\\037)-separated.  The star flag is `1' when the
+log has a `.sprig-star' marker beside it, else empty.  Ignored logs are
+dropped and the rest capped to LIMIT, newest first, matching
+`sprig--scan-session-logs'.  The head holds no US byte in any real log, so it
+is bounded by the separators around it."
   (let (rows)
     (dolist (chunk (and blob (split-string blob "\036" t)))
       (let ((p1 (string-search "\037" chunk)))
@@ -2543,13 +2561,18 @@ holds no US byte in any real log, so it is bounded by the first two."
             (when p2
               (let* ((path (substring rest1 0 p2))
                      (rest2 (substring rest1 (1+ p2)))
-                     (p3 (string-search "\037" rest2))
-                     (head (if p3 (substring rest2 0 p3) rest2))
-                     (raw (and p3 (string-trim (substring rest2 (1+ p3)))))
-                     (title (and raw (not (string-empty-p raw)) raw)))
-                (unless (sprig--log-ignored-p path)
-                  (push (sprig--log-plist path mtime head (lambda () title))
-                        rows))))))))
+                     (p3 (string-search "\037" rest2)))
+                (when p3
+                  (let* ((star (not (string-empty-p (substring rest2 0 p3))))
+                         (rest3 (substring rest2 (1+ p3)))
+                         (p4 (string-search "\037" rest3))
+                         (head (if p4 (substring rest3 0 p4) rest3))
+                         (raw (and p4 (string-trim (substring rest3 (1+ p4)))))
+                         (title (and raw (not (string-empty-p raw)) raw)))
+                    (unless (sprig--log-ignored-p path)
+                      (let ((pl (sprig--log-plist
+                                 path mtime head (lambda () title))))
+                        (push (plist-put pl :starred star) rows)))))))))))
     (setq rows (nreverse rows))
     (if limit (seq-take rows limit) rows)))
 
@@ -2925,6 +2948,11 @@ group filtered down to nothing keeps its heading all the same."
               (setq existing (plist-put existing :mtime (plist-get e :mtime))))
             (unless (plist-get existing :created)
               (setq existing (plist-put existing :created (plist-get e :created))))
+            ;; The star lives beside the log, so an open row learns it from the
+            ;; scan too, along with the log path the toggle needs to find it.
+            (unless (plist-get existing :file)
+              (setq existing (plist-put existing :file (plist-get e :file))))
+            (setq existing (plist-put existing :starred (plist-get e :starred)))
             (puthash key existing table))))))
     (let ((rows (mapcar (lambda (k)
                           (let ((e (gethash k table)))
@@ -3000,18 +3028,17 @@ sorts to the top of a newest-first list rather than the bottom."
          (lambda (a b) (string-lessp (downcase (or (plist-get a k) ""))
                                      (downcase (or (plist-get b k) ""))))))))
 
-(defun sprig--status-star-key (entry)
-  "Return ENTRY's star key, (HOST . SESSION-ID), or nil if it has no id.
-A row with no session id (a fork still awaiting the CLI's own) cannot be
-starred: the id is what a star outlives a restart by, and a buffer object
-would not."
-  (let ((id (plist-get entry :session)))
-    (and id (cons (plist-get entry :host) id))))
+(defun sprig--star-file (log)
+  "Return the star-marker path beside session LOG (an `<id>.jsonl' path).
+A star is simply the presence of this `<id>.sprig-star' file next to the
+CLI's own log, on whichever host the log lives; the CLI ignores it."
+  (concat (file-name-sans-extension log) ".sprig-star"))
 
 (defun sprig--status-starred-p (entry)
-  "Non-nil when ENTRY names a session in `sprig-status-starred'."
-  (let ((key (sprig--status-star-key entry)))
-    (and key (member key sprig-status-starred) t)))
+  "Non-nil when ENTRY's session carries a star marker.
+The flag rides in on the log scan (`file-exists-p' locally, an `-e' test
+folded into the one remote `find'), so reading it here costs nothing."
+  (plist-get entry :starred))
 
 (defun sprig--status-sort-rows (rows)
   "Sort ROWS by `sprig--status-sort' ahead of the stable group sort, so the
