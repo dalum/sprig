@@ -15,7 +15,7 @@
 ;; This file is the transport and the navigator; it owns no rendering.
 ;;
 ;; Transport: the `claude' CLI's stream-json protocol over stdio, local or
-;; via `ssh HOST claude ...' (set `sprig-remote').  `sprig--claude-parse-line'
+;; via `ssh HOST claude ...' (set `sprig-remotes').  `sprig--claude-parse-line'
 ;; turns raw wire lines into a small backend-neutral event vocabulary
 ;; (see "Transport and sink"), and each session-owning buffer folds those
 ;; events with its `sprig--sink'.  The CLI uses whatever it is logged in as
@@ -57,13 +57,18 @@
   "Path to the `claude' CLI (on the machine where the session runs)."
   :type 'string)
 
-(defcustom sprig-remote nil
-  "If non-nil, an SSH destination (e.g. \"user@host\") to run `claude' on.
-When nil, the session runs locally."
-  :type '(choice (const :tag "Local" nil) (string :tag "SSH destination")))
+(defcustom sprig-remotes nil
+  "SSH destinations (e.g. \"user@host\") the navigator lists, or nil.
+Each entry becomes a `remote' group of its own in the navigator, scanned
+and capped independently, alongside the always-present `local' group, so
+several hosts show at once.  The first entry is the primary remote: a
+session started outside the navigator, and any review buffer not pinned
+to a host of its own, runs there rather than locally.  Nil lists only the
+local machine."
+  :type '(repeat (string :tag "SSH destination")))
 
 (defcustom sprig-ssh-program "ssh"
-  "SSH client used when `sprig-remote' is set."
+  "SSH client used when a remote is set."
   :type 'string)
 
 (defcustom sprig-ssh-args '("-T" "-A")
@@ -308,33 +313,41 @@ A review buffer owns its session directly and has no frontmatter, so it
 records the session's directory here for `sprig--directory'.")
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
-The symbol `inherit' (the default) follows the global `sprig-remote';
-any other value overrides it for this buffer alone, including nil for a
-session forced to run locally while `sprig-remote' is set.  The transport
-reads it through `sprig--remote'.  The navigator scans every host it
-lists (see `sprig--status-hosts') and pins each row's buffer to the host
-its log came from.")
+The symbol `inherit' (the default) follows the primary remote (the first
+of `sprig-remotes'); any other value overrides it for this buffer alone,
+including nil for a session forced to run locally while a remote is
+configured.  The transport reads it through `sprig--remote'.  The
+navigator scans every host it lists (see `sprig--status-hosts') and pins
+each row's buffer to the host its log came from.")
+
+(defun sprig--primary-remote ()
+  "The primary remote, or nil for local.
+The first of `sprig-remotes', which is the host a session inherits when
+it is not pinned to one of its own."
+  (car sprig-remotes))
 
 (defun sprig--remote ()
   "Effective SSH destination for this buffer's session, or nil for local.
 Returns the buffer-local `sprig--remote-override' unless it is `inherit',
-in which case it falls back to the global `sprig-remote'.  Transport paths
-that run in a session-owning buffer call this instead of reading the
-global directly, so a session can run local or remote independent of the
-configured default."
-  (if (eq sprig--remote-override 'inherit) sprig-remote sprig--remote-override))
+in which case it falls back to the primary remote (see
+`sprig--primary-remote').  Transport paths that run in a session-owning
+buffer call this instead of reading the global directly, so a session can
+run local or remote independent of the configured default."
+  (if (eq sprig--remote-override 'inherit)
+      (sprig--primary-remote)
+    sprig--remote-override))
 
 (defun sprig--buffer-remote (buffer)
   "Effective SSH destination for BUFFER's session, or nil for local.
 `sprig--remote' read from outside the buffer, for the navigator, which
 groups rows by the host their session runs on."
   (let ((override (buffer-local-value 'sprig--remote-override buffer)))
-    (if (eq override 'inherit) sprig-remote override)))
+    (if (eq override 'inherit) (sprig--primary-remote) override)))
 
 (defun sprig--remote-override-value (host)
   "Return the `sprig--remote-override' HOST asks a new session to take.
 A string is an SSH destination to pin the session to; any other non-nil
-value pins it to the local machine; nil follows `sprig-remote' as it
+value pins it to the local machine; nil follows the primary remote as it
 stands."
   (cond ((stringp host) host)
         (host nil)
@@ -1627,7 +1640,7 @@ returns non-nil on a successful write."
 (defun sprig--title-persist-remote (id text host)
   "Append TEXT to remote session ID's log on HOST, returning non-nil on success.
 One SSH round trip finds the log by id and appends the records with `>>'."
-  (let* ((sprig-remote host)
+  (let* ((sprig-remotes (list host))
          (root (sprig--remote-dir-arg (sprig--projects-directory)))
          (name (shell-quote-argument (concat id ".jsonl")))
          (out (sprig--remote-sh
@@ -1982,8 +1995,8 @@ SESSION-ID, replay that stored session's log and resume it on the next
 send; without, the buffer starts empty and a send opens a fresh session.
 HOST pins where the session runs: a string is an SSH destination, any
 other non-nil value (interactively, a prefix argument) is the local
-machine even when `sprig-remote' is set, and nil follows `sprig-remote' as
-it stands.  Pinning is what the navigator opens a row with, since a
+machine even when a remote is configured, and nil follows the primary
+remote as it stands.  Pinning is what the navigator opens a row with, since a
 session id is per-host and only resumes on the host holding its log.
 FORK non-nil resumes SESSION-ID under an id of its own (see
 `sprig--fork-session'), so the replayed history is carried on in a session
@@ -1991,7 +2004,8 @@ of its own and the parent is left untouched.  The review buffer is the
 only conversation surface."
   (interactive
    (let ((local current-prefix-arg))
-     (list (sprig--read-review-dir (unless local sprig-remote)) nil local)))
+     (list (sprig--read-review-dir (unless local (sprig--primary-remote)))
+           nil local)))
   (pop-to-buffer (sprig--review-session-buffer dir session-id host fork)))
 
 (defun sprig--login-command ()
@@ -2023,7 +2037,7 @@ local run gets it from the caller binding `process-environment'."
   "Log the `claude' CLI in for sprig's config dir, without leaving Emacs.
 A session runs headless over the stream-json protocol, so it cannot drive
 the interactive `/login' itself.  This runs `claude auth login' down a
-pipe instead, on the session host (over SSH when `sprig-remote' is set,
+pipe instead, on the session host (over SSH when a remote is configured,
 else locally) and with CLAUDE_CONFIG_DIR bound to `sprig-config-directory'
 when it is set.  It opens the authorization URL in your local browser
 \(the right place: the login is your account, not the host's), then reads
@@ -2228,12 +2242,12 @@ otherwise `sprig-status-max-sessions' bounds the newest-first scan."
 
 (defun sprig--status-hosts ()
   "Return the hosts the navigator lists, in display order.
-Always the local machine (nil), plus `sprig-remote' when one is set.  Each
-becomes a group with a heading of its own, so both hosts' sessions show at
-once rather than only the configured default's, and each is scanned and
+Always the local machine (nil) first, then each of `sprig-remotes'.  Each
+becomes a group with a heading of its own, so every host's sessions show
+at once rather than only the configured default's, and each is scanned and
 capped independently.  The group point sits in is the host `s' starts a
 session on, which is the whole reason an empty group is still headed."
-  (if sprig-remote (list nil sprig-remote) (list nil)))
+  (delete-dups (cons nil (copy-sequence sprig-remotes))))
 
 (defun sprig--log-ignored-p (file)
   "Non-nil when log FILE's session is hidden per the ignore list.
@@ -2305,7 +2319,7 @@ The scan reads the head for the `cwd', which is in the first record.  The
 title is not read from here (a large opening turn can push the first
 `ai-title' record past the window); it is grepped whole-file instead."
   (ignore-errors
-    (if sprig-remote
+    (if (sprig--primary-remote)
         (sprig--remote-sh (format "head -c %d %s" sprig--status-preview-bytes
                                   (sprig--remote-dir-arg file)))
       (with-temp-buffer
@@ -2331,7 +2345,7 @@ log past the head window, so the whole-file read is paid only when needed."
 Used for the last-reply preview, which genuinely lives at the end; the
 row scan reads the head instead (see `sprig--session-log-head')."
   (ignore-errors
-    (if sprig-remote
+    (if (sprig--primary-remote)
         (sprig--remote-sh (format "tail -c %d %s" sprig--status-preview-bytes
                                   (sprig--remote-dir-arg file)))
       (with-temp-buffer
@@ -2377,7 +2391,7 @@ what the navigator dates and sorts by), and :title.  Sourced host-wide from
 `sprig-claude-projects-directory',
 newest first, capped to `sprig--status-limit' so a host with hundreds of
 sessions still paints fast."
-  (if sprig-remote
+  (if (sprig--primary-remote)
       (sprig--scan-session-logs-remote (sprig--status-limit))
     (sprig--scan-session-logs-local (sprig--status-limit))))
 
@@ -2604,7 +2618,7 @@ memoises the build the buffer's own render already paid for, so the
 navigator does not rebuild the whole transcript on every refresh."
   (let ((buf (plist-get entry :buffer))
         (file (plist-get entry :file))
-        (sprig-remote (plist-get entry :host)))
+        (sprig-remotes (list (plist-get entry :host))))
     (cond
      ((buffer-live-p buf)
       (sprig--model-preview
@@ -2672,10 +2686,10 @@ re-render off the disk and off SSH (see `sprig--status-scan-cache')."
      ;; Cold local: one synchronous disk scan, once at the navigator's first
      ;; open.  A capped local `find' is cheap and on no network, so the single
      ;; blocking read is imperceptible and keeps the first paint populated.
-     ;; `sprig-remote' is bound to the host (nil) so the scan runs locally even
-     ;; when a remote is configured as the session default.
+     ;; `sprig-remotes' is bound to the host alone (nil) so the scan runs
+     ;; locally even when a remote is configured as the session default.
      (t
-      (let ((rows (let ((sprig-remote host)) (sprig--scan-session-logs))))
+      (let ((rows (let ((sprig-remotes (list host))) (sprig--scan-session-logs))))
         (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
               (cons (current-time) rows))
         rows)))))
@@ -2690,7 +2704,7 @@ and this repaints when the process lands.  One scan per host runs at a time,
 so a burst of stale reads spawns just one; the sentinel drops the in-flight
 mark, caches the parsed rows, and refreshes the open navigator."
   (unless (member host sprig--status-remote-scan-hosts)
-    (let* ((sprig-remote host)
+    (let* ((sprig-remotes (list host))
            (limit (sprig--status-limit))
            (key (cons host (sprig--projects-directory)))
            (root (if host
@@ -2798,10 +2812,10 @@ group filtered down to nothing keeps its heading all the same."
                    table))))
     (dolist (host (sprig--status-hosts))
       ;; The scan, and everything it reaches (the head slurp, the SSH round
-      ;; trips), keys off `sprig-remote', which `sprig--status-scan-cached'
-      ;; binds per host: one host per pass, each with a cap of its own so a
-      ;; busy host cannot crowd the other out, and each cached so a live
-      ;; re-render reuses it rather than re-reading the disk.
+      ;; trips), keys off the primary remote, which `sprig--status-scan-cached'
+      ;; binds per host as the sole entry: one host per pass, each with a cap
+      ;; of its own so a busy host cannot crowd the other out, and each cached
+      ;; so a live re-render reuses it rather than re-reading the disk.
       (dolist (e (sprig--status-scan-cached host))
         (let* ((key (cons host (plist-get e :session)))
                (existing (gethash key table)))
@@ -2851,7 +2865,7 @@ group filtered down to nothing keeps its heading all the same."
   "Return the ordered group hosts for ROWS.
 `sprig--status-hosts' leads, so both groups head the list even when one of
 them has no rows.  Any other host a row actually came from follows: a
-review buffer pinned to a host that is no longer `sprig-remote' is still a
+review buffer pinned to a host no longer in `sprig-remotes' is still a
 live session you can steer, so it gets a group of its own rather than
 being filed under someone else's heading."
   (let ((hosts (sprig--status-hosts)))
@@ -3595,8 +3609,8 @@ session whether point sits on the row or in its inline preview."
 (defun sprig--status-entry-host-arg (entry)
   "Return the host argument that pins a session to ENTRY's host.
 Pinned to the host the row's log was scanned on, not to whatever
-`sprig-remote' happens to be: a session id only resumes on the host that
-issued it, and now that both hosts are listed the two are routinely
+the primary remote happens to be: a session id only resumes on the host
+that issued it, and now that every host is listed the two are routinely
 different.  Local is the symbol t (force local), a remote is its string."
   (or (plist-get entry :host) t))
 
@@ -3761,9 +3775,9 @@ beside the log and goes with it.  Signals when the log cannot be found."
         (id (plist-get entry :session)))
     (unless id (user-error "sprig: session has no stored log to delete"))
     ;; Bind the host so every path helper below resolves against it: the
-    ;; navigator lists both hosts, so the row's host, not `sprig-remote', is
-    ;; the one whose log is deleted.
-    (let ((sprig-remote host))
+    ;; navigator lists every host, so the row's host, not the primary
+    ;; remote, is the one whose log is deleted.
+    (let ((sprig-remotes (list host)))
       (if host
           (let* ((root (sprig--remote-dir-arg (sprig--projects-directory)))
                  (name (shell-quote-argument (concat id ".jsonl")))

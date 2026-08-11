@@ -2448,7 +2448,7 @@ unrelated rather than a continuation of this one.  Call
   (interactive)
   ;; On this session's host, pinned: an unrelated piece of work still
   ;; belongs where the work is, and a session started off a local `C-u s'
-  ;; must not quietly come back on `sprig-remote'.
+  ;; must not quietly come back on the primary remote.
   (sprig-review-session sprig--working-dir nil (or (sprig--remote) t)))
 
 (defun sprig-review-new-message ()
@@ -2482,7 +2482,7 @@ replay of this history."
   (unless sprig--session-id
     (user-error "This session has no id yet; send something first, then fork"))
   ;; The fork resumes the parent's id, which only exists on the parent's
-  ;; host, so it is pinned there rather than left to follow `sprig-remote'.
+  ;; host, so it is pinned there rather than left to follow the primary remote.
   (sprig-review-session sprig--working-dir sprig--session-id
                         (or (sprig--remote) t) t)
   (message "sprig: forked; the branch starts at its first send"))

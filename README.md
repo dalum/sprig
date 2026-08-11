@@ -19,7 +19,7 @@ claude -p --input-format stream-json --output-format stream-json \
 
 Sprig appends `--model`, `--append-system-prompt`, and `--resume` as configured. It writes a user-message JSON line to stdin; the CLI streams assistant token deltas back on stdout, which Sprig parses into a small backend-neutral event vocabulary and folds into the review buffer's model, re-rendering as the turn arrives. The session id is captured from the CLI; because the CLI names its own log file after it, that is all Sprig needs to replay the conversation later or resume it with `--resume`.
 
-Because the whole protocol is plain stdio, running the session on a remote host is just prefixing the command with `ssh HOST`. Set `sprig-remote` and the session, and its logs, live there instead. The remote box is where `claude` must be installed and logged in. Sprig never touches git itself: an accept, reject, or commit is an *instruction sent to the agent*, which is what makes the remote path work from day one.
+Because the whole protocol is plain stdio, running the session on a remote host is just prefixing the command with `ssh HOST`. List a host in `sprig-remotes` and its sessions, and their logs, live there instead. The remote box is where `claude` must be installed and logged in. Sprig never touches git itself: an accept, reject, or commit is an *instruction sent to the agent*, which is what makes the remote path work from day one.
 
 ## Requirements
 
@@ -35,11 +35,11 @@ Put the three `.el` files on your `load-path`, then:
 ```elisp
 (require 'sprig)
 
-;; Run the session on a remote server over SSH:
-(setq sprig-remote "you@your-server")   ;; nil = run locally
-(setq sprig-model  "claude-opus-4-8")   ;; or nil for the CLI default
+;; Run sessions on remote servers over SSH (one group each; nil = local only):
+(setq sprig-remotes '("you@your-server"))  ;; add more hosts to list them all
+(setq sprig-model   "claude-opus-4-8")     ;; or nil for the CLI default
 
-;; The navigator lists local and remote sessions in groups; cap each one:
+;; The navigator lists local and every remote's sessions in groups; cap each one:
 (setq sprig-status-max-sessions 30)
 ```
 
@@ -49,7 +49,7 @@ With `use-package` and a local checkout:
 (use-package sprig
   :load-path "~/Projects/sprig"
   :custom
-  (sprig-remote "you@your-server")
+  (sprig-remotes '("you@your-server"))
   (sprig-model "claude-opus-4-8")
   (sprig-status-max-sessions 30))
 ```
@@ -75,7 +75,7 @@ With `use-package` and a local checkout:
 
 ## Usage
 
-1. `M-x sprig-status` opens the navigator, listing every stored session, newest first and grouped by the host it runs on (`local`, and `remote you@your-server` when `sprig-remote` is set); `/` narrows it to a project or title.
+1. `M-x sprig-status` opens the navigator, listing every stored session, newest first and grouped by the host it runs on (`local`, plus a `remote you@your-server` group for each host in `sprig-remotes`); `/` narrows it to a project or title.
 2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history, on the host that row came from. `s n` starts a fresh session on the host of the group point is in, prompting for its working directory; a prefix argument (`C-u s n`, or `C-u M-x sprig-review-session`) forces that one session onto the local machine wherever point sits, prompting against the local filesystem. `s c` starts a fresh session and drops you straight into a prompt for its first message (`s p` the same but in plan mode), and `s f` forks the session at point into one of its own. `M-x sprig-review-session` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the review buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
 3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
@@ -97,7 +97,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 
 `M-x sprig-status` opens a `*sprig-status*` buffer listing every stored `claude` session, newest first and capped to `sprig-status-max-sessions`, plus any open review buffer that owns a live session. Each row shows a status glyph (`▶` streaming, `?` waiting on you, `●` idle, `○` disconnected), the session's project (from its own `cwd`), its title (a name you set, else the CLI's generated `ai-title`), a short session id, and when it was created (its first log record's timestamp). It refreshes itself as sessions start, stream, and finish. An active session (any open one, so anything but a disconnected `○` log) shows an inline preview of its last exchange under its row, on its own with no toggle: a state line first (what the turn is doing or how it ended, the permission mode when it is a notable one, and the context in use, `✓  turn over  ·  plan  ·  134.0k`, mirroring the review buffer's own), then your last prompt as one line, then the agent's final message as one line, each dated with its own time (`HH:MM`) and trimmed with an ellipsis where it runs past the window. Both are teasers; open the row with `RET` for the full transcript, landing on the last message so the newest reply is what you see. The message is the last block of prose the turn produced, not the running narration between its tool calls: that is the answer, the plan, or the question, and the rest is scaffolding. It updates live as the turn streams, so a running row shows the last message as it grows under the `▶  working…` line rather than only once the turn settles. `/` narrows the list to sessions whose project or title match a substring, and `l a` lifts the cap to show every session. Rows sort newest-created-first by `Created` within each group, so a session keeps its place as it runs rather than jumping to the top each turn; `S` (or `sprig-status-sort`, or a click on a column header) sorts by another column, and repeating it flips the direction, shown as `↓Created` in the mode line.
 
-**Both hosts at once.** The list is grouped by the host a session runs on, under a foldable heading per group: `local`, and `remote you@your-server` when `sprig-remote` is set. Each host is scanned and capped on its own, so a busy one cannot crowd the other out, and neither is hidden behind a `setq`. `s n` starts its session on the host of the group point is in, which is why a group with no sessions is still headed: the heading is the place you stand to start the first one there. Opening a row pins its review buffer to the host the row came from, since a session id only resumes on the host holding its log. `TAB` on a heading folds its whole group away (the count stays, so `▸ remote you@your-server (12)` tells you what is hidden) and unfolds it again, the way `magit` folds a section.
+**Every host at once.** The list is grouped by the host a session runs on, under a foldable heading per group: `local`, plus a `remote you@your-server` group for each host in `sprig-remotes`. Each host is scanned and capped on its own, so a busy one cannot crowd the others out, and none is hidden behind a `setq`. `s n` starts its session on the host of the group point is in, which is why a group with no sessions is still headed: the heading is the place you stand to start the first one there. Opening a row pins its review buffer to the host the row came from, since a session id only resumes on the host holding its log. `TAB` on a heading folds its whole group away (the count stays, so `▸ remote you@your-server (12)` tells you what is hidden) and unfolds it again, the way `magit` folds a section.
 
 ```
 ▾ local (2)
@@ -105,6 +105,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 ○ Tidy the diff reconstruction        sprig       9f8e7d6c
 
 ▸ remote you@your-server (1)
+▸ remote you@other-box (4)
 ```
 
 | Key | Does |
@@ -200,7 +201,7 @@ The rename sets the session's **user title**, the same thing the CLI's own `/ren
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `sprig-remote` | `nil` | SSH destination the navigator lists a `remote` group for and new sessions default to, or nil for local only |
+| `sprig-remotes` | `nil` | SSH destinations the navigator lists a `remote` group for, one per host; the first is the primary remote new sessions default to. Nil = local only |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
 | `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
@@ -254,7 +255,7 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 
 - v0.16.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
 - One turn at a time per session (several sessions can stream at once).
-- The host is per-session: `sprig-remote` is the default for a session started outside the navigator, and inside it the group point is in decides. The navigator lists both hosts, so a local session no longer drops off the list once its review buffer is closed. Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another, which is why opening a row pins its buffer to the host the row came from. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
+- The host is per-session: the primary remote (the first of `sprig-remotes`) is the default for a session started outside the navigator, and inside it the group point is in decides. The navigator lists every host, so a local session no longer drops off the list once its review buffer is closed. Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another, which is why opening a row pins its buffer to the host the row came from. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt is graceful: `c i` asks the CLI to end the turn cleanly (an `interrupt` control request) and keeps the session live, so the next send continues it with no resume. If the CLI refuses the request (an error receipt) or does not honour it within `sprig-interrupt-timeout` seconds, Sprig falls back to killing the process, and the session resumes on the next send.
 - Diffs are reconstructed from tool-call payloads (`Edit` / `MultiEdit` / `Write`), so a `Bash`-driven edit is not yet attributed; git ground truth is a later slice.
 - A **remote** session's `Agent` rows replay without their subagents' steps. Those transcripts are files beside the log rather than records inside it, and a remote log is read by shell over SSH rather than opened by path, so there is no name to find them by. The narration and the report are unaffected; only the replayed steps are missing, and only over SSH.

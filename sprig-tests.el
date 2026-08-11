@@ -785,14 +785,14 @@ agent's own work."
 
 (ert-deftest sprig-test-command-local ()
   (with-temp-buffer
-    (let ((sprig-remote nil) (sprig-program "claude") (sprig-directory nil))
+    (let ((sprig-remotes nil) (sprig-program "claude") (sprig-directory nil))
       (let ((cmd (sprig--command)))
         (should (equal (car cmd) "claude"))
         (should (member "--input-format" cmd))))))
 
 (ert-deftest sprig-test-command-remote ()
   (with-temp-buffer
-    (let ((sprig-remote "me@host") (sprig-program "claude")
+    (let ((sprig-remotes '("me@host")) (sprig-program "claude")
           (sprig-ssh-program "ssh") (sprig-ssh-args '("-T" "-A"))
           (sprig-directory "~/proj"))
       (let ((cmd (sprig--command)))
@@ -807,7 +807,7 @@ agent's own work."
   ;; A set `sprig-config-directory' rides an `env CLAUDE_CONFIG_DIR=...'
   ;; prefix, after the `cd' and `exec', with the tilde kept live.
   (with-temp-buffer
-    (let ((sprig-remote "me@host") (sprig-program "claude")
+    (let ((sprig-remotes '("me@host")) (sprig-program "claude")
           (sprig-ssh-program "ssh") (sprig-ssh-args '("-T" "-A"))
           (sprig-directory "~/proj")
           (sprig-config-directory "~/.config/sprig/claude"))
@@ -894,12 +894,12 @@ claude"
 
 (ert-deftest sprig-test-login-command ()
   ;; Local: a plain `claude auth login --claudeai' vector.
-  (let ((sprig-remote nil) (sprig-program "claude") (sprig-config-directory nil))
+  (let ((sprig-remotes nil) (sprig-program "claude") (sprig-config-directory nil))
     (should (equal (sprig--login-command)
                    '("claude" "auth" "login" "--claudeai"))))
   ;; Remote with a config dir: an SSH payload carrying the `env' prefix,
   ;; the tilde kept live for the login shell to expand.
-  (let ((sprig-remote "me@host") (sprig-program "claude")
+  (let ((sprig-remotes '("me@host")) (sprig-program "claude")
         (sprig-ssh-program "ssh") (sprig-ssh-args '("-T" "-A"))
         (sprig-config-directory "~/.config/sprig/claude"))
     (let ((payload (car (last (sprig--login-command)))))
@@ -930,7 +930,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
   ;; non-POSIX login shell such as fish rejects the loop and would strip
   ;; every session of its cwd, so the command is wrapped in `sh -c' and
   ;; never left to the host's login shell.
-  (let ((sprig-remote "me@host")
+  (let ((sprig-remotes '("me@host"))
         (sprig-ssh-program "ssh")
         (sprig-ssh-args '("-T" "-A"))
         (command "for f in a b; do echo $f; done")
@@ -1898,7 +1898,7 @@ Return the log directory."
   ;; `agent-name'), not an `ai-title', so the CLI never regenerates it away.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/records")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1922,7 +1922,7 @@ Return the log directory."
   ;; the head window it is read straight from the head.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/small")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1941,7 +1941,7 @@ Return the log directory."
   ;; scan greps the whole file for the title, matching remote.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/big")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1977,7 +1977,7 @@ Return the log directory."
   ;; one cancels, leaving the previous title in place.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/commit")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -1996,7 +1996,7 @@ Return the log directory."
 (ert-deftest sprig-test-retitle-persist-missing-log ()
   ;; Persisting against an id with no log fails cleanly rather than writing.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (should-not (sprig--title-persist "no-such-session" nil "Nope"))
@@ -2009,7 +2009,7 @@ Production scans a cold remote host in the background (see
 stands in for that landed scan here, running the scan through whatever
 `sprig--remote-sh' mock is active so the fresh-cache path returns the rows
 without a real SSH process."
-  (let ((sprig-remote host))
+  (let ((sprig-remotes (list host)))
     (setf (alist-get (cons host (sprig--projects-directory))
                      sprig--status-scan-cache nil nil #'equal)
           (cons (current-time) (sprig--scan-session-logs)))))
@@ -2020,7 +2020,7 @@ without a real SSH process."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj-a "/tmp/whatever/myproj")
          (proj-b "/tmp/other/second")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2055,7 +2055,7 @@ without a real SSH process."
   ;; session, then lists them too once `sprig--status-show-subagents' is set.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/myproj")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root)
          (logdir (sprig-tests--make-session-log
                   root proj "sess-main"
@@ -2100,7 +2100,7 @@ without a real SSH process."
   ;; only as the display-only :project and is never handed to a `cd'.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/myproj")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2121,7 +2121,7 @@ without a real SSH process."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/big")
          (filler (make-string (* 128 1024) ?x))
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2140,7 +2140,7 @@ without a real SSH process."
   ;; One round trip: a single combined command lists the newest logs by mtime
   ;; and slurps each one's fields, which come back record-separated so mtime,
   ;; cwd, and title are parsed per session.
-  (let ((sprig-remote "me@host")
+  (let ((sprig-remotes '("me@host"))
         (sprig-claude-projects-directory "~/.claude/projects")
         (root "~/.claude/projects")
         (calls nil))
@@ -2194,7 +2194,7 @@ without a real SSH process."
 (ert-deftest sprig-test-status-scan-cache-remote-never-blocks ()
   ;; A remote host never scans synchronously on the render path: it returns
   ;; whatever is cached and schedules a background scan instead.
-  (let* ((sprig-remote "host")
+  (let* ((sprig-remotes '("host"))
          (sprig-claude-projects-directory "/x")
          (sprig--status-scan-cache
           (list (cons (cons "host" (sprig--projects-directory))
@@ -2283,7 +2283,7 @@ without a real SSH process."
 (ert-deftest sprig-test-status-collect-owning-buffer-wins ()
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect
-        (let ((sprig-remote nil)
+        (let ((sprig-remotes nil)
               (sprig-claude-projects-directory root)
               (sprig-status-directories '("/tmp/no-such-project")))
           (with-temp-buffer
@@ -2306,7 +2306,7 @@ without a real SSH process."
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/deep")
          (filler (make-string (* 128 1024) ?x))
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2324,7 +2324,7 @@ without a real SSH process."
   ;; replayed `ai-title', which the live stream itself never carries.
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect
-        (let ((sprig-remote nil)
+        (let ((sprig-remotes nil)
               (sprig-claude-projects-directory root))
           (with-temp-buffer
             (setq-local sprig--sink #'sprig--review-sink
@@ -2343,7 +2343,7 @@ without a real SSH process."
   ;; borrows the title from the session's own stored log.
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect
-        (let ((sprig-remote nil)
+        (let ((sprig-remotes nil)
               (sprig-claude-projects-directory root))
           (sprig-tests--make-session-log
            root "/tmp/proj" "live-3"
@@ -2369,7 +2369,7 @@ without a real SSH process."
   ;; the fork flag is set, both the live fork and the original show.
   (let ((root (make-temp-file "sprig-proj" t)))
     (unwind-protect
-        (let ((sprig-remote nil)
+        (let ((sprig-remotes nil)
               (sprig-claude-projects-directory root)
               (sprig--status-scan-cache nil))
           (sprig-tests--make-session-log
@@ -2403,14 +2403,14 @@ without a real SSH process."
 (ert-deftest sprig-test-status-hosts ()
   ;; The local machine is always a group; a configured remote adds a second,
   ;; so the navigator lists both rather than only the configured default.
-  (let ((sprig-remote nil))
+  (let ((sprig-remotes nil))
     (should (equal (sprig--status-hosts) '(nil))))
-  (let ((sprig-remote "me@host"))
+  (let ((sprig-remotes '("me@host")))
     (should (equal (sprig--status-hosts) '(nil "me@host")))))
 
 (ert-deftest sprig-test-remote-override-value ()
   ;; A string pins a session to that host; any other non-nil value (the
-  ;; interactive prefix included) pins it local; nil follows `sprig-remote'.
+  ;; interactive prefix included) pins it local; nil follows the primary remote.
   (should (equal (sprig--remote-override-value "me@host") "me@host"))
   (should (null (sprig--remote-override-value t)))
   (should (null (sprig--remote-override-value '(4))))
@@ -2422,7 +2422,7 @@ without a real SSH process."
   ;; by the pair: an id is only unique on the host that issued it.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/localproj")
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2460,7 +2460,7 @@ without a real SSH process."
   ;; different sessions, so neither row may shadow the other.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/dup")
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2482,10 +2482,10 @@ without a real SSH process."
       (delete-directory root t))))
 
 (ert-deftest sprig-test-status-group-hosts-keeps-a-pinned-stray ()
-  ;; A review buffer pinned to a host that is no longer `sprig-remote' is
+  ;; A review buffer pinned to a host no longer in `sprig-remotes' is
   ;; still a live session you can steer, so it gets a group of its own
   ;; after the two standing ones rather than being filed under theirs.
-  (let ((sprig-remote "me@host"))
+  (let ((sprig-remotes '("me@host")))
     (should (equal (sprig--status-group-hosts
                     '((:host nil) (:host "me@host") (:host "old@host")))
                    '(nil "me@host" "old@host")))))
@@ -2507,7 +2507,7 @@ without a real SSH process."
   ;; group, so `s' knows the host wherever point sits.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2550,7 +2550,7 @@ without a real SSH process."
   ;; An empty group is headed where it sorts, not swept to the end: `local'
   ;; leads even when every session is on the remote host.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2570,8 +2570,8 @@ without a real SSH process."
 (ert-deftest sprig-test-status-open-pins-the-row-host ()
   ;; Opening a row pins its buffer to the host the row was scanned on: a
   ;; session id only resumes on the host holding its log, so a local row
-  ;; must not come back on `sprig-remote' nor a remote row run locally.
-  (let ((sprig-remote "me@host")
+  ;; must not come back on the primary remote nor a remote row run locally.
+  (let ((sprig-remotes '("me@host"))
         calls)
     (cl-letf (((symbol-function 'sprig-review-session)
                (lambda (&rest args) (push args calls) (current-buffer))))
@@ -2618,7 +2618,7 @@ without a real SSH process."
   ;; number (the rows are hidden, not gone).  A second toggle unfolds them.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2663,7 +2663,7 @@ without a real SSH process."
   ;; collapsed across it: the fold state is the navigator's, not the print's.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/onlylocal")
-         (sprig-remote "me@host")
+         (sprig-remotes '("me@host"))
          (sprig--status-scan-cache nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
@@ -2735,7 +2735,7 @@ without a real SSH process."
   ;; trimmed with an ellipsis where it runs past the window.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/prev")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root)
          (reply (mapconcat
                  (lambda (i) (format "Reply line %d with enough words to wrap." i))
@@ -2791,7 +2791,7 @@ without a real SSH process."
   ;; on the prompt line and the reply's on the reply line.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/dated")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -2863,7 +2863,7 @@ without a real SSH process."
   ;; under the prompt, rather than holding it back until the turn settles.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/stream")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -3057,7 +3057,7 @@ without a real SSH process."
   ;; rather than blocking on a second synchronous scan.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/cache")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root)
          (sprig--status-scan-cache nil)
          (sprig--status-remote-scan-hosts nil)
@@ -3091,7 +3091,7 @@ without a real SSH process."
 (ert-deftest sprig-test-status-scan-async-local-uses-sh-not-ssh ()
   ;; The background scan for the local host runs in a bare `sh -c', never
   ;; through ssh (which would defeat the point) and never through TRAMP.
-  (let* ((sprig-remote nil)
+  (let* ((sprig-remotes nil)
          (sprig-claude-projects-directory "/tmp/nope")
          (sprig--status-remote-scan-hosts nil)
          (captured nil))
@@ -3169,7 +3169,7 @@ without a real SSH process."
   ;; preview collapsed.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/whenrow")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (progn
@@ -3236,7 +3236,7 @@ without a real SSH process."
   ;; stands in for a live owning buffer the test does not spin up.
   (let* ((root (make-temp-file "sprig-proj" t))
          (proj "/tmp/whatever/prevrow")
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root))
     (unwind-protect
         (cl-letf (((symbol-function 'sprig--status-entry-active-p) (lambda (_) t)))
@@ -3277,7 +3277,7 @@ without a real SSH process."
 (ert-deftest sprig-test-scan-ignores-directories ()
   ;; A session under an ignored directory is dropped from the scan.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root)
          (sprig-status-ignore-directories '("\\`-tmp\\(-\\|\\'\\)")))
     (unwind-protect
@@ -3299,7 +3299,7 @@ without a real SSH process."
   ;; The drop happens before the newest-N cap, so a throwaway session
   ;; written last does not crowd out the kept one under a cap of 1.
   (let* ((root (make-temp-file "sprig-proj" t))
-         (sprig-remote nil)
+         (sprig-remotes nil)
          (sprig-claude-projects-directory root)
          (sprig-status-max-sessions 1)
          (sprig-status-ignore-directories '("\\`-tmp\\'")))

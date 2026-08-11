@@ -1748,7 +1748,7 @@ the fold learns the id from the result rather than from the call."
 (ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it
   ;; would stomp the first session and stream its output into the second.
-  (let ((sprig-remote nil) buffers)
+  (let ((sprig-remotes nil) buffers)
     (unwind-protect
         (progn
           (push (sprig-review-session "/tmp/sprig-newsess-probe/") buffers)
@@ -1762,7 +1762,7 @@ the fold learns the id from the result rather than from the call."
   ;; A fork carries its parent's id until the CLI answers with its own, so it
   ;; must not land in the parent's buffer: that would stomp the very session
   ;; it was forked from.  It resumes the parent id with the fork flag set.
-  (let ((sprig-remote nil) parent forked)
+  (let ((sprig-remotes nil) parent forked)
     (unwind-protect
         (progn
           (setq parent (sprig-review-session "/tmp/sprig-fork-probe/" "sess-1"))
@@ -1793,7 +1793,7 @@ the fold learns the id from the result rather than from the call."
   ;; Opening a remote session seeds the buffer empty at once and fetches its
   ;; replay history over SSH in the background, so RET on a remote row never
   ;; blocks Emacs; a local session with an id is read synchronously as before.
-  (let ((sprig-remote nil) buf async-called sync-called)
+  (let ((sprig-remotes nil) buf async-called sync-called)
     (cl-letf (((symbol-function 'sprig--session-log-lines-async)
                (lambda (_cb) (setq async-called t)))
               ((symbol-function 'sprig--session-log-lines)
@@ -1816,7 +1816,7 @@ the fold learns the id from the result rather than from the call."
   ;; The navigator builds a row's review buffer without displaying it, so a
   ;; verb run from the list steers the session in the background.  Building it
   ;; leaves the caller's buffer selected and pins the session to the host.
-  (let ((sprig-remote nil) buf)
+  (let ((sprig-remotes nil) buf)
     (with-temp-buffer
       (let ((origin (current-buffer)))
         (setq buf (sprig--review-session-buffer "/tmp/sprig-undisp-probe/"
@@ -1835,7 +1835,7 @@ the fold learns the id from the result rather than from the call."
 (ert-deftest sprig-review-mode-test-status-session-buffer-builds-when-closed ()
   ;; A row whose session is not open has its review buffer built on demand,
   ;; undisplayed; a row already open reuses its live buffer instead.
-  (let ((sprig-remote nil) built live)
+  (let ((sprig-remotes nil) built live)
     (unwind-protect
         (with-temp-buffer
           (let ((origin (current-buffer)))
@@ -1856,7 +1856,7 @@ the fold learns the id from the result rather than from the call."
   ;; A navigator steer verb runs the review command in the row's own review
   ;; buffer: it resolves the row's session and calls the command there, so a
   ;; c c composes for that session and a c y answers it, from the list.
-  (let ((sprig-remote nil) target seen)
+  (let ((sprig-remotes nil) target seen)
     (unwind-protect
         (progn
           (setq target (sprig--review-session-buffer "/tmp/sprig-steer-probe/"
