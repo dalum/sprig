@@ -2030,6 +2030,56 @@ the fold learns the id from the result rather than from the call."
       (re-search-forward "^Bash  ")
       (should (null (sprig-review--section-file (magit-current-section)))))))
 
+(ert-deftest sprig-review-mode-test-strip-read-numbers ()
+  "The cat -n prefix is stripped and wrapper lines dropped, bytes preserved."
+  (should (equal (sprig-review--strip-read-numbers
+                  "     1\thello\n     2\t\n     3\t  world")
+                 "hello\n\n  world"))
+  ;; A non-numbered wrapper line (a system note) is not part of the content.
+  (should (equal (sprig-review--strip-read-numbers
+                  "     1\tcode\n(a note without a number)")
+                 "code")))
+
+(ert-deftest sprig-review-mode-test-read-text-for-latest ()
+  "The latest non-error Read for the file (by basename) wins; errors skip."
+  (let ((model (sprig-review-build
+                `((tool-call "r1" "Read"
+                             ,(json-serialize (list :file_path "/repo/x.el")))
+                  (tool-result "r1" nil "     1\told")
+                  (tool-call "r2" "Read"
+                             ,(json-serialize (list :file_path "/repo/x.el")))
+                  (tool-result "r2" nil "     1\tnew")))))
+    (should (equal (sprig-review--read-text-for model "x.el") "     1\tnew"))
+    (should (null (sprig-review--read-text-for model "other.el")))))
+
+(ert-deftest sprig-review-mode-test-seed-from-read-opens-buffer ()
+  "A pending seed served on a read opens the staging buffer with its bytes."
+  (unwind-protect
+      (with-temp-buffer
+        (sprig-review-mode)
+        (setq sprig-review--pending-seed '(:file "x.el"))
+        (sprig-review-consume (list 'tool-call "r1" "Read"
+                                    (json-serialize (list :file_path "/repo/x.el"))))
+        (sprig-review-consume '(tool-result "r1" nil "     1\thello\n     2\tworld"))
+        (sprig-review--seed-from-read)
+        (should (null sprig-review--pending-seed))
+        (with-current-buffer "*sprig-stage*"
+          (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                         "hello\nworld"))
+          (should (equal sprig-review--stage-file "x.el"))))
+    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
+
+(ert-deftest sprig-review-mode-test-seed-from-read-missing-clears ()
+  "With no read back, the seed is cleared and no staging buffer opens."
+  (unwind-protect
+      (with-temp-buffer
+        (sprig-review-mode)
+        (setq sprig-review--pending-seed '(:file "x.el"))
+        (sprig-review--seed-from-read)
+        (should (null sprig-review--pending-seed))
+        (should (null (get-buffer "*sprig-stage*"))))
+    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
+
 (ert-deftest sprig-review-mode-test-set-title ()
   (with-temp-buffer
     (sprig-review-mode)

@@ -153,7 +153,7 @@ So Sprig keeps essentially no local store: just a pointer (session id plus cwd) 
 
 ## Status
 
-Everything above the "Navigator mode" heading is **shipped**, and navigator mode's core now is too: the role toggle, the hard block, the ground-truth diff parser, and the single-region staging buffer with its override courier. What remains of navigator mode is the on-demand feedback verb, a fresh-`Read` seed, and the multi-file change set.
+Everything above the "Navigator mode" heading is **shipped**, and navigator mode's core now is too: the role toggle, the hard block, the ground-truth diff parser, and the single-region staging buffer with its override courier, seeded either from a hunk in the model or from a fresh `Read`. What remains of navigator mode is the on-demand feedback verb and the multi-file change set.
 
 ### Shipped
 
@@ -165,7 +165,7 @@ Everything above the "Navigator mode" heading is **shipped**, and navigator mode
 - **Navigator** (`sprig-status`). Lists the CLI's session logs per project directory across every host (local plus each of `sprig-remotes`), grouped and foldable, with live status glyphs (including `?` waiting-on-you) and a markdown-rendered preview of the last exchange with a time column and sort. Steers a session from the list without opening it (`c` / `a` act on the row's session).
 - **Performance.** Settled prose fontification is memoised, and the structural-render coalescing timer adapts to the last render's measured cost.
 - **Navigator role (foundation).** `V` toggles a session between driver and navigator. Navigator switches the CLI to `manual` permission mode, and a role-gated handler (`sprig--navigator-tool-response`) denies the edit family while allowing reads and `git`, so the agent is held to feedback with no respawn; the role shows in the state line, and each denial carries the posture reminder back to the agent. The ground-truth diff parser (`sprig-review-parse-diff`) folds `git diff` into the tool-payload change shape, ready for the feedback and staging slices to render the human's own diff.
-- **Navigator staging (single region).** `e` on a hunk opens a local `*sprig-stage*` buffer seeded with the region's current text in the file's own major mode; you rewrite it and `C-c C-c` couriers it to disk. Apply stages the human's `(file, old_string, new_string)` on `sprig--courier` and asks the agent for one `Edit`; the role-gated handler allows that write and overrides its bytes via `updatedInput` (probe-confirmed against CLI 2.1.224), so the human's bytes land and the agent supplies no content. The staged pair is consumed on use, so it sanctions exactly one write.
+- **Navigator staging (single region).** `e` opens a local `*sprig-stage*` buffer seeded with the region's current text in the file's own major mode; you rewrite it and `C-c C-c` couriers it to disk. On a hunk the seed comes straight from the model; anywhere else `e` prompts for a file and an optional region hint, asks the agent to `Read` it, and seeds from that read when the turn ends (its bytes reconstructed from the `cat -n` output are the on-disk `old_string` anchor), so you can edit a region the diff does not already show. Apply stages the human's `(file, old_string, new_string)` on `sprig--courier` and asks the agent for one `Edit`; the role-gated handler allows that write and overrides its bytes via `updatedInput` (probe-confirmed against CLI 2.1.224), so the human's bytes land and the agent supplies no content. The staged pair is consumed on use, so it sanctions exactly one write.
 
 ### Known gaps
 
@@ -176,7 +176,7 @@ Everything above the "Navigator mode" heading is **shipped**, and navigator mode
 
 ### Next
 
-- **Navigator mode, remaining:** the on-demand feedback verb over the human's `git diff` (the parser exists; the verb wires it to render); a **fresh-`Read` seed** so a staging buffer can target any region, not only a hunk already in the model, with the `Read` result giving both the seed and an on-disk `old_string` anchor; and the multi-file **change set** (staging regions from several files at once, then the interleaved prose chunks of the literate-programming lens). The role toggle, hard block, and single-region staging with the override courier are shipped (above).
+- **Navigator mode, remaining:** the on-demand feedback verb over the human's `git diff` (the parser exists; the verb wires it to render); and the multi-file **change set** (staging regions from several files at once, then the interleaved prose chunks of the literate-programming lens). The role toggle, hard block, and single-region staging with the override courier (hunk-seeded or fresh-`Read`-seeded) are shipped (above).
 - The richer **markable plan-tree review** from the plan-mode section.
 - Finer **`x` granularity** (a code block inside prose, not just a tool command).
 - **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.
