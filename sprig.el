@@ -772,6 +772,11 @@ fresh session rather than fail.")
           (with-current-buffer buf
             (setq sprig--process nil
                   sprig--busy nil)
+            ;; A floated steer was written to stdin; a hard exit emits no
+            ;; `done' through the sink to land it, so commit it here rather
+            ;; than leave it pinned forever.  A clean turn end already
+            ;; committed it on its `done'.
+            (sprig-review--commit-pending-steer)
             (sprig--drop-queue "the session ended")
             (sprig--clear-interrupt)
             (sprig--status-refresh)
@@ -1148,6 +1153,8 @@ is visible without opening the header."
 (declare-function sprig-review-buffer "sprig-review-mode" (name))
 (declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
 (declare-function sprig-review-consume "sprig-review-mode" (event))
+(declare-function sprig-review-stage-steer "sprig-review-mode" (text))
+(declare-function sprig-review--commit-pending-steer "sprig-review-mode" ())
 (declare-function sprig-review-flush "sprig-review-mode" (&optional buffer))
 (declare-function sprig-review-set-remote "sprig-review-mode" (remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
@@ -1866,7 +1873,11 @@ the message is delivered as a turn of its own rather than lost."
   (if (not sprig--busy)
       (sprig--review-deliver text)
     (sprig--send-user text)
-    (sprig-review-consume (list 'user text))
+    ;; Float it above the state line rather than splice it into the stream:
+    ;; the agent has not taken it yet, so it waits at the bottom and lands in
+    ;; the transcript once the agent reaches the boundary that takes it (see
+    ;; `sprig-review-stage-steer' / `sprig-review--commit-pending-steer').
+    (sprig-review-stage-steer text)
     (message "sprig: steering (the agent takes it at its next step)")))
 
 (defun sprig--review-queue (text)

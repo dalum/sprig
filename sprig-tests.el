@@ -3580,22 +3580,23 @@ without a real SSH process."
       (should (equal sent '(:behavior "allow"))))))
 
 (ert-deftest sprig-test-review-steer-writes-into-the-live-turn ()
-  ;; Steering writes the message to the session's stdin and echoes it, without
+  ;; Steering writes the message to the session's stdin and floats it, without
   ;; opening a turn of its own: the CLI hands it to the agent at its next
   ;; tool-call boundary, and the turn in flight still ends on its own `done'.
   (with-temp-buffer
     (setq-local sprig--busy t)
-    (let (wrote consumed delivered)
+    (let (wrote staged delivered)
       (cl-letf (((symbol-function 'sprig--send-user)
                  (lambda (text) (setq wrote text)))
-                ((symbol-function 'sprig-review-consume)
-                 (lambda (event) (setq consumed event)))
+                ((symbol-function 'sprig-review-stage-steer)
+                 (lambda (text) (setq staged text)))
                 ((symbol-function 'sprig--review-deliver)
                  (lambda (&rest _) (setq delivered t))))
         (sprig--review-steer "actually, do X"))
       (should (equal wrote "actually, do X"))
-      ;; Echoed locally, so the steer shows in the transcript where it landed.
-      (should (equal consumed '(user "actually, do X")))
+      ;; Floated, not spliced into the stream: it waits above the state line
+      ;; until the agent takes it, rather than breaking up the running message.
+      (should (equal staged "actually, do X"))
       ;; Not delivered as a turn of its own, and the turn stays in flight.
       (should-not delivered)
       (should sprig--busy))))

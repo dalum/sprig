@@ -511,6 +511,58 @@ the fold learns the id from the result rather than from the call."
     (sprig-review-flush)
     (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
 
+(ert-deftest sprig-review-mode-test-steer-floats-then-commits-at-boundary ()
+  ;; A steer sent mid-turn must not split the streaming message: it floats
+  ;; pinned above the state line until the agent reaches its next tool-call
+  ;; boundary, and only then folds into the transcript, so the running prose
+  ;; stays whole while it waits.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(user "q"))
+    (sprig-review-consume '(text "looking into it"))
+    (sprig-review-flush)
+    ;; Float a steer: it shows, but is not a transcript turn yet.
+    (sprig-review-stage-steer "actually, use B")
+    (sprig-review-flush)
+    (should (equal sprig-review--pending-steer '("actually, use B")))
+    (should-not (member '(user "actually, use B") sprig-review--events))
+    ;; It sits just above the state line, marked as not yet taken; the state
+    ;; line is still the buffer's last line and still says the turn is running.
+    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))
+    (should (string-match-p "^⤷ actually, use B$"
+                            (save-excursion
+                              (goto-char (point-max))
+                              (forward-line -2)
+                              (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position)))))
+    ;; The next tool-call is the boundary that takes it: it commits, in order,
+    ;; just before that call, and the float clears.
+    (sprig-review-consume (list 'tool-call "t1" "Bash"
+                                (json-serialize (list :command "ls"))))
+    (sprig-review-flush)
+    (should-not sprig-review--pending-steer)
+    (should (member '(user "actually, use B") sprig-review--events))
+    (should-not (string-match-p "⤷" (buffer-string)))
+    ;; And it lands ahead of the tool call, not after it.
+    (let ((s (buffer-string)))
+      (should (< (string-match "actually, use B" s)
+                 (string-match "Bash\\|ls" s))))))
+
+(ert-deftest sprig-review-mode-test-steer-commits-when-the-turn-ends ()
+  ;; A steer floated late, with no further tool call, still lands: the turn's
+  ;; own `done' is the boundary that commits it, so it is never lost.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "wrapping up"))
+    (sprig-review-stage-steer "one more thing")
+    (sprig-review-flush)
+    (should sprig-review--pending-steer)
+    (sprig-review-consume '(done 0.01 nil))
+    (sprig-review-flush)
+    (should-not sprig-review--pending-steer)
+    (should (member '(user "one more thing") sprig-review--events))
+    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))))
+
 (ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
   ;; A conversation read from disk carries no `done', but nothing is running
   ;; in it either; it must not claim to be working, nor to have just landed.

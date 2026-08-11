@@ -268,6 +268,14 @@ Set when `e' targets a region not already in the model: the agent is asked
 to `Read' the file, and the next turn's `done' seeds a staging buffer from
 that read (see `sprig-review--seed-from-read').  Live state, consumed on
 use, so a later replay never re-opens the buffer.")
+(defvar-local sprig-review--pending-steer nil
+  "Steer messages written to stdin mid-turn but not yet taken, oldest first.
+A `c c' sent into a running turn is handed to the agent at its next
+tool-call boundary, so until then the message is not part of the transcript:
+it floats pinned above the state line (see `sprig-review--insert-pending-steer')
+rather than splitting the streaming message in two.  When the agent reaches
+that boundary, `sprig-review--commit-pending-steer' folds it into the events
+at the point the agent actually received it.")
 (defvar-local sprig-review--marks nil
   "Idents (per `magit-section-ident') of the marked sections.
 Idents rather than section objects, so marks survive a re-render.")
@@ -1348,6 +1356,26 @@ the turn as plainly as the line does."
                                      (make-string (sprig-review--margin-width) ?━)
                                      'face face))))))))
 
+(defun sprig-review--insert-pending-steer ()
+  "Draw any floated steer messages, pinned just above the state line.
+A `c c' sent into a running turn shows here, tinted as yours the way a
+committed turn is but marked with a leading arrow as not yet taken, until
+the agent reaches the boundary that folds it into the transcript (see
+`sprig-review--commit-pending-steer').  So your input waits at the bottom
+instead of splitting the streaming message, and it sits where the committed
+turn will land.  Each message is collapsed to one line and ellipsised: a
+teaser, since its full text is about to become a real user turn."
+  (dolist (text sprig-review--pending-steer)
+    (magit-insert-section (sprig-pending-steer)
+      (let ((beg (point))
+            (line (sprig-review--truncate
+                   (replace-regexp-in-string "[ \t\n]+" " " (string-trim text))
+                   sprig-review-heading-max-width)))
+        (insert (sprig-review--face "⤷ " 'sprig-review-pending) line "\n")
+        ;; The user tint beneath, so the arrow keeps its own colour on top and
+        ;; the line reads as yours (see `sprig-review--insert-user').
+        (sprig-review--add-face beg (point) 'sprig-review-user)))))
+
 ;;;; Rendering entry points
 
 (defcustom sprig-review-incremental-render t
@@ -1454,8 +1482,10 @@ META is an optional plist of display metadata (see
         ;; Below the last message, and last of all, so it is what the buffer
         ;; ends on.  The live tail sits inside the block above and is not
         ;; disturbed by an insertion after it, so streamed text still lands
-        ;; above this line rather than through it.
+        ;; above this line rather than through it.  A floated steer sits just
+        ;; above the state line, where its committed turn will land.
         (when blocks (insert "\n"))
+        (sprig-review--insert-pending-steer)
         (sprig-review--insert-state model))
       (sprig-review--update-margin)
       (sprig-review--record-baseline model meta sections))
@@ -1562,6 +1592,7 @@ sections is handled correctly.  Returns t."
       (setq new-sections
             (sprig-review--insert-blocks root (nthcdr k new-blocks) prev nil last))
       (when new-blocks (insert "\n"))
+      (sprig-review--insert-pending-steer)
       (sprig-review--insert-state model))
     ;; The root's end marker sat at the old point-max; carry it to the new one.
     (oset root end (point-marker))
@@ -1871,12 +1902,49 @@ already in the list rather than adding thousands of its own."
     (push (list 'time (format-time-string "%FT%T.%3NZ" nil t))
           sprig-review--events)))
 
+(defconst sprig-review--steer-boundary-events '(tool-call done error dialog)
+  "Events that mark the agent taking a floated steer.
+A mid-turn `c c' reaches the agent at its next tool-call boundary, so its
+message stays floated (see `sprig-review--pending-steer') until one of these
+lands, and commits just before it: a `tool-call' is the boundary itself, and
+`done'/`error'/`dialog' are the turn ending or pausing without one.")
+
+(defun sprig-review-stage-steer (text)
+  "Float TEXT as a steer awaiting the agent's pickup, and redraw.
+Called by the transport once TEXT has been written to the CLI's stdin
+mid-turn: the message is not in the transcript yet (the agent has not taken
+it), so it shows pinned above the state line until it does.  The counterpart
+to `sprig-review--commit-pending-steer', which lands it once the agent
+reaches the boundary that takes it."
+  (setq sprig-review--pending-steer
+        (append sprig-review--pending-steer (list text)))
+  (sprig-review--schedule))
+
+(defun sprig-review--commit-pending-steer ()
+  "Fold any floated steer messages into the events, oldest first.
+Turns each pending `c c' into a real `user' event, so it lands in the
+transcript at the point the agent received it (the next tool-call boundary,
+or the turn's end) rather than where the stream happened to be when it was
+sent.  Each carries its own arrival stamp, pushed before it so the fold
+reads the pair in order.  A no-op when nothing is floated."
+  (when sprig-review--pending-steer
+    (dolist (text sprig-review--pending-steer)
+      (push (list 'time (format-time-string "%FT%T.%3NZ" nil t))
+            sprig-review--events)
+      (push (list 'user text) sprig-review--events))
+    (setq sprig-review--pending-steer nil)
+    (sprig-review--schedule)))
+
 (defun sprig-review-consume (event)
   "Fold transport EVENT into the current review buffer.
 A streamed `text' delta extends the live text section in place, with no
 re-render, whenever a tail is established.  Every other event, and the
 first `text' of a run, clears the tail and schedules a coalesced render
 \(see `sprig-review-refresh-delay'), which re-establishes the tail."
+  ;; A floated steer commits just before the boundary that takes it, so its
+  ;; `user' event is pushed ahead of this one and the fold reads it first.
+  (when (memq (car event) sprig-review--steer-boundary-events)
+    (sprig-review--commit-pending-steer))
   (sprig-review--stamp-arrival event)
   (push event sprig-review--events)
   ;; Track whether a turn is in flight, which decides both the live tail and
@@ -1925,7 +1993,8 @@ first `text' of a run, clears the tail and schedules a coalesced render
 With META, replace the header metadata plist."
   (sprig-review--cancel-timer)
   (setq sprig-review--events nil sprig-review--dirty nil
-        sprig-review--streaming nil sprig-review--stream-nl nil)
+        sprig-review--streaming nil sprig-review--stream-nl nil
+        sprig-review--pending-steer nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
@@ -1936,7 +2005,8 @@ Use this to replay history before the live sink appends more, so a later
 history is settled, so it renders with no live tail."
   (sprig-review--cancel-timer)
   (setq sprig-review--events (reverse events) sprig-review--dirty nil
-        sprig-review--streaming nil sprig-review--stream-nl nil)
+        sprig-review--streaming nil sprig-review--stream-nl nil
+        sprig-review--pending-steer nil)
   (when meta (setq sprig-review--meta meta))
   (sprig-review--refresh))
 
