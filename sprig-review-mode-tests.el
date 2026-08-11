@@ -563,6 +563,73 @@ the fold learns the id from the result rather than from the call."
     (should (member '(user "one more thing") sprig-review--events))
     (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))))
 
+(ert-deftest sprig-review-mode-test-queued-message-floats ()
+  ;; A `c q' message shows floated above the state line while it waits for the
+  ;; turn to end, drawn straight from `sprig--queued', so a queued follow-up is
+  ;; as visible as a steer.  It carries an hourglass, not a steer's arrow, and
+  ;; is not a transcript turn: it becomes one only when the queue flushes.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(user "q"))
+    (sprig-review-consume '(text "on it"))
+    (setq-local sprig--queued '("then run the tests"))
+    (sprig-review-flush)
+    (should-not (member '(user "then run the tests") sprig-review--events))
+    ;; The state line still says the turn is running (with its queued count).
+    (should (string-prefix-p "▶  working…" (car (sprig-review-tests--state-line))))
+    (should (string-match-p "^⧖ then run the tests$"
+                            (save-excursion
+                              (goto-char (point-max))
+                              (forward-line -2)
+                              (buffer-substring-no-properties
+                               (line-beginning-position) (line-end-position)))))
+    ;; Empty the queue (as a flush or drop would) and the float clears; the
+    ;; queue change schedules the redraw the way the real mutations do.
+    (setq-local sprig--queued nil)
+    (sprig--redraw-queue-floats)
+    (sprig-review-flush)
+    (should-not (string-match-p "⧖" (buffer-string)))))
+
+(ert-deftest sprig-review-mode-test-steer-floats-above-a-queued-message ()
+  ;; Both can wait at once: the steer (already on the wire, taken this turn)
+  ;; sits above the queued message (waits for the turn to end), so the order
+  ;; they will land in reads top to bottom.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "working"))
+    (sprig-review-stage-steer "use B instead")
+    (setq-local sprig--queued '("and then commit"))
+    (sprig-review-flush)
+    (let ((s (buffer-string)))
+      (should (< (string-match "⤷ use B instead" s)
+                 (string-match "⧖ and then commit" s))))))
+
+(ert-deftest sprig-review-mode-test-unqueue-takes-the-message-at-point ()
+  ;; Point on a floated `c q' message and `c u' drops just that one, leaving
+  ;; the rest of the queue in place.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "on it"))
+    (setq-local sprig--queued '("keep me" "drop me"))
+    (sprig-review-flush)
+    (goto-char (point-min))
+    (re-search-forward "drop me")
+    (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
+      (sprig-review-unqueue))
+    (should (equal sprig--queued '("keep me")))))
+
+(ert-deftest sprig-review-mode-test-unqueue-refuses-a-steer ()
+  ;; A steer is already on the wire, so it cannot be taken back this way; the
+  ;; command says so rather than silently hiding a message the agent will get.
+  (with-temp-buffer
+    (sprig-review-mode)
+    (sprig-review-consume '(text "on it"))
+    (sprig-review-stage-steer "already sent")
+    (sprig-review-flush)
+    (goto-char (point-min))
+    (re-search-forward "already sent")
+    (should-error (sprig-review-unqueue) :type 'user-error)))
+
 (ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
   ;; A conversation read from disk carries no `done', but nothing is running
   ;; in it either; it must not claim to be working, nor to have just landed.

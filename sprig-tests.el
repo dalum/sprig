@@ -265,6 +265,42 @@
     (setq-local sprig--queued nil)
     (should (equal (sprig--review-drop-queue) "sprig: nothing queued"))))
 
+(ert-deftest sprig-test-unqueue-drops-just-the-one ()
+  ;; `c u' takes a single queued message back, where `c Q' drops the lot; the
+  ;; rest of the queue and the running turn are untouched, and the survivor
+  ;; still flushes on the next `done'.
+  (with-temp-buffer
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+                ((symbol-function 'sprig--status-render) #'ignore)
+                ((symbol-function 'sprig--ensure) #'ignore)
+                ((symbol-function 'sprig--send-user)
+                 (lambda (text) (push text sent))))
+        (setq-local sprig--busy t)
+        (sprig--review-queue "first")
+        (sprig--review-queue "second")
+        (sprig--review-unqueue "first")
+        (should (equal sprig--queued '("second")))
+        (should sprig--busy)
+        (sprig--review-sink '(done nil nil))
+        (should (equal sent '("second")))))))
+
+(ert-deftest sprig-test-unqueue-drops-one-copy-of-a-duplicate ()
+  ;; Two of the same text is two separate queued turns, so a single `c u'
+  ;; drops one copy, not both.
+  (with-temp-buffer
+    (setq-local sprig--queued '("dup" "dup"))
+    (sprig--review-unqueue "dup")
+    (should (equal sprig--queued '("dup")))))
+
+(ert-deftest sprig-test-unqueue-rejects-a-stale-message ()
+  ;; The float the caller read is gone from the queue (flushed or dropped
+  ;; under it), so there is nothing to take back.
+  (with-temp-buffer
+    (setq-local sprig--queued '("real"))
+    (should-error (sprig--review-unqueue "ghost") :type 'user-error)
+    (should (equal sprig--queued '("real")))))
+
 (ert-deftest sprig-test-teardown-drops-the-queue ()
   ;; The session is gone, so there is no turn left for the message to follow.
   (with-temp-buffer

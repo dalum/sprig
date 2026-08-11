@@ -1121,6 +1121,7 @@ is visible without opening the header."
 (declare-function sprig-review-stage-steer "sprig-review-mode" (text))
 (declare-function sprig-review--commit-pending-steer "sprig-review-mode" ())
 (declare-function sprig-review-flush "sprig-review-mode" (&optional buffer))
+(declare-function sprig-review--schedule "sprig-review-mode" ())
 (declare-function sprig-review-set-remote "sprig-review-mode" (remote))
 (declare-function sprig-review-session-events "sprig-review" (lines))
 (declare-function sprig-review-interrupt "sprig-review-mode" ())
@@ -1847,6 +1848,14 @@ the message is delivered as a turn of its own rather than lost."
     (sprig-review-stage-steer text)
     (message "sprig: steering (the agent takes it at its next step)")))
 
+(defun sprig--redraw-queue-floats ()
+  "Redraw the review buffer so its queued-message floats track `sprig--queued'.
+The floats are drawn straight from `sprig--queued' (see
+`sprig-review--insert-pending-queue'), so any change to the queue has to
+schedule a render for the change to show.  A no-op outside a review buffer."
+  (when (derived-mode-p 'sprig-review-mode)
+    (sprig-review--schedule)))
+
 (defun sprig--review-queue (text)
   "Hold TEXT until the in-flight turn ends, then send it as a turn of its own.
 The counterpart to `sprig--review-steer': steering changes the running
@@ -1860,6 +1869,7 @@ this turn' is already kept."
   (if (not sprig--busy)
       (sprig--review-deliver text)
     (setq sprig--queued (append sprig--queued (list text)))
+    (sprig--redraw-queue-floats)
     (sprig--status-refresh)
     (message "sprig: queued (goes when the turn ends; c i drops it)")))
 
@@ -1886,6 +1896,7 @@ where the user is not expecting it to be."
              (mapconcat (lambda (m) (format "%S" (truncate-string-to-width m 40 nil nil t)))
                         sprig--queued "; "))
     (setq sprig--queued nil)
+    (sprig--redraw-queue-floats)
     (sprig--status-refresh)))
 
 (defun sprig--review-drop-queue ()
@@ -1899,6 +1910,24 @@ that each say one thing."
   (if sprig--queued
       (sprig--drop-queue "you dropped the queue")
     (message "sprig: nothing queued")))
+
+(defun sprig--review-unqueue (text)
+  "Take TEXT back out of the queue, leaving the rest and the turn alone.
+The single-message counterpart to `c Q' (`sprig--review-drop-queue', which
+clears the lot): point on one floated `c q' message and this drops just
+that one.  Safe because a queued message is not on the wire yet; the first
+matching entry goes, so re-queueing the same text twice drops one copy at a
+time.  Errors when TEXT is not actually queued, since then the float the
+caller read is stale."
+  (unless (member text sprig--queued)
+    (user-error "That message is no longer queued"))
+  (let ((seen nil))
+    (setq sprig--queued
+          (seq-remove (lambda (m) (and (not seen) (equal m text) (setq seen t)))
+                      sprig--queued)))
+  (sprig--redraw-queue-floats)
+  (sprig--status-refresh)
+  (message "sprig: unqueued (%d still queued)" (length sprig--queued)))
 
 (defun sprig--review-deliver (text &optional mode)
   "Send TEXT as this review buffer's own next user turn, echoing it locally.

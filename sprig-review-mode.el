@@ -38,6 +38,7 @@
 (declare-function sprig--review-deliver "sprig" (text &optional mode))
 (declare-function sprig--review-steer "sprig" (text))
 (declare-function sprig--review-queue "sprig" (text))
+(declare-function sprig--review-unqueue "sprig" (text))
 (declare-function sprig--review-drop-queue "sprig" ())
 (declare-function sprig--review-answer-dialog "sprig" (id input answers))
 (declare-function sprig--review-approve-plan "sprig" (id))
@@ -152,6 +153,14 @@ context readout at the end of the line."
   "Face for the state line after a message is sent, before the agent replies.
 Softer than `sprig-review-working' (not bold): the turn is on its way but
 nothing has come back yet."
+  :group 'sprig)
+
+(defface sprig-review-queued
+  '((t :inherit shadow))
+  "Face for the marker on a queued message floating above the state line.
+Dimmer than `sprig-review-pending' (which marks a steer already on the
+wire): a queued message is only parked, waiting for the running turn to end
+before it sends, so it should read as held rather than in flight."
   :group 'sprig)
 
 (defface sprig-review-plan
@@ -1359,7 +1368,9 @@ instead of splitting the streaming message, and it sits where the committed
 turn will land.  Each message is collapsed to one line and ellipsised: a
 teaser, since its full text is about to become a real user turn."
   (dolist (text sprig-review--pending-steer)
-    (magit-insert-section (sprig-pending-steer)
+    ;; The text is the section value, so `sprig-review-unfloat' knows which
+    ;; message the point sits on.
+    (magit-insert-section (sprig-pending-steer text)
       (let ((beg (point))
             (line (sprig-review--truncate
                    (replace-regexp-in-string "[ \t\n]+" " " (string-trim text))
@@ -1367,6 +1378,26 @@ teaser, since its full text is about to become a real user turn."
         (insert (sprig-review--face "⤷ " 'sprig-review-pending) line "\n")
         ;; The user tint beneath, so the arrow keeps its own colour on top and
         ;; the line reads as yours (see `sprig-review--insert-user').
+        (sprig-review--add-face beg (point) 'sprig-review-user)))))
+
+(defun sprig-review--insert-pending-queue ()
+  "Draw any queued messages, pinned below the steers and above the state line.
+A `c q' message waits here, tinted as yours and marked with an hourglass, so
+a queued follow-up is visible while it waits for the running turn to end (a
+steer, by contrast, is on the wire already and shows a `⤷').  Point on one of
+these and `sprig-review-unqueue' takes it back.  Drawn straight from
+`sprig--queued', the list that actually sends, so the float never promises a
+message the queue will not deliver.  Each is collapsed to one ellipsised
+line, since its full text becomes a real user turn once the queue flushes."
+  (dolist (text (and (boundp 'sprig--queued) sprig--queued))
+    ;; The text is the section value, so `sprig-review-unqueue' knows which
+    ;; message the point sits on.
+    (magit-insert-section (sprig-pending-queue text)
+      (let ((beg (point))
+            (line (sprig-review--truncate
+                   (replace-regexp-in-string "[ \t\n]+" " " (string-trim text))
+                   sprig-review-heading-max-width)))
+        (insert (sprig-review--face "⧖ " 'sprig-review-queued) line "\n")
         (sprig-review--add-face beg (point) 'sprig-review-user)))))
 
 ;;;; Rendering entry points
@@ -1479,6 +1510,7 @@ META is an optional plist of display metadata (see
         ;; above the state line, where its committed turn will land.
         (when blocks (insert "\n"))
         (sprig-review--insert-pending-steer)
+        (sprig-review--insert-pending-queue)
         (sprig-review--insert-state model))
       (sprig-review--update-margin)
       (sprig-review--record-baseline model meta sections))
@@ -1586,6 +1618,7 @@ sections is handled correctly.  Returns t."
             (sprig-review--insert-blocks root (nthcdr k new-blocks) prev nil last))
       (when new-blocks (insert "\n"))
       (sprig-review--insert-pending-steer)
+      (sprig-review--insert-pending-queue)
       (sprig-review--insert-state model))
     ;; The root's end marker sat at the old point-max; carry it to the new one.
     (oset root end (point-marker))
@@ -2745,6 +2778,21 @@ purpose (see `sprig--review-drop-queue')."
   (interactive)
   (sprig--review-drop-queue))
 
+(defun sprig-review-unqueue ()
+  "Take the queued message under point back out of the queue (`c u').
+Point must sit on a floated `c q' message: the hourglass lines above the
+state line.  Drops just that one, where `c Q' drops the whole queue.  A
+steer cannot go this way; it is already on the wire, so `c i' (interrupt)
+is the only way to stop mid-turn input, and it stops the whole turn."
+  (interactive)
+  (let ((section (magit-current-section)))
+    (cond
+     ((and section (eq (oref section type) 'sprig-pending-queue))
+      (sprig--review-unqueue (oref section value)))
+     ((and section (eq (oref section type) 'sprig-pending-steer))
+      (user-error "A steer is already sent; interrupt with `c i' to stop it"))
+     (t (user-error "Point is not on a queued message")))))
+
 (declare-function sprig--btw-ask "sprig"
                   (id dir remote-host question context tail))
 (declare-function sprig--events-preview "sprig" (events))
@@ -3342,6 +3390,7 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("c" "compose & send (steers a running turn)" sprig-review-message)
     ("q" "compose & queue (after this turn)" sprig-review-queue)
     ("Q" "drop the queued messages" sprig-review-drop-queue)
+    ("u" "unqueue the message at point" sprig-review-unqueue)
     ("y" "yes / accept" sprig-review-accept)
     ("n" "no / decline" sprig-review-decline)
     ("p" "compose in plan mode" sprig-review-message-plan)
