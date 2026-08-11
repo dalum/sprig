@@ -198,6 +198,12 @@ The one honest limit is mid-turn. A `--resume` fork sees the conversation only u
 
 The rename sets the session's **user title**, the same thing the CLI's own `/rename` sets, not the auto-generated `ai-title` Sprig usually shows. For a live session Sprig sends `/rename` down the wire it already holds, letting the CLI write the title itself; for a closed one it writes the same `custom-title` record straight to the log. A user title is never regenerated, so it always wins over the generated one and never gets buried when you keep working. As a bonus, Sprig now also shows titles you set with the CLI's own `/rename`, which it used to ignore.
 
+## Tutorials
+
+Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
+
+- [Navigator mode: writing the code yourself](docs/tutorials/navigator-mode.md) — pair-program with the agent held to feedback while you author every line (press `V` in a review buffer), and let it courier your staged edits to disk without touching the repo itself.
+
 ## Options
 
 | Variable | Default | Meaning |
