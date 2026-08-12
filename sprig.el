@@ -3776,8 +3776,8 @@ to the buffer's head."
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
 ;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
 ;; live-only, `l a' show all, `l g' show subagents).
-;; Interrupt is `c i'; connect is `c o'.  `/' (filter) and `S' (sort) also stay
-;; top-level, being the frequent ones.
+;; Interrupt is `c i'; connect is `c o'.  `/' (filter) stays top-level, and `S'
+;; opens a small show transient (`S s' sort, `S r' the host's session roots).
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
@@ -3785,7 +3785,7 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "d")   #'sprig-status-remove)
 (define-key sprig-status-mode-map (kbd "l")   #'sprig-status-view)
 (define-key sprig-status-mode-map (kbd "/")   #'sprig-status-filter)
-(define-key sprig-status-mode-map (kbd "S")   #'sprig-status-sort)
+(define-key sprig-status-mode-map (kbd "S")   #'sprig-status-show)
 (define-key sprig-status-mode-map (kbd "T")   #'sprig-status-title-dispatch)
 ;; `*' pins the session under point to the top of its group and saves it.
 (define-key sprig-status-mode-map (kbd "*")   #'sprig-status-star)
@@ -4232,10 +4232,11 @@ there is one, so a fresh session starts alongside it in the same place."
 Point under the `local' heading starts the session on this machine; under
 a `remote' one, on that host.  Which is why an empty group is still
 headed: the heading is the place you stand to start the first session
-there.  Prompts for the working directory, against the local filesystem
-for a local session and as a free string for a remote one.  Opens a review
-buffer that owns the new session; it appears under its own group and
-streams like any other.  With a prefix argument, LOCAL forces the session
+there.  Opens a review buffer that owns the new session; it appears under
+its own group and streams like any other.  The working-directory prompt
+completes directories (against the local filesystem, or over SSH for a
+remote host) and suggests the host's existing session roots.  With a prefix
+argument, LOCAL forces the session
 onto this machine wherever point happens to be.  When point is on a
 session row, its directory seeds the prompt, so `s n' on a session starts
 a fresh one alongside it in the same directory."
@@ -4378,12 +4379,20 @@ description runs with its own popup buffer current, not the navigator's."
          (on (and buf (buffer-local-value var buf))))
     (concat label (and on (propertize "  [on]" 'face 'transient-value)))))
 
+(transient-define-prefix sprig-status-show ()
+  "Sort the navigator, or inspect a host's session roots.
+`S s' sorts by a column (what `S' alone used to do); `S r' pops the roots
+view for the host of the group point is in (see `sprig-status-roots')."
+  [["Show"
+    ("s" "sort by column" sprig-status-sort)
+    ("r" "session roots on this host" sprig-status-roots)]])
+
 (transient-define-prefix sprig-status-view ()
   "Switch how the navigator lists its sessions.
 Pure view state; no session is touched.  `l l' toggles a live-only view
 that hides disconnected sessions, `l a' toggles the newest-N cap, and `l g'
 toggles the CLI's subagent (`agent-*') transcripts in; each shows `[on]'
-while active.  Sort and filter are here too, and also stay on `S' and `/'
+while active.  Sort and filter are here too, and also stay on `S s' and `/'
 as the frequent ones."
   [["View"
     ("l" sprig-status-toggle-disconnected
@@ -4400,6 +4409,62 @@ as the frequent ones."
                              'sprig--status-show-subagents)))
     ("s" "sort by column" sprig-status-sort)
     ("/" "filter by project or title" sprig-status-filter)]])
+
+(defvar sprig-roots-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map special-mode-map)
+    (define-key map (kbd "RET") #'sprig-roots-visit)
+    (define-key map (kbd "o")   #'sprig-roots-visit)
+    map)
+  "Keymap for `sprig-roots-mode'.")
+
+(define-derived-mode sprig-roots-mode special-mode "Sprig-Roots"
+  "Major mode for the session-roots view (see `sprig-status-roots').
+Read-only: each line is a directory the host's sessions run in, and `RET'
+\(or `o') starts a fresh session there."
+  (setq-local truncate-lines t))
+
+(defun sprig-roots-visit ()
+  "Start a fresh session in the root directory on the line at point.
+Reads the directory and host the line was built with, so it launches on the
+same host the roots view was opened for (a local line pins to this machine)."
+  (interactive)
+  (let ((dir (get-text-property (point) 'sprig-root-dir))
+        (host (get-text-property (point) 'sprig-root-host)))
+    (unless dir (user-error "No root on this line"))
+    (sprig-review-session dir nil (or host t))
+    (sprig--status-refresh)))
+
+(defun sprig-status-roots ()
+  "Show the working directories the host's sessions run in (`S r').
+Pops a `*sprig-roots*' buffer listing the distinct roots for the host of the
+group point is in (see `sprig--host-dir-candidates'); `RET' on a line starts
+a fresh session there.  The list is the navigator's own cached scan, so a
+remote host whose cache is still warming may show none yet."
+  (interactive)
+  (let* ((host (sprig--status-host-at-point))
+         (label (if host (concat "remote " host) "local"))
+         (roots (sprig--host-dir-candidates host))
+         (buf (get-buffer-create "*sprig-roots*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (sprig-roots-mode)
+        (insert (propertize (format "Session roots on %s\n" label) 'face 'bold))
+        (insert (propertize "RET start a session here   q quit\n\n" 'face 'shadow))
+        (if (null roots)
+            (insert (propertize
+                     "No session directories known yet (the scan may be warming).\n"
+                     'face 'shadow))
+          (dolist (dir roots)
+            (let ((beg (point)))
+              (insert dir "\n")
+              (add-text-properties beg (1- (point))
+                                   (list 'sprig-root-dir dir
+                                         'sprig-root-host host)))))
+        (goto-char (point-min))
+        (when roots (forward-line 3))))
+    (pop-to-buffer buf)))
 
 ;;;###autoload
 (defun sprig-status ()

@@ -405,6 +405,67 @@ expanded over there, and a blank means the login directory."
     (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
       (should (equal (sprig--read-review-dir "host") "")))))
 
+(ert-deftest sprig-test-status-roots-lists-the-host-directories ()
+  "The roots view lists the host's session directories, each launchable.
+It names the host, and each line carries the directory and host it was built
+with so `sprig-roots-visit' can start a session there."
+  (cl-letf (((symbol-function 'sprig--status-host-at-point) (lambda () "you@srv"))
+            ((symbol-function 'sprig--host-dir-candidates)
+             (lambda (host) (should (equal host "you@srv")) '("/srv/a" "/srv/b"))))
+    (save-window-excursion (sprig-status-roots))
+    (unwind-protect
+        (with-current-buffer "*sprig-roots*"
+          (should (derived-mode-p 'sprig-roots-mode))
+          (should (string-match-p "remote you@srv" (buffer-string)))
+          (goto-char (point-min))
+          (should (re-search-forward "^/srv/a$" nil t))
+          (goto-char (match-beginning 0))
+          (should (equal (get-text-property (point) 'sprig-root-dir) "/srv/a"))
+          (should (equal (get-text-property (point) 'sprig-root-host) "you@srv")))
+      (kill-buffer "*sprig-roots*"))))
+
+(ert-deftest sprig-test-status-roots-notes-an-empty-host ()
+  "A host with no known session directories yet says so rather than lying
+with an empty, actionless list."
+  (cl-letf (((symbol-function 'sprig--status-host-at-point) (lambda () nil))
+            ((symbol-function 'sprig--host-dir-candidates) (lambda (_) nil)))
+    (save-window-excursion (sprig-status-roots))
+    (unwind-protect
+        (with-current-buffer "*sprig-roots*"
+          (should (string-match-p "on local" (buffer-string)))
+          (should (string-match-p "No session directories" (buffer-string))))
+      (kill-buffer "*sprig-roots*"))))
+
+(ert-deftest sprig-test-roots-visit-starts-a-session-there ()
+  "Visiting a root starts a fresh session in it, pinned to the line's host;
+a local line (no host) pins to this machine rather than following a remote."
+  (let (captured)
+    (cl-letf (((symbol-function 'sprig-review-session)
+               (lambda (dir &optional id host &rest _)
+                 (setq captured (list dir id host))))
+              ((symbol-function 'sprig--status-refresh) #'ignore))
+      (with-temp-buffer
+        (insert "root\n")
+        (add-text-properties (point-min) (1- (point-max))
+                             '(sprig-root-dir "/srv/a" sprig-root-host "you@srv"))
+        (goto-char (point-min))
+        (sprig-roots-visit)
+        (should (equal captured '("/srv/a" nil "you@srv"))))
+      (with-temp-buffer
+        (insert "root\n")
+        (add-text-properties (point-min) (1- (point-max))
+                             '(sprig-root-dir "/home/me"))
+        (goto-char (point-min))
+        (sprig-roots-visit)
+        (should (equal captured '("/home/me" nil t)))))))
+
+(ert-deftest sprig-test-roots-visit-rejects-an-empty-line ()
+  "A line with no root under point is a no-op error, not a blank session."
+  (with-temp-buffer
+    (insert "not a root\n")
+    (goto-char (point-min))
+    (should-error (sprig-roots-visit) :type 'user-error)))
+
 ;;;; Subagents
 ;;
 ;; The lines below are captured off the wire from a real `Agent' run (an
