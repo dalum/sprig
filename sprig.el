@@ -3776,8 +3776,8 @@ to the buffer's head."
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
 ;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
 ;; live-only, `l a' show all, `l g' show subagents).
-;; Interrupt is `c i'; connect is `c o'.  `/' (filter) stays top-level, and `S'
-;; opens a small show transient (`S s' sort, `S r' the host's session roots).
+;; Interrupt is `c i'; connect is `c o'.  `/' (filter) stays top-level, and
+;; `S S' opens the host's session roots (sort lives on `l s' and a header click).
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
 (define-key sprig-status-mode-map (kbd "c")   #'sprig-status-dispatch)
 (define-key sprig-status-mode-map (kbd "a")   #'sprig-status-answer-dispatch)
@@ -4380,20 +4380,19 @@ description runs with its own popup buffer current, not the navigator's."
     (concat label (and on (propertize "  [on]" 'face 'transient-value)))))
 
 (transient-define-prefix sprig-status-show ()
-  "Sort the navigator, or inspect a host's session roots.
-`S s' sorts by a column (what `S' alone used to do); `S r' pops the roots
-view for the host of the group point is in (see `sprig-status-roots')."
+  "Inspect a host's session roots.
+`S S' pops the roots view for the host of the group point is in (see
+`sprig-status-roots').  Sorting lives under `l s' and a column-header click."
   [["Show"
-    ("s" "sort by column" sprig-status-sort)
-    ("r" "session roots on this host" sprig-status-roots)]])
+    ("S" "session roots on this host" sprig-status-roots)]])
 
 (transient-define-prefix sprig-status-view ()
   "Switch how the navigator lists its sessions.
 Pure view state; no session is touched.  `l l' toggles a live-only view
 that hides disconnected sessions, `l a' toggles the newest-N cap, and `l g'
 toggles the CLI's subagent (`agent-*') transcripts in; each shows `[on]'
-while active.  Sort and filter are here too, and also stay on `S s' and `/'
-as the frequent ones."
+while active.  Sort and filter are here too (`l s' sorts, and a column-header
+click does as well); filter also stays top-level on `/', being frequent."
   [["View"
     ("l" sprig-status-toggle-disconnected
      :description (lambda () (sprig--status-view-desc
