@@ -1846,21 +1846,102 @@ starred: the marker has nowhere to sit."
       (message "sprig: %s" (if starred "starred" "unstarred")))
     (sprig--status-render)))
 
+(defun sprig--host-dir-candidates (host)
+  "Distinct working directories of existing sessions on HOST.
+Drawn from the same cached log scan the navigator uses (see
+`sprig--status-scan-cached'), so it needs no configuration and no extra SSH
+round trip: the directories the sessions already on HOST run in become
+ready-made candidates for a new session's working directory."
+  (let (dirs)
+    (dolist (row (sprig--status-scan-cached host))
+      (when-let* ((dir (plist-get row :dir)))
+        (push dir dirs)))
+    (delete-dups (nreverse dirs))))
+
+(defun sprig--remote-subdirs (host dir)
+  "Absolute subdirectories of DIR on HOST, each ending in a slash.
+Reuses the session transport (`sprig--remote-sh'), so the listing rides the
+same `ssh' as the session and needs no TRAMP.  DIR keeps a live leading `~'
+\(see `sprig--remote-dir-arg'), so a home-relative path completes too; an
+empty DIR lists the login directory, whose entries stay relative."
+  (let* ((sprig-remotes (list host))
+         (out (sprig--remote-sh
+               (format "ls -1Ap -- %s 2>/dev/null"
+                       (sprig--remote-dir-arg (if (string-empty-p dir) "." dir))))))
+    (delq nil
+          (mapcar (lambda (entry)
+                    (when (string-suffix-p "/" entry)
+                      (concat (if (string-empty-p dir)
+                                  ""
+                                (file-name-as-directory dir))
+                              entry)))
+                  (split-string out "\n" t)))))
+
+(defun sprig--subdirs (host dir)
+  "Absolute subdirectories of DIR, each ending in a slash.
+A nil HOST lists the local filesystem; a non-nil HOST runs one SSH `ls'
+\(see `sprig--remote-subdirs')."
+  (if host
+      (sprig--remote-subdirs host dir)
+    (when (and (not (string-empty-p dir)) (file-directory-p dir))
+      (let (out)
+        (dolist (f (directory-files dir t nil t))
+          (unless (member (file-name-nondirectory f) '("." ".."))
+            (when (file-directory-p f)
+              (push (file-name-as-directory f) out))))
+        (nreverse out)))))
+
+(defun sprig--dir-completion-table (host)
+  "Completion table over directories on HOST for the working-dir prompt.
+Offers the working directories of existing sessions on HOST as ready
+candidates (see `sprig--host-dir-candidates'), and completes deeper paths
+live by listing whatever directory the input names: on the local
+filesystem, or over SSH for a remote HOST (one `ls' per completion, cached
+for the length of the prompt so a re-list of the same directory is free).
+The caller allows free text, so a directory that does not exist yet can
+still be typed past the candidates."
+  (let ((roots (sprig--host-dir-candidates host))
+        (cache (make-hash-table :test 'equal)))
+    (lambda (string pred action)
+      ;; Metadata and boundary queries need no listing; answering them with
+      ;; nil (the defaults) keeps them off the network.
+      (unless (or (eq action 'metadata) (eq (car-safe action) 'boundaries))
+        (let* ((dir (or (file-name-directory string) ""))
+               (subs (gethash dir cache 'miss)))
+          (when (eq subs 'miss)
+            (setq subs (condition-case nil (sprig--subdirs host dir) (error nil)))
+            (puthash dir subs cache))
+          (complete-with-action action
+                                (delete-dups (append subs (copy-sequence roots)))
+                                string pred))))))
+
 (defun sprig--read-review-dir (&optional host default)
   "Prompt for a session working directory on HOST, returning the string.
 HOST is the resolved session host: nil for the local machine, else an SSH
 destination.  Unlike `sprig--read-working-directory' this records nothing
 in frontmatter; a session-owning review buffer keeps its directory in the
-buffer-local `sprig--working-dir' instead.  A remote host's prompt is a
-free string, since the path lives over there and this side cannot complete
-it; a local one prompts against the filesystem.  The prompt names the host
-so a navigator with a group per host says which one you are starting on.
-DEFAULT, when non-nil, seeds the prompt so a fresh session starts in the
-same directory as the one it was launched from (see `sprig-status-new')."
-  (if host
-      (read-string (format "Working directory (%s, blank = login dir): " host)
-                   default)
-    (read-directory-name "Working directory: " default default)))
+buffer-local `sprig--working-dir' instead.
+
+Completion offers the working directories of existing sessions on HOST as
+ready candidates, and completes deeper paths live: against the local
+filesystem, or over SSH for a remote HOST (so the remote prompt no longer
+falls back to a blind free string).  A directory that does not exist yet
+can still be typed, since the prompt requires no match.  The prompt names
+the host so a navigator with a group per host says which one you are
+starting on.  DEFAULT, when non-nil, seeds the prompt so a fresh session
+starts in the same directory as the one it was launched from (see
+`sprig-status-new').  For a local session it returns an expanded absolute
+path (a blank answer keeps `default-directory'); for a remote one it
+returns the string as typed, where a blank means the login directory."
+  (let* ((prompt (if host
+                     (format "Working directory (%s, blank = login dir): " host)
+                   "Working directory: "))
+         (seed (or default (and (not host) (abbreviate-file-name default-directory))))
+         (input (completing-read prompt (sprig--dir-completion-table host)
+                                 nil nil seed)))
+    (if host
+        input
+      (if (string-empty-p input) default-directory (expand-file-name input)))))
 
 ;;;###autoload
 (defun sprig-review-connect (&optional no-prompt)

@@ -311,6 +311,100 @@
       (sprig--teardown-process)
       (should-not sprig--queued))))
 
+;;;; Working-directory prompt and completion
+
+(ert-deftest sprig-test-host-dir-candidates-come-from-the-scan ()
+  "The candidate roots are the distinct cwds of the host's cached sessions.
+Order of first appearance is kept and blanks are dropped, so a new session's
+prompt suggests the directories work already lives in without any config."
+  (cl-letf (((symbol-function 'sprig--status-scan-cached)
+             (lambda (_host)
+               '((:dir "/a") (:dir nil) (:dir "/b") (:dir "/a") (:dir "/c")))))
+    (should (equal (sprig--host-dir-candidates "host") '("/a" "/b" "/c")))))
+
+(ert-deftest sprig-test-subdirs-lists-local-directories ()
+  "A local listing returns the subdirectories with a trailing slash, no files."
+  (let* ((root (make-temp-file "sprig-dir-test" t))
+         (proj (expand-file-name "project" root)))
+    (unwind-protect
+        (progn
+          (make-directory proj)
+          (with-temp-file (expand-file-name "readme" root) (insert "x"))
+          (let ((subs (sprig--subdirs nil root)))
+            (should (member (file-name-as-directory proj) subs))
+            (should-not (member (expand-file-name "readme" root) subs))
+            (should (cl-every (lambda (s) (string-suffix-p "/" s)) subs))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-remote-subdirs-parses-the-ls ()
+  "A remote listing keeps the slash-suffixed entries and drops plain files,
+prefixing each with the directory so the completion stays a full path."
+  (cl-letf (((symbol-function 'sprig--remote-sh)
+             (lambda (_cmd) "proj/\nfile.txt\nsub/\n")))
+    (should (equal (sprig--remote-subdirs "host" "/home/x")
+                   '("/home/x/proj/" "/home/x/sub/")))))
+
+(ert-deftest sprig-test-dir-completion-table-completes-a-local-path ()
+  "The table completes a path segment against the local filesystem."
+  (let* ((root (make-temp-file "sprig-dir-test" t))
+         (proj (expand-file-name "project" root)))
+    (unwind-protect
+        (progn
+          (make-directory proj)
+          (with-temp-file (expand-file-name "readme" root) (insert "x"))
+          (cl-letf (((symbol-function 'sprig--status-scan-cached)
+                     (lambda (_) nil)))
+            (let ((table (sprig--dir-completion-table nil))
+                  (base (file-name-as-directory root)))
+              (should (equal (try-completion (concat base "pro") table)
+                             (file-name-as-directory proj)))
+              (should (member (file-name-as-directory proj)
+                              (all-completions base table)))
+              (should-not (member (expand-file-name "readme" root)
+                                  (all-completions base table))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-dir-completion-table-offers-session-roots ()
+  "A host's session directories complete even where the live listing is empty,
+so the known roots are reachable without an existing path under point."
+  (cl-letf (((symbol-function 'sprig--status-scan-cached)
+             (lambda (_) '((:dir "/srv/app"))))
+            ((symbol-function 'sprig--remote-sh) (lambda (_) "")))
+    (let ((table (sprig--dir-completion-table "host")))
+      (should (member "/srv/app" (all-completions "/srv/a" table))))))
+
+(ert-deftest sprig-test-dir-completion-table-metadata-skips-the-network ()
+  "Metadata and boundary queries answer without listing, so they never shell
+out; were they to, this stub would signal."
+  (cl-letf (((symbol-function 'sprig--status-scan-cached) (lambda (_) nil))
+            ((symbol-function 'sprig--remote-sh)
+             (lambda (_) (error "must not run"))))
+    (let ((table (sprig--dir-completion-table "host")))
+      (should-not (funcall table "x" nil 'metadata))
+      (should-not (funcall table "x" nil '(boundaries . ""))))))
+
+(ert-deftest sprig-test-read-review-dir-local-expands ()
+  "A local answer is returned as an expanded absolute path; a blank one keeps
+`default-directory'."
+  (cl-letf (((symbol-function 'sprig--status-scan-cached) (lambda (_) nil)))
+    (let ((default-directory "/tmp/"))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) "~/proj")))
+        (should (equal (sprig--read-review-dir nil)
+                       (expand-file-name "~/proj"))))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+        (should (equal (sprig--read-review-dir nil) "/tmp/"))))))
+
+(ert-deftest sprig-test-read-review-dir-remote-is-raw ()
+  "A remote answer is returned verbatim: the path lives on the host, a `~' is
+expanded over there, and a blank means the login directory."
+  (cl-letf (((symbol-function 'sprig--status-scan-cached) (lambda (_) nil)))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (&rest _) "~/work/proj")))
+      (should (equal (sprig--read-review-dir "host") "~/work/proj")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+      (should (equal (sprig--read-review-dir "host") "")))))
+
 ;;;; Subagents
 ;;
 ;; The lines below are captured off the wire from a real `Agent' run (an
