@@ -23,6 +23,7 @@ drives it exactly as it would a direct `claude` process.
 """
 
 import argparse
+import glob
 import json
 import os
 import selectors
@@ -108,19 +109,58 @@ def extract_session_id(buf):
 # --- session ---------------------------------------------------------------
 
 class Session:
-    def __init__(self, key, proc, cwd, args):
+    def __init__(self, key, proc, cwd, args, config_dir):
         self.key = key
         self.proc = proc
         self.cwd = cwd
         self.args = args
+        self.config_dir = config_dir
         self.spool = spool_path(key)
         self.spool_fd = open(self.spool, "ab", buffering=0)
         self.lock = threading.Lock()        # guards spool append + subscribers
         self.stdin_lock = threading.Lock()
         self.subscribers = set()            # attached client sockets
         self.cli_session_id = None
+        self.marker = None                  # <id>.sprig-live path once written
         self.ended = False
         self.created = time.time()
+
+    def find_log(self):
+        """The CLI's JSONL log for this session, found by id, or None.
+        Searching by id sidesteps reproducing the CLI's cwd-mangling rule."""
+        if not self.cli_session_id:
+            return None
+        hits = glob.glob(os.path.join(
+            self.config_dir, "projects", "*", self.cli_session_id + ".jsonl"))
+        return hits[0] if hits else None
+
+    def write_marker(self):
+        """Touch <id>.sprig-live beside the log, so the navigator's own scan
+        sees the session is broker-held without a separate query.  Content is
+        the broker socket path.  Retries briefly: the log may not exist the
+        instant the session id first appears in the stream."""
+        for _ in range(20):
+            if self.ended:
+                return
+            log = self.find_log()
+            if log:
+                marker = os.path.splitext(log)[0] + ".sprig-live"
+                try:
+                    with open(marker, "w") as f:
+                        f.write(sock_path() + "\n")
+                    self.marker = marker
+                except OSError:
+                    pass
+                return
+            time.sleep(0.1)
+
+    def remove_marker(self):
+        if self.marker:
+            try:
+                os.remove(self.marker)
+            except OSError:
+                pass
+            self.marker = None
 
     def read_loop(self):
         """Pump child stdout to the spool and every attached client."""
@@ -146,9 +186,11 @@ class Session:
                 if sid:
                     self.cli_session_id = sid
                     sniff = b""
+                    threading.Thread(target=self.write_marker, daemon=True).start()
                 elif len(sniff) > 65536:
                     sniff = sniff[-4096:]
         self.ended = True
+        self.remove_marker()
         with self.lock:
             for s in list(self.subscribers):
                 try:
@@ -216,7 +258,10 @@ def do_spawn(broker, req):
     for kv in req.get("env") or []:
         if "=" in kv:
             k, v = kv.split("=", 1)
-            env[k] = v
+            # expanduser only touches a leading `~', so non-path values pass
+            # through untouched; the config dir needs it to locate the log.
+            env[k] = os.path.expanduser(v)
+    config_dir = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude")
     # A missing working directory is the most likely spawn failure (a session
     # resumed against a host that lacks its recorded cwd); name it plainly
     # rather than leaking a raw errno to the review buffer.
@@ -237,7 +282,7 @@ def do_spawn(broker, req):
         )
     except FileNotFoundError:
         raise RuntimeError(f"cannot run {program!r}: not found on host PATH")
-    sess = Session(key, proc, cwd, args)
+    sess = Session(key, proc, cwd, args, config_dir)
     broker.add(sess)
     threading.Thread(target=sess.read_loop, daemon=True).start()
     return {"ok": True, "session": key, "spool": sess.spool}
@@ -347,6 +392,11 @@ def do_open(broker, conn, rest, req):
     sid = req.get("session")
     key = broker.resolve(sid) if sid else None
     if key is None:
+        if req.get("attach_only"):
+            # Reattach path: never resurrect a session the broker no longer
+            # holds (a stale marker), so opening the navigator cannot spawn.
+            send_json(conn, {"ok": False, "error": "session not held by broker"})
+            return
         resp = do_spawn(broker, req)
         sess = broker.sessions[resp["session"]]
         offset = 0
@@ -447,6 +497,9 @@ def start_daemon():
 
 
 def connect(autostart=True):
+    """Connect to the daemon's socket.  With AUTOSTART, launch a daemon and
+    wait for it; without, return None at once if none is listening (the
+    reattach path wants to fail fast rather than start an empty daemon)."""
     path = sock_path()
     for attempt in range(60):
         try:
@@ -454,7 +507,9 @@ def connect(autostart=True):
             c.connect(path)
             return c
         except OSError:
-            if attempt == 0 and autostart:
+            if not autostart:
+                return None
+            if attempt == 0:
                 start_daemon()
             time.sleep(0.1)
     raise SystemExit("sprig-broker: could not reach or start the daemon")
@@ -536,13 +591,17 @@ def cmd_attach(a):
 
 
 def cmd_open(a):
-    conn = connect()
+    conn = connect(autostart=not a.no_start)
+    if conn is None:
+        sys.stderr.write("sprig-broker: no broker running (session not held)\n")
+        return 1
     send_json(conn, {
         "cmd": "open",
         "session": a.session,
         "cwd": a.cwd,
         "program": a.program,
         "env": a.env,
+        "attach_only": a.attach_only,
         "args": a.args[1:] if a.args and a.args[0] == "--" else a.args,
     })
     line, rest = recv_line(conn)
@@ -578,6 +637,8 @@ def main():
     op.add_argument("--cwd", default=None)
     op.add_argument("--program", default="claude")
     op.add_argument("--env", action="append", default=[])
+    op.add_argument("--attach-only", action="store_true")
+    op.add_argument("--no-start", action="store_true")
     op.add_argument("args", nargs=argparse.REMAINDER)
 
     sub.add_parser("list")

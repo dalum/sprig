@@ -10,6 +10,12 @@ file, and fans that stream out to attached clients. Sprig drives it behind the
 opt-in `sprig-use-broker`: a remote session runs `python3 BROKER open ...` in
 place of `exec claude`, and Sprig ships this script to the host on first use.
 
+While it holds a session, the broker drops a `<id>.sprig-live` marker beside
+the session's log (like a star's `<id>.sprig-star`), so the navigator's scan
+learns which sessions are still held without a separate query. Opening
+`sprig-status` reattaches them in the background, attach-only, so a stale
+marker from a crashed daemon is harmless (`sprig-status-auto-reattach`).
+
 ## Use
 
 ```sh

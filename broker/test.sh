@@ -61,6 +61,16 @@ off="$("$broker" list | jget '["sessions"][0]["spool_size"]')"
 cli_sid="$("$broker" list | jget '["sessions"][0]["cli_session_id"]')"
 say "captured CLI session id: $cli_sid; reattach offset: $off"
 
+# The broker should have dropped a .sprig-live marker beside the session log
+# (written asynchronously just after the id appeared), so the navigator's own
+# scan can see the session is held without a separate query.
+projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+mangled="$(printf '%s' "$work" | sed 's#[/.]#-#g')"
+marker="$projects/$mangled/$cli_sid.sprig-live"
+for _ in $(seq 1 30); do [ -f "$marker" ] && break; sleep 0.1; done
+if [ -f "$marker" ]; then ok "live marker written beside the log"; else bad "no .sprig-live marker beside the log"; fi
+if grep -q 'control.sock' "$marker" 2>/dev/null; then ok "marker holds the broker socket path"; else bad "marker missing socket path"; fi
+
 # 3. Client A DETACHES: kill it (a real disconnect kills the ssh/client).
 kill "$clientA" 2>/dev/null; wait "$clientA" 2>/dev/null
 exec 4>&-
@@ -111,7 +121,16 @@ open_sid="$("$broker" list | jget '["sessions"][0]["cli_session_id"]')"
 exec 6>&-; kill "$clientC" 2>/dev/null; wait "$clientC" 2>/dev/null
 "$broker" stop "$open_sid" >/dev/null 2>&1
 
-# 7. version prints without needing the daemon (used for the install check).
+# 7. attach-only refuses a session the broker does not hold (a stale marker),
+#    so opening the navigator can never resurrect a dead session.
+if "$broker" open --attach-only --no-start --session no-such-session -- -p 2>&1 | grep -q 'not held'; then
+  ok "attach-only refuses an unheld session"; else bad "attach-only did not refuse an unheld session"; fi
+
+# 8. The marker is gone once the session is stopped.
+for _ in $(seq 1 30); do [ -f "$marker" ] || break; sleep 0.1; done
+if [ ! -f "$marker" ]; then ok "live marker removed when the session stopped"; else bad "marker lingered after stop"; fi
+
+# 9. version prints without needing the daemon (used for the install check).
 if [ "$("$broker" version)" = "1" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 echo

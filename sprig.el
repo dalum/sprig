@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.33.0
+;; Version: 0.34.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -139,6 +139,17 @@ different script, for instance your working copy while iterating on it."
   "Broker wire-protocol version sprig expects.
 Mirrors the `VERSION' constant in the broker script; a host whose installed
 broker reports a different value is reinstalled before use.")
+
+(defcustom sprig-status-auto-reattach t
+  "When non-nil, `sprig-status' reattaches to broker-held sessions it lists.
+A session the broker still holds carries a `<id>.sprig-live' marker beside
+its log (see `sprig--live-file'), which the scan reports for free.  When the
+navigator sees such a session it connects to it in the background, attach-
+only, so its live turn streams and it is ready to steer without your opening
+it and sending a throwaway message.  A stale marker (from a crashed daemon)
+just fails to attach, harmlessly, and is tried only once.  Needs
+`sprig-use-broker'; off it, this does nothing."
+  :type 'boolean)
 
 (defcustom sprig-model "claude-opus-4-8"
   "Model id, or nil to let the CLI choose its default."
@@ -451,6 +462,12 @@ With `sprig-use-broker' a remote session instead runs through the broker
                            (sprig--directory)
                            remote))))
 
+(defvar sprig--broker-attach-only nil
+  "When non-nil, a brokered `open' is attach-only: no spawn, no daemon start.
+Dynamically bound around the navigator's auto-reattach (`sprig--reattach-
+session'), so a stale `<id>.sprig-live' marker left by a crashed daemon
+fails to attach rather than resurrecting a dead session.")
+
 (defun sprig--broker-command (host)
   "Command vector running a brokered remote session on HOST.
 In place of `exec claude', the session is `python3 BROKER open ...'.  The
@@ -458,6 +475,7 @@ broker attaches to the live session named by `sprig--session-id' when it
 still holds it, and otherwise spawns a fresh `claude' (resuming from the
 JSONL when an id is set).  A fork names no session, so it spawns rather
 than attaching to its still-live parent, keeping the parent untouched.
+With `sprig--broker-attach-only' the `open' is attach-only, for reattach.
 Config dir rides `--env' (the broker sets it on the child), the working
 dir rides `--cwd', and the `claude' argv follows a `--'."
   (let* ((dir (sprig--directory))
@@ -467,6 +485,7 @@ dir rides `--cwd', and the `claude' argv follows a `--'."
           (append
            (list "python3" (sprig--remote-dir-arg sprig-broker-remote-path)
                  "open" "--program" (shell-quote-argument sprig-program))
+           (when sprig--broker-attach-only (list "--attach-only" "--no-start"))
            (when dir (list "--cwd" (sprig--remote-dir-arg dir)))
            (when session (list "--session" (shell-quote-argument session)))
            (when sprig-config-directory
@@ -557,6 +576,7 @@ drives it exactly as it would a direct `claude` process.
 \"\"\"
 
 import argparse
+import glob
 import json
 import os
 import selectors
@@ -642,19 +662,58 @@ def extract_session_id(buf):
 # --- session ---------------------------------------------------------------
 
 class Session:
-    def __init__(self, key, proc, cwd, args):
+    def __init__(self, key, proc, cwd, args, config_dir):
         self.key = key
         self.proc = proc
         self.cwd = cwd
         self.args = args
+        self.config_dir = config_dir
         self.spool = spool_path(key)
         self.spool_fd = open(self.spool, \"ab\", buffering=0)
         self.lock = threading.Lock()        # guards spool append + subscribers
         self.stdin_lock = threading.Lock()
         self.subscribers = set()            # attached client sockets
         self.cli_session_id = None
+        self.marker = None                  # <id>.sprig-live path once written
         self.ended = False
         self.created = time.time()
+
+    def find_log(self):
+        \"\"\"The CLI's JSONL log for this session, found by id, or None.
+        Searching by id sidesteps reproducing the CLI's cwd-mangling rule.\"\"\"
+        if not self.cli_session_id:
+            return None
+        hits = glob.glob(os.path.join(
+            self.config_dir, \"projects\", \"*\", self.cli_session_id + \".jsonl\"))
+        return hits[0] if hits else None
+
+    def write_marker(self):
+        \"\"\"Touch <id>.sprig-live beside the log, so the navigator's own scan
+        sees the session is broker-held without a separate query.  Content is
+        the broker socket path.  Retries briefly: the log may not exist the
+        instant the session id first appears in the stream.\"\"\"
+        for _ in range(20):
+            if self.ended:
+                return
+            log = self.find_log()
+            if log:
+                marker = os.path.splitext(log)[0] + \".sprig-live\"
+                try:
+                    with open(marker, \"w\") as f:
+                        f.write(sock_path() + \"\\n\")
+                    self.marker = marker
+                except OSError:
+                    pass
+                return
+            time.sleep(0.1)
+
+    def remove_marker(self):
+        if self.marker:
+            try:
+                os.remove(self.marker)
+            except OSError:
+                pass
+            self.marker = None
 
     def read_loop(self):
         \"\"\"Pump child stdout to the spool and every attached client.\"\"\"
@@ -680,9 +739,11 @@ class Session:
                 if sid:
                     self.cli_session_id = sid
                     sniff = b\"\"
+                    threading.Thread(target=self.write_marker, daemon=True).start()
                 elif len(sniff) > 65536:
                     sniff = sniff[-4096:]
         self.ended = True
+        self.remove_marker()
         with self.lock:
             for s in list(self.subscribers):
                 try:
@@ -750,7 +811,10 @@ def do_spawn(broker, req):
     for kv in req.get(\"env\") or []:
         if \"=\" in kv:
             k, v = kv.split(\"=\", 1)
-            env[k] = v
+            # expanduser only touches a leading `~', so non-path values pass
+            # through untouched; the config dir needs it to locate the log.
+            env[k] = os.path.expanduser(v)
+    config_dir = os.path.expanduser(env.get(\"CLAUDE_CONFIG_DIR\") or \"~/.claude\")
     # A missing working directory is the most likely spawn failure (a session
     # resumed against a host that lacks its recorded cwd); name it plainly
     # rather than leaking a raw errno to the review buffer.
@@ -771,7 +835,7 @@ def do_spawn(broker, req):
         )
     except FileNotFoundError:
         raise RuntimeError(f\"cannot run {program!r}: not found on host PATH\")
-    sess = Session(key, proc, cwd, args)
+    sess = Session(key, proc, cwd, args, config_dir)
     broker.add(sess)
     threading.Thread(target=sess.read_loop, daemon=True).start()
     return {\"ok\": True, \"session\": key, \"spool\": sess.spool}
@@ -881,6 +945,11 @@ def do_open(broker, conn, rest, req):
     sid = req.get(\"session\")
     key = broker.resolve(sid) if sid else None
     if key is None:
+        if req.get(\"attach_only\"):
+            # Reattach path: never resurrect a session the broker no longer
+            # holds (a stale marker), so opening the navigator cannot spawn.
+            send_json(conn, {\"ok\": False, \"error\": \"session not held by broker\"})
+            return
         resp = do_spawn(broker, req)
         sess = broker.sessions[resp[\"session\"]]
         offset = 0
@@ -981,6 +1050,9 @@ def start_daemon():
 
 
 def connect(autostart=True):
+    \"\"\"Connect to the daemon's socket.  With AUTOSTART, launch a daemon and
+    wait for it; without, return None at once if none is listening (the
+    reattach path wants to fail fast rather than start an empty daemon).\"\"\"
     path = sock_path()
     for attempt in range(60):
         try:
@@ -988,7 +1060,9 @@ def connect(autostart=True):
             c.connect(path)
             return c
         except OSError:
-            if attempt == 0 and autostart:
+            if not autostart:
+                return None
+            if attempt == 0:
                 start_daemon()
             time.sleep(0.1)
     raise SystemExit(\"sprig-broker: could not reach or start the daemon\")
@@ -1070,13 +1144,17 @@ def cmd_attach(a):
 
 
 def cmd_open(a):
-    conn = connect()
+    conn = connect(autostart=not a.no_start)
+    if conn is None:
+        sys.stderr.write(\"sprig-broker: no broker running (session not held)\\n\")
+        return 1
     send_json(conn, {
         \"cmd\": \"open\",
         \"session\": a.session,
         \"cwd\": a.cwd,
         \"program\": a.program,
         \"env\": a.env,
+        \"attach_only\": a.attach_only,
         \"args\": a.args[1:] if a.args and a.args[0] == \"--\" else a.args,
     })
     line, rest = recv_line(conn)
@@ -1112,6 +1190,8 @@ def main():
     op.add_argument(\"--cwd\", default=None)
     op.add_argument(\"--program\", default=\"claude\")
     op.add_argument(\"--env\", action=\"append\", default=[])
+    op.add_argument(\"--attach-only\", action=\"store_true\")
+    op.add_argument(\"--no-start\", action=\"store_true\")
     op.add_argument(\"args\", nargs=argparse.REMAINDER)
 
     sub.add_parser(\"list\")
@@ -2492,6 +2572,37 @@ next render."
                    (process-live-p (buffer-local-value 'sprig--process b))))
             (buffer-list)))
 
+(defvar sprig--status-reattach-attempted nil
+  "Session ids the navigator has tried to auto-reattach since it was opened.
+Keeps a failed reattach (a stale `<id>.sprig-live' marker) from being retried
+on every background scan; reset when `sprig-status' is opened afresh.")
+
+(defun sprig--reattach-session (dir id host)
+  "Attach in the background to broker-held session ID on HOST, rooted at DIR.
+Builds the session's review buffer undisplayed and connects it attach-only,
+so a stale marker cannot spawn a fresh session.  Errors are swallowed: a
+reattach that cannot land must never disturb the navigator."
+  (with-current-buffer (sprig--review-session-buffer dir id host nil)
+    (unless (process-live-p sprig--process)
+      (let ((sprig--broker-attach-only t))
+        (ignore-errors (sprig--ensure))))))
+
+(defun sprig--status-reattach-live (host rows)
+  "Reattach every broker-held (:live) row in ROWS on HOST, once each.
+No-op unless `sprig-use-broker' and `sprig-status-auto-reattach' are on and
+HOST is remote (only remote sessions are brokered).  A session already owned
+by a live buffer, or already attempted, is skipped, so this is safe to call
+on every scan completion."
+  (when (and host sprig-use-broker sprig-status-auto-reattach)
+    (dolist (row rows)
+      (when (plist-get row :live)
+        (let ((id (plist-get row :session))
+              (dir (plist-get row :dir)))
+          (when (and id (not (member id sprig--status-reattach-attempted))
+                     (not (sprig--title-live-buffer id)))
+            (push id sprig--status-reattach-attempted)
+            (sprig--reattach-session dir id host)))))))
+
 (defun sprig--title-commit (id remote-host title)
   "Set session ID's user TITLE and reflect it, trimming; an empty one cancels.
 When the session is live, sends `/rename' down the wire already open to it,
@@ -3396,7 +3507,9 @@ sessions still paints fast."
                            (sprig--session-log-head f)
                            (lambda () (sprig--local-title-line f))
                            (<= size sprig--status-preview-bytes))))
-                  (plist-put pl :starred (file-exists-p (sprig--star-file f))))))
+                  (plist-put pl :starred (file-exists-p (sprig--star-file f)))
+                  (plist-put pl :live (file-exists-p (sprig--live-file f)))
+                  pl)))
             dated)))
 
 (defun sprig--remote-scan-cap (limit)
@@ -3412,12 +3525,15 @@ some of the newest, so a little headroom keeps the capped set full."
   "Shell command listing the CAP newest logs under ROOT with their scan fields.
 One SSH round trip does the whole scan: `find | sort | head' picks the newest
 logs by mtime, then each is slurped for its mtime, path, star flag, head bytes
-(for the `cwd'), and its title line, grepped whole-file since it can sit
-anywhere.  A user `customTitle' is preferred over the generated `aiTitle' (see
-`sprig--log-title'), so the grep looks for it first.  The star flag is `1' when
-a `<id>.sprig-star' marker sits beside the log (see `sprig--star-file'), tested
-in the same loop so no extra round trip is paid.  Records are RS(\\036)-
-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'.
+(for the `cwd'), its title line (grepped whole-file since it can sit anywhere),
+and a trailing live flag.  A user `customTitle' is preferred over the generated
+`aiTitle' (see `sprig--log-title'), so the grep looks for it first.  The star
+flag is `1' when a `<id>.sprig-star' marker sits beside the log (see
+`sprig--star-file'); the trailing live flag is `1' when a `<id>.sprig-live'
+broker marker does (see `sprig--live-file'), so the navigator learns which
+sessions are still held without a separate query.  Both are tested in the same
+loop, so no extra round trip is paid.  Records are RS(\\036)-separated, fields
+US(\\037)-separated, for `sprig--parse-scan-rows'.
 
 Subagent transcripts (`.../subagents/agent-*.jsonl', see
 `sprig--log-subagent-p') are pruned in the `find' itself unless SUBAGENTS is
@@ -3428,7 +3544,8 @@ printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; \
 [ -e \"${p%%.jsonl}.sprig-star\" ] && printf 1; \
 printf '\\037'; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
-[ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; done"
+[ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; \
+printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; done"
           root
           (if subagents "" " -not -path '*/subagents/*'")
           cap sprig--status-preview-bytes))
@@ -3436,8 +3553,12 @@ printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 (defun sprig--parse-scan-rows (blob limit)
   "Parse BLOB from `sprig--remote-scan-all-command' into scan plists.
 Records are RS(\\036)-separated; each is mtime, path, star flag, head bytes,
-and the `ai-title' line, US(\\037)-separated.  The star flag is `1' when the
-log has a `.sprig-star' marker beside it, else empty.  Ignored logs are
+the `ai-title' line, and a trailing live flag, US(\\037)-separated.  The star
+and live flags are `1' when a `.sprig-star' or `.sprig-live' marker sits
+beside the log, else empty (live means the broker still holds the session).
+The live flag is last and optional, so an older blob without it still parses,
+its session simply not live.  Ignored logs
+are
 dropped and the rest capped to LIMIT, newest first, matching
 `sprig--scan-session-logs'.  The head holds no US byte in any real log, so it
 is bounded by the separators around it."
@@ -3457,12 +3578,21 @@ is bounded by the separators around it."
                          (rest3 (substring rest2 (1+ p3)))
                          (p4 (string-search "\037" rest3))
                          (head (if p4 (substring rest3 0 p4) rest3))
-                         (raw (and p4 (string-trim (substring rest3 (1+ p4)))))
-                         (title (and raw (not (string-empty-p raw)) raw)))
+                         ;; The tail past the head is the title, or `title US
+                         ;; live-flag' when the newer scan appended the flag; an
+                         ;; older blob without it just has no live field.
+                         (tail (and p4 (substring rest3 (1+ p4))))
+                         (p5 (and tail (string-search "\037" tail)))
+                         (live (and p5 (not (string-empty-p
+                                             (substring tail (1+ p5))))))
+                         (raw (string-trim (if p5 (substring tail 0 p5)
+                                             (or tail ""))))
+                         (title (and (not (string-empty-p raw)) raw)))
                     (unless (sprig--log-ignored-p path)
                       (let ((pl (sprig--log-plist
                                  path mtime head (lambda () title))))
-                        (push (plist-put pl :starred star) rows)))))))))))
+                        (plist-put pl :starred star)
+                        (push (plist-put pl :live live) rows)))))))))))
     (setq rows (nreverse rows))
     (if limit (seq-take rows limit) rows)))
 
@@ -3729,7 +3859,10 @@ mark, caches the parsed rows, and refreshes the open navigator."
                           (with-current-buffer (process-buffer p) (buffer-string))
                           limit)))
                (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
-                     (cons (current-time) rows))))
+                     (cons (current-time) rows))
+               ;; Now that this host's rows are known, reattach any the broker
+               ;; still holds (see `sprig-status-auto-reattach').
+               (sprig--status-reattach-live host rows)))
            (when (buffer-live-p (process-buffer p))
              (kill-buffer (process-buffer p)))
            (sprig--status-render-if-live)))))))
@@ -3937,6 +4070,13 @@ sorts to the top of a newest-first list rather than the bottom."
 A star is simply the presence of this `<id>.sprig-star' file next to the
 CLI's own log, on whichever host the log lives; the CLI ignores it."
   (concat (file-name-sans-extension log) ".sprig-star"))
+
+(defun sprig--live-file (log)
+  "Return the broker live-marker path beside session LOG (an `<id>.jsonl').
+The broker touches this `<id>.sprig-live' file while it holds the session
+and removes it when the session ends, so the scan learns which sessions are
+still held without querying the broker (see the broker script)."
+  (concat (file-name-sans-extension log) ".sprig-live"))
 
 (defun sprig--status-starred-p (entry)
   "Non-nil when ENTRY's session carries a star marker.
@@ -5229,6 +5369,9 @@ live session.  Narrow with `/', lift the cap with `l a'."
       ;; Opening is a "show me now" gesture, and the cache may hold a scan from
       ;; an earlier viewing, so read the disk fresh.
       (sprig--status-scan-invalidate)
+      ;; Re-arm auto-reattach: a fresh open may reattach sessions a prior
+      ;; viewing already tried and then disconnected from.
+      (setq sprig--status-reattach-attempted nil)
       (sprig--status-render))
     (pop-to-buffer buf)))
 

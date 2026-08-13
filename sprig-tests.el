@@ -1136,6 +1136,79 @@ claude"
       (sprig--ensure-broker "me@host")
       (should installed))))
 
+;;; Broker auto-reattach (`.sprig-live' markers, `sprig-status-auto-reattach')
+
+(ert-deftest sprig-test-live-file-name ()
+  ;; The live marker sits beside the log as `<id>.sprig-live', like the star.
+  (should (equal (sprig--live-file "/p/-x/abc.jsonl") "/p/-x/abc.sprig-live")))
+
+(ert-deftest sprig-test-broker-command-attach-only ()
+  ;; A reattach binds `sprig--broker-attach-only', which adds `--attach-only
+  ;; --no-start' so a stale marker can neither spawn nor start a daemon.
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host")) (sprig-program "claude")
+          (sprig-ssh-program "ssh") (sprig-ssh-args '("-T")) (sprig-directory nil)
+          (sprig--fork-session nil) (sprig--broker-attach-only t))
+      (let ((payload (car (last (sprig--command)))))
+        (should (string-match-p "--attach-only" payload))
+        (should (string-match-p "--no-start" payload))
+        (should (string-match-p "--session sess-1" payload)))))
+  ;; A normal open (flag unbound) carries neither.
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host")) (sprig-program "claude")
+          (sprig-ssh-program "ssh") (sprig-ssh-args '("-T")) (sprig-directory nil)
+          (sprig--fork-session nil))
+      (should-not (string-match-p "--attach-only" (car (last (sprig--command))))))))
+
+(ert-deftest sprig-test-parse-scan-rows-reads-live-flag ()
+  ;; The scan blob now carries a live flag between the star flag and the head;
+  ;; a `1' becomes :live t, empty becomes nil, and the star still parses.
+  (let* ((blob (concat "\036100\037/p/-x/aaa.jsonl\037\037\037T1\0371"
+                       "\036090\037/p/-x/bbb.jsonl\0371\037\037\037"))
+         (rows (sprig--parse-scan-rows blob nil)))
+    (should (= (length rows) 2))
+    (should (equal (plist-get (nth 0 rows) :session) "aaa"))
+    (should (eq (plist-get (nth 0 rows) :live) t))
+    (should-not (plist-get (nth 0 rows) :starred))
+    (should-not (plist-get (nth 1 rows) :live))
+    (should (eq (plist-get (nth 1 rows) :starred) t))))
+
+(ert-deftest sprig-test-status-reattach-live-attaches-each-once ()
+  ;; Each :live row is reattached once; a second pass over the same rows adds
+  ;; nothing (the attempted set), and non-live rows are left alone.
+  (let ((sprig-use-broker t) (sprig-status-auto-reattach t)
+        (sprig--status-reattach-attempted nil) (calls nil))
+    (cl-letf (((symbol-function 'sprig--reattach-session)
+               (lambda (dir id host) (push (list dir id host) calls)))
+              ((symbol-function 'sprig--title-live-buffer) (lambda (_) nil)))
+      (let ((rows (list (list :session "a" :dir "/d" :live t)
+                        (list :session "b" :dir "/d" :live nil))))
+        (sprig--status-reattach-live "me@host" rows)
+        (should (equal calls '(("/d" "a" "me@host"))))
+        (sprig--status-reattach-live "me@host" rows)
+        (should (equal calls '(("/d" "a" "me@host"))))))))
+
+(ert-deftest sprig-test-status-reattach-live-gated ()
+  ;; No reattach when the broker is off, auto-reattach is off, or the host is
+  ;; local (only remote sessions are brokered).
+  (let ((calls nil)
+        (rows (list (list :session "a" :dir "/d" :live t))))
+    (cl-letf (((symbol-function 'sprig--reattach-session)
+               (lambda (&rest _) (push t calls)))
+              ((symbol-function 'sprig--title-live-buffer) (lambda (_) nil)))
+      (let ((sprig-use-broker nil) (sprig-status-auto-reattach t)
+            (sprig--status-reattach-attempted nil))
+        (sprig--status-reattach-live "h" rows))
+      (let ((sprig-use-broker t) (sprig-status-auto-reattach nil)
+            (sprig--status-reattach-attempted nil))
+        (sprig--status-reattach-live "h" rows))
+      (let ((sprig-use-broker t) (sprig-status-auto-reattach t)
+            (sprig--status-reattach-attempted nil))
+        (sprig--status-reattach-live nil rows))
+      (should-not calls))))
+
 (ert-deftest sprig-test-btw-args ()
   ;; A side question resumes and forks the session so it sees the whole
   ;; conversation, but turns persistence off, so it writes no log and leaves
