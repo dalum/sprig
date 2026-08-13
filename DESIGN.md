@@ -191,7 +191,7 @@ Everything above the "Authoring by hand" heading is **shipped**, and its core no
 - Finer **`x` granularity** (a code block inside prose, not just a tool command).
 - **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.
 - Drawing the **fork forest** in the navigator, now that `s f` makes forks real.
-- The **session broker** for detach and reattach (design above): a per-host holder process so a remote session survives a dropped SSH link and its in-flight turn is not lost. Probe-confirmed feasible; unbuilt.
+- The **session broker** for detach and reattach (design above): a per-host holder process so a remote session survives a dropped SSH link and its in-flight turn is not lost. Stage 1 (the broker core: spawn, attach, spool, detach, reattach-by-offset, stop) is built and tested standalone against a real session in `broker/`; still to come are multiplexing polish, deployment and discovery on a remote host, and the Sprig transport hook (`ssh HOST sprig-broker attach SESSION` in place of `exec claude`).
 
 ### Deferred
 
