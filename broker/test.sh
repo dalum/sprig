@@ -86,6 +86,27 @@ for _ in $(seq 1 10); do
 done
 if [ "${n:-1}" = "0" ]; then ok "stop removed the session"; else bad "session still listed after stop"; fi
 
+# 6. `open`: the single verb Sprig runs. Fresh spawn (no --session) replays
+#    from 0 so the init line lands; a reattach by CLI id gives the live tail.
+fifoC="$work/inC"; outC="$work/outC"; mkfifo "$fifoC"; : >"$outC"
+"$broker" open --cwd "$work" -- \
+  -p --input-format stream-json --output-format stream-json --verbose \
+  <"$fifoC" >"$outC" 2>"$work/errC" &
+clientC=$!
+exec 6>"$fifoC"
+printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with just the word GAMMA and nothing else."}]}}' >&6
+for _ in $(seq 1 60); do grep -q '"type":"result"' "$outC" && break; sleep 1; done
+if grep -q '"type":"system"' "$outC" && grep -q '"session_id"' "$outC"; then
+  ok "open spawned and replayed the init line (session id present)"
+else bad "open did not deliver the init line"; fi
+if grep -qi 'GAMMA' "$outC"; then ok "open drove a turn on a freshly spawned session"; else bad "no GAMMA via open"; fi
+open_sid="$("$broker" list | jget '["sessions"][0]["cli_session_id"]')"
+exec 6>&-; kill "$clientC" 2>/dev/null; wait "$clientC" 2>/dev/null
+"$broker" stop "$open_sid" >/dev/null 2>&1
+
+# 7. version prints without needing the daemon (used for the install check).
+if [ "$("$broker" version)" = "1" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi
 exit "$fail"

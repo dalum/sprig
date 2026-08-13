@@ -32,6 +32,11 @@ import sys
 import threading
 import time
 
+# Bumped when the wire protocol or install path changes, so Sprig can tell a
+# stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
+# `sprig-broker-version'.
+VERSION = "1"
+
 
 # --- paths -----------------------------------------------------------------
 
@@ -207,6 +212,11 @@ def do_spawn(broker, req):
     cwd = req.get("cwd") or None
     args = req.get("args") or []
     program = req.get("program", "claude")
+    env = os.environ.copy()
+    for kv in req.get("env") or []:
+        if "=" in kv:
+            k, v = kv.split("=", 1)
+            env[k] = v
     key = broker.new_key()
     err = open(err_path(key), "ab", buffering=0)
     proc = subprocess.Popen(
@@ -217,6 +227,7 @@ def do_spawn(broker, req):
         stderr=err,
         bufsize=0,
         start_new_session=True,
+        env=env,
     )
     sess = Session(key, proc, cwd, args)
     broker.add(sess)
@@ -262,21 +273,10 @@ def do_stop(broker, req):
     return {"ok": True, "session": key}
 
 
-def do_attach(broker, conn, rest, req):
-    key = broker.resolve(req.get("session"))
-    if key is None:
-        send_json(conn, {"ok": False, "error": "no such session"})
-        return
-    sess = broker.sessions[key]
-    offset = int(req.get("offset") or 0)
-    send_json(conn, {
-        "ok": True,
-        "session": sess.key,
-        "cli_session_id": sess.cli_session_id,
-        "ended": sess.ended,
-    })
-    # Replay the spool from OFFSET and subscribe to the live tail atomically
-    # against the reader, so no byte is missed or doubled at the seam.
+def serve_attach(sess, conn, rest, offset):
+    """Replay SESS's spool from OFFSET, then bridge the live stream both ways."""
+    # Replay and subscribe to the live tail atomically against the reader, so
+    # no byte is missed or doubled at the seam.
     with sess.lock:
         try:
             with open(sess.spool, "rb") as f:
@@ -313,6 +313,53 @@ def do_attach(broker, conn, rest, req):
             sess.subscribers.discard(conn)
 
 
+def do_attach(broker, conn, rest, req):
+    key = broker.resolve(req.get("session"))
+    if key is None:
+        send_json(conn, {"ok": False, "error": "no such session"})
+        return
+    sess = broker.sessions[key]
+    offset = int(req.get("offset") or 0)
+    send_json(conn, {
+        "ok": True,
+        "session": sess.key,
+        "cli_session_id": sess.cli_session_id,
+        "ended": sess.ended,
+    })
+    serve_attach(sess, conn, rest, offset)
+
+
+def do_open(broker, conn, rest, req):
+    """Attach to a live session by id, or spawn a fresh one, then bridge.
+
+    A caller that does not yet know a session (or whose session is gone) gets
+    a spawn and a full replay from offset 0, so it sees the init line and the
+    CLI session id.  A caller reattaching to a live session gets the live tail
+    only (from the current spool end), since settled history is in the JSONL."""
+    sid = req.get("session")
+    key = broker.resolve(sid) if sid else None
+    if key is None:
+        resp = do_spawn(broker, req)
+        sess = broker.sessions[resp["session"]]
+        offset = 0
+        spawned = True
+    else:
+        sess = broker.sessions[key]
+        try:
+            offset = os.path.getsize(sess.spool)
+        except OSError:
+            offset = 0
+        spawned = False
+    send_json(conn, {
+        "ok": True,
+        "session": sess.key,
+        "cli_session_id": sess.cli_session_id,
+        "ended": sess.ended,
+        "spawned": spawned,
+    })
+    serve_attach(sess, conn, rest, offset)
+
+
 def handle(broker, conn):
     cmd = None
     try:
@@ -331,6 +378,8 @@ def handle(broker, conn):
             send_json(conn, {"ok": True})
         elif cmd == "attach":
             do_attach(broker, conn, rest, req)
+        elif cmd == "open":
+            do_open(broker, conn, rest, req)
         else:
             send_json(conn, {"ok": False, "error": f"unknown cmd {cmd!r}"})
     except Exception as e:  # noqa: BLE001 - report, never crash the accept loop
@@ -435,14 +484,12 @@ def cmd_stop(a):
     return 0
 
 
-def cmd_attach(a):
-    conn = connect()
-    send_json(conn, {"cmd": "attach", "session": a.session, "offset": a.offset})
-    line, rest = recv_line(conn)
-    status = json.loads(line) if line else {}
-    if not status.get("ok"):
-        sys.stderr.write(f"sprig-broker: {status.get('error', 'attach failed')}\n")
-        return 1
+def bridge(conn, rest):
+    """Copy this process's stdin into CONN and CONN's stream to stdout.
+
+    From the caller's side CONN behaves like a plain claude process: stdout is
+    the raw stream-json, stdin is the turn input.  Closing our stdin (or being
+    killed) detaches without touching the session."""
     out = sys.stdout.buffer
     if rest:
         out.write(rest)
@@ -461,13 +508,46 @@ def cmd_attach(a):
             else:
                 data = os.read(sys.stdin.fileno(), 65536)
                 if not data:
-                    # Our stdin closed: stop forwarding, detach cleanly.
                     try:
                         conn.shutdown(socket.SHUT_WR)
                     except OSError:
                         pass
                     return 0
                 conn.sendall(data)
+
+
+def cmd_attach(a):
+    conn = connect()
+    send_json(conn, {"cmd": "attach", "session": a.session, "offset": a.offset})
+    line, rest = recv_line(conn)
+    status = json.loads(line) if line else {}
+    if not status.get("ok"):
+        sys.stderr.write(f"sprig-broker: {status.get('error', 'attach failed')}\n")
+        return 1
+    return bridge(conn, rest)
+
+
+def cmd_open(a):
+    conn = connect()
+    send_json(conn, {
+        "cmd": "open",
+        "session": a.session,
+        "cwd": a.cwd,
+        "program": a.program,
+        "env": a.env,
+        "args": a.args[1:] if a.args and a.args[0] == "--" else a.args,
+    })
+    line, rest = recv_line(conn)
+    status = json.loads(line) if line else {}
+    if not status.get("ok"):
+        sys.stderr.write(f"sprig-broker: {status.get('error', 'open failed')}\n")
+        return 1
+    return bridge(conn, rest)
+
+
+def cmd_version(a):
+    print(VERSION)
+    return 0
 
 
 def main():
@@ -485,7 +565,15 @@ def main():
     at.add_argument("session")
     at.add_argument("--offset", type=int, default=0)
 
+    op = sub.add_parser("open")
+    op.add_argument("--session", default=None)
+    op.add_argument("--cwd", default=None)
+    op.add_argument("--program", default="claude")
+    op.add_argument("--env", action="append", default=[])
+    op.add_argument("args", nargs=argparse.REMAINDER)
+
     sub.add_parser("list")
+    sub.add_parser("version")
 
     st = sub.add_parser("stop")
     st.add_argument("session")
@@ -501,8 +589,12 @@ def main():
         return cmd_spawn(a)
     if a.cmd == "attach":
         return cmd_attach(a)
+    if a.cmd == "open":
+        return cmd_open(a)
     if a.cmd == "list":
         return cmd_list(a)
+    if a.cmd == "version":
+        return cmd_version(a)
     if a.cmd == "stop":
         return cmd_stop(a)
     return 2

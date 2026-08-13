@@ -5,9 +5,10 @@ survives a dropped SSH link and its in-flight turn is not lost. See the
 "Detach and reattach: the session broker" section of [../DESIGN.md](../DESIGN.md)
 for the design and rationale.
 
-This is **Stage 1**: the broker core, provable in a shell with no Emacs in the
-loop. One daemon per user holds each session's stdin open, spools its stdout to
-a file, and fans that stream out to attached clients.
+One daemon per user holds each session's stdin open, spools its stdout to a
+file, and fans that stream out to attached clients. Sprig drives it behind the
+opt-in `sprig-use-broker`: a remote session runs `python3 BROKER open ...` in
+place of `exec claude`, and Sprig ships this script to the host on first use.
 
 ## Use
 
@@ -23,7 +24,14 @@ sid=$(./sprig-broker spawn --cwd /some/project -- \
 # Reattach later from a byte offset; addresses by broker key or CLI session id.
 ./sprig-broker attach "$sid" --offset 19936
 
+# What Sprig runs: attach to a live session by id, else spawn a fresh one.
+# A fresh spawn replays from 0 (the init line lands); a reattach gives the
+# live tail only, since settled history is in the CLI's JSONL.
+./sprig-broker open --session "$cli_id" --cwd /some/project -- \
+        -p --input-format stream-json --output-format stream-json --verbose
+
 ./sprig-broker list          # sessions as JSON
+./sprig-broker version       # protocol version (used for the install check)
 ./sprig-broker stop "$sid"   # close stdin (claude exits) and drop it
 ```
 
@@ -43,9 +51,10 @@ second turn on the same process, and a stop. Runs in an isolated
 
 ## Not yet (later stages)
 
-- Multiplexing polish, spool trim, and re-adopting live children on a daemon
-  restart (falling back to `--resume` by session id).
-- Deployment and discovery on a remote host (`systemd --user` unit or a
-  `setsid` launcher), and a version handshake on attach.
-- Sprig transport integration: a remote session runs
-  `ssh HOST sprig-broker attach SESSION` in place of `exec claude`.
+- A live end-to-end attach from Emacs over a real SSH link (the command
+  construction, install, and resume/fork logic are unit-tested; the wire has
+  been proven in the shell, but the two have not yet been run together).
+- Spool trim, and re-adopting live children on a daemon restart (falling back
+  to `--resume` by session id).
+- A navigator that shows detached-but-alive sessions and reattaches with a
+  keystroke.

@@ -1008,6 +1008,116 @@ agent's own work."
 claude"
                  payload))))))
 
+;;; The session broker (`sprig-use-broker')
+
+(ert-deftest sprig-test-command-broker-off-is-unchanged ()
+  ;; With the flag off, a remote command is exactly the old `cd && exec'.
+  (with-temp-buffer
+    (let ((sprig-use-broker nil) (sprig-remotes '("me@host"))
+          (sprig-program "claude") (sprig-ssh-program "ssh")
+          (sprig-ssh-args '("-T" "-A")) (sprig-directory "~/proj"))
+      (should (string-prefix-p "cd ~/proj && exec claude"
+                               (car (last (sprig--command))))))))
+
+(ert-deftest sprig-test-command-broker-local-is-unchanged ()
+  ;; The broker is remote-only: a local session ignores the flag entirely.
+  (with-temp-buffer
+    (let ((sprig-use-broker t) (sprig-remotes nil) (sprig-program "claude")
+          (sprig-directory nil))
+      (should (equal (car (sprig--command)) "claude")))))
+
+(ert-deftest sprig-test-broker-command-shape ()
+  ;; A brokered remote session runs `python3 BROKER open ... -- <claude argv>'
+  ;; over ssh, with the working dir on `--cwd' and the tilde kept live.
+  (with-temp-buffer
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host"))
+          (sprig-program "claude") (sprig-ssh-program "ssh")
+          (sprig-ssh-args '("-T" "-A")) (sprig-directory "~/proj")
+          (sprig-config-directory nil)
+          (sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"))
+      (let ((cmd (sprig--command)))
+        (should (equal (car cmd) "ssh"))
+        (should (member "me@host" cmd))
+        (let ((payload (car (last cmd))))
+          (should (string-prefix-p
+                   "python3 ~/.local/share/sprig/sprig-broker open" payload))
+          (should (string-match-p "--program claude" payload))
+          (should (string-match-p "--cwd ~/proj" payload))
+          ;; The claude argv follows the `--' separator.
+          (should (string-match-p " -- .*--input-format" payload))
+          ;; A fresh session names no live session to attach to.
+          (should-not (string-match-p "--session" payload)))))))
+
+(ert-deftest sprig-test-broker-command-resumes-by-session ()
+  ;; A resumed session hands the broker `--session ID' (attach the live one)
+  ;; and still carries `--resume ID' in the claude argv (spawn fallback).
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host"))
+          (sprig-program "claude") (sprig-ssh-program "ssh")
+          (sprig-ssh-args '("-T" "-A")) (sprig-directory nil)
+          (sprig--fork-session nil))
+      (let ((payload (car (last (sprig--command)))))
+        (should (string-match-p "--session sess-1" payload))
+        (should (string-match-p "--resume sess-1" payload))))))
+
+(ert-deftest sprig-test-broker-command-fork-does-not-attach ()
+  ;; A fork must NOT pass `--session', or the broker would attach to the
+  ;; live parent instead of spawning a forked child.
+  (with-temp-buffer
+    (setq sprig--session-id "parent-1")
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host"))
+          (sprig-program "claude") (sprig-ssh-program "ssh")
+          (sprig-ssh-args '("-T" "-A")) (sprig-directory nil)
+          (sprig--fork-session t))
+      (let ((payload (car (last (sprig--command)))))
+        (should-not (string-match-p "--session" payload))
+        ;; The fork still resumes the parent to seed the new session.
+        (should (string-match-p "--resume parent-1" payload))
+        (should (string-match-p "--fork-session" payload))))))
+
+(ert-deftest sprig-test-broker-command-config-dir-rides-env ()
+  ;; A config dir is passed as `--env CLAUDE_CONFIG_DIR=...', tilde live, so
+  ;; the broker sets it on the spawned child.
+  (with-temp-buffer
+    (let ((sprig-use-broker t) (sprig-remotes '("me@host"))
+          (sprig-program "claude") (sprig-ssh-program "ssh")
+          (sprig-ssh-args '("-T" "-A")) (sprig-directory nil)
+          (sprig-config-directory "~/.config/sprig/claude"))
+      (should (string-match-p "--env CLAUDE_CONFIG_DIR=~/.config/sprig/claude"
+                              (car (last (sprig--command))))))))
+
+(ert-deftest sprig-test-broker-install-command-is-atomic ()
+  ;; The install writes a temp file, marks it executable, then moves it into
+  ;; place, so a half-shipped broker is never run.
+  (let ((sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"))
+    (let ((cmd (sprig--broker-install-command)))
+      (should (string-match-p "mkdir -p ~/.local/share/sprig" cmd))
+      (should (string-match-p "cat > ~/.local/share/sprig/sprig-broker.tmp" cmd))
+      (should (string-match-p "chmod \\+x" cmd))
+      (should (string-match-p "mv ~/.local/share/sprig/sprig-broker.tmp ~/.local/share/sprig/sprig-broker"
+                              cmd)))))
+
+(ert-deftest sprig-test-ensure-broker-skips-when-current ()
+  ;; When the host already reports the expected version, no install runs.
+  (let ((sprig-broker-version "1") (installed nil))
+    (cl-letf (((symbol-function 'sprig--remote-sh) (lambda (_) "1\n"))
+              ((symbol-function 'sprig--install-broker)
+               (lambda (_) (setq installed t))))
+      (sprig--ensure-broker "me@host")
+      (should-not installed))))
+
+(ert-deftest sprig-test-ensure-broker-installs-when-stale ()
+  ;; A missing or older broker (version mismatch, or the check erroring) is
+  ;; reshipped.
+  (let ((sprig-broker-version "1") (installed nil))
+    (cl-letf (((symbol-function 'sprig--remote-sh)
+               (lambda (_) (error "no such file")))
+              ((symbol-function 'sprig--install-broker)
+               (lambda (_) (setq installed t))))
+      (sprig--ensure-broker "me@host")
+      (should installed))))
+
 (ert-deftest sprig-test-btw-args ()
   ;; A side question resumes and forks the session so it sees the whole
   ;; conversation, but turns persistence off, so it writes no log and leaves

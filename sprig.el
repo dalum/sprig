@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.32.0
+;; Version: 0.33.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -105,6 +105,37 @@ A fresh config dir starts logged out; set it up once per host with
 \\[sprig-login]."
   :type '(choice (const :tag "CLI default (~/.claude)" nil)
                  (directory :tag "Config directory")))
+
+(defcustom sprig-use-broker nil
+  "When non-nil, run a remote session through the sprig-broker.
+The broker is a small per-host daemon that owns the `claude' child, so a
+remote session survives a dropped SSH link: reconnecting reattaches to the
+same live process rather than resuming a killed one, and an in-flight turn
+is not lost.  See the \"Detach and reattach\" section of DESIGN.md.
+
+Only remote sessions are brokered; a local session is a child of Emacs and
+already outlives nothing worth saving.  When set, sprig ships the broker to
+each host on first use (see `sprig-broker-remote-path') and starts it on
+demand.  The host needs `python3' on its PATH.  Off by default; this is new."
+  :type 'boolean)
+
+(defcustom sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"
+  "Path the broker is installed to on each SSH host.
+Interpreted on the host and may use `~'.  sprig compares the installed
+copy's version against `sprig-broker-version' and reinstalls when they
+differ, so a path on a per-user, writable filesystem is what you want."
+  :type 'string)
+
+(defcustom sprig-broker-program nil
+  "Local path to the sprig-broker script shipped to hosts, or nil to find it.
+When nil, sprig looks for a \"broker/sprig-broker\" file beside sprig.el.
+Set this if you keep the broker elsewhere."
+  :type '(choice (const :tag "Beside sprig.el" nil) (file :tag "Broker script")))
+
+(defconst sprig-broker-version "1"
+  "Broker wire-protocol version sprig expects.
+Mirrors the `VERSION' constant in the broker script; a host whose installed
+broker reports a different value is reinstalled before use.")
 
 (defcustom sprig-model "claude-opus-4-8"
   "Model id, or nil to let the CLI choose its default."
@@ -407,10 +438,88 @@ one-shot, so both reach a remote box the same way."
 (defun sprig--command ()
   "Full command vector for `make-process', local or via SSH.
 A local session's working directory is set by `sprig--spawn' binding
-`default-directory'; a remote session's is set here by prefixing a `cd'."
-  (sprig--wrap-command (cons sprig-program (sprig--base-args))
-                       (sprig--directory)
-                       (sprig--remote)))
+`default-directory'; a remote session's is set here by prefixing a `cd'.
+With `sprig-use-broker' a remote session instead runs through the broker
+\(`sprig--broker-command'), so it survives a dropped link."
+  (let ((remote (sprig--remote)))
+    (if (and sprig-use-broker remote)
+        (sprig--broker-command remote)
+      (sprig--wrap-command (cons sprig-program (sprig--base-args))
+                           (sprig--directory)
+                           remote))))
+
+(defun sprig--broker-command (host)
+  "Command vector running a brokered remote session on HOST.
+In place of `exec claude', the session is `python3 BROKER open ...'.  The
+broker attaches to the live session named by `sprig--session-id' when it
+still holds it, and otherwise spawns a fresh `claude' (resuming from the
+JSONL when an id is set).  A fork names no session, so it spawns rather
+than attaching to its still-live parent, keeping the parent untouched.
+Config dir rides `--env' (the broker sets it on the child), the working
+dir rides `--cwd', and the `claude' argv follows a `--'."
+  (let* ((dir (sprig--directory))
+         (session (and sprig--session-id (not sprig--fork-session)
+                       sprig--session-id))
+         (tokens
+          (append
+           (list "python3" (sprig--remote-dir-arg sprig-broker-remote-path)
+                 "open" "--program" (shell-quote-argument sprig-program))
+           (when dir (list "--cwd" (sprig--remote-dir-arg dir)))
+           (when session (list "--session" (shell-quote-argument session)))
+           (when sprig-config-directory
+             (list "--env"
+                   (concat "CLAUDE_CONFIG_DIR="
+                           (sprig--remote-dir-arg sprig-config-directory))))
+           (list "--")
+           (mapcar #'shell-quote-argument (sprig--base-args)))))
+    (append (list sprig-ssh-program) sprig-ssh-args
+            (list host (mapconcat #'identity tokens " ")))))
+
+(defun sprig--broker-local-file ()
+  "Absolute path to the broker script sprig ships to hosts.
+`sprig-broker-program' when set, else a \"broker/sprig-broker\" beside the
+loaded sprig.el."
+  (or sprig-broker-program
+      (let ((dir (file-name-directory
+                  (or (locate-library "sprig") load-file-name
+                      buffer-file-name default-directory))))
+        (expand-file-name "broker/sprig-broker" dir))))
+
+(defun sprig--broker-install-command ()
+  "Shell command installing the broker at `sprig-broker-remote-path'.
+Reads the script from stdin (the SSH channel), writes it atomically, and
+marks it executable.  Paths keep a leading `~' live for the remote shell."
+  (let ((path (sprig--remote-dir-arg sprig-broker-remote-path))
+        (dir (sprig--remote-dir-arg
+              (directory-file-name
+               (file-name-directory sprig-broker-remote-path)))))
+    (format "mkdir -p %s && cat > %s.tmp && chmod +x %s.tmp && mv %s.tmp %s"
+            dir path path path path)))
+
+(defun sprig--ensure-broker (host)
+  "Make sure HOST has the current broker installed, shipping it if not.
+Compares the installed broker's reported version against
+`sprig-broker-version' and reships when they differ or it is missing.  A
+no-op once a host is current."
+  (let* ((sprig-remotes (list host))
+         (have (ignore-errors
+                 (string-trim
+                  (sprig--remote-sh
+                   (format "python3 %s version 2>/dev/null"
+                           (sprig--remote-dir-arg sprig-broker-remote-path)))))))
+    (unless (equal have sprig-broker-version)
+      (sprig--install-broker host))))
+
+(defun sprig--install-broker (host)
+  "Ship the local broker script to HOST at `sprig-broker-remote-path'."
+  (let ((local (sprig--broker-local-file)))
+    (unless (file-readable-p local)
+      (user-error "sprig: broker script not found: %s" local))
+    (let ((status (apply #'call-process sprig-ssh-program local nil nil
+                         (append sprig-ssh-args
+                                 (list host (sprig--broker-install-command))))))
+      (unless (eq status 0)
+        (error "sprig: broker install on %s failed (status %s)" host status)))))
 
 ;;;; Transport and sink
 ;;
@@ -845,6 +954,10 @@ Reads the resume id from `sprig--session-id' (nil for a fresh session)
 and the working directory from `sprig--directory', both already resolved
 by the caller.  Sets and returns `sprig--process'.  Buffer-agnostic: the
 Markdown transcript and a session-owning review buffer share it."
+  ;; A brokered remote session needs the broker present on the host first;
+  ;; ship it on first use, then the command below attaches through it.
+  (when (and sprig-use-broker (sprig--remote))
+    (sprig--ensure-broker (sprig--remote)))
   (let* ((dir (sprig--directory))
          ;; Local sessions inherit `default-directory'; a configured dir
          ;; overrides it.  Remote sessions get their `cd' in `sprig--command'.
