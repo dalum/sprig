@@ -2749,13 +2749,22 @@ With PLAN non-nil, send the turn in plan mode (`c p'), which needs a turn
 of its own and so refuses to fold into a running one.  With QUEUE non-nil,
 hold it until the running turn ends (`c q')."
   (interactive)
-  (let ((review (current-buffer))
-        (context (sprig-review--marked-context))
+  (sprig-review--compose (current-buffer) (sprig-review--marked-context)
+                         plan queue))
+
+(defun sprig-review--compose (target context &optional plan queue)
+  "Pop a compose buffer whose send targets review buffer TARGET.
+CONTEXT is the attached-context string (or nil), PLAN sends in plan mode
+\(`c p'), and QUEUE holds the message until the running turn ends (`c q').
+Shared by `sprig-review-message' and `sprig-diff-message'; call it from the
+buffer whose marks CONTEXT was collected in, so the section count reads
+right before the compose buffer takes over."
+  (let ((n (and context (length sprig-review--marks)))
         (buf (get-buffer-create "*sprig-message*")))
     (with-current-buffer buf
       (sprig-review-compose-mode)
       (erase-buffer)
-      (setq sprig-review--compose-target review
+      (setq sprig-review--compose-target target
             sprig-review--compose-context context
             sprig-review--compose-mode (and plan "plan")
             sprig-review--compose-queue queue
@@ -2764,9 +2773,7 @@ hold it until the running turn ends (`c q')."
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
              (if queue "QUEUED: waits for the running turn to end.  " "")
-             (if context (format "%d section(s) attached.  "
-                                 (length (sprig-review--marked-sections)))
-               ""))))
+             (if context (format "%d section(s) attached.  " n) ""))))
 
 (defun sprig-review-message-plan ()
   "Compose a message and send it in plan mode (`c p')."
@@ -3529,6 +3536,176 @@ into its first-message prompt (plan mode for `s p')."
     ("p" "new, then compose in plan mode" sprig-review-new-message-plan)
     ("f" "fork this session" sprig-review-fork)]])
 
+;;;; Working-tree diff buffer
+;;
+;; A separate magit-section buffer showing the session's net working-tree
+;; diff (`git diff', against `sprig-diff-base'): source 2 of DESIGN.md's
+;; diff-review model, the ground truth that catches a change made by `Bash'
+;; (a formatter, a `sed') with no tool payload to reconstruct from.  It
+;; reuses the review-buffer grammar wholesale: the same `sprig-change' /
+;; `sprig-hunk' sections (`sprig-review--insert-change'), the same marks
+;; (`SPC' / `m'), and the same compose-and-send path, with a comment routed
+;; back to the owning session (`sprig-review--compose').
+;;
+;; Sprig runs `git diff' itself here.  That is a *read*, so it keeps to the
+;; instruction invariant, which governs mutations: reject, commit, and apply
+;; still go through the agent.  A remote session's tree lives on the SSH
+;; host, so the diff is read over the same SSH transport the navigator reads
+;; logs over (`sprig--remote-sh'), not TRAMP; only an optional `RET' file
+;; visit uses TRAMP, exactly as the review buffer does.
+
+(declare-function sprig--remote-sh "sprig" (command &optional host))
+(declare-function sprig--remote-dir-arg "sprig" (dir))
+(defvar sprig-ssh-program)
+
+(defcustom sprig-diff-base "HEAD"
+  "Git revision the working-tree diff buffer diffs against (`d').
+The default `\"HEAD\"' shows the net *uncommitted* changes since the last
+commit.  Set it to a branch such as `\"main\"' to include everything the
+branch has changed on top of it, or to a range like `\"main...HEAD\"' for
+the committed changes alone.  It is passed to `git diff' verbatim."
+  :type 'string
+  :group 'sprig)
+
+(defvar-local sprig-diff--review nil
+  "The `sprig-review-mode' buffer whose session this diff belongs to.")
+
+(defvar-local sprig-diff--remote nil
+  "SSH host the diff's session runs on, or nil when it is local.")
+
+(defvar-local sprig-diff--root nil
+  "Top-level directory of the diff's repository, on the session host.")
+
+(defvar sprig-diff-mode-map
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map magit-section-mode-map)
+    (define-key map (kbd "SPC") #'sprig-review-toggle-mark)
+    (define-key map (kbd "m")   #'sprig-review-toggle-mark)
+    (define-key map (kbd "U")   #'sprig-review-unmark-all)
+    (define-key map (kbd "c")   #'sprig-diff-dispatch)
+    (define-key map (kbd "g")   #'sprig-diff-refresh)
+    (define-key map (kbd "RET") #'sprig-review-visit)
+    (define-key map (kbd "q")   #'quit-window)
+    map)
+  "Keymap for `sprig-diff-mode'.")
+
+(define-derived-mode sprig-diff-mode magit-section-mode "Sprig-Diff"
+  "Major mode for reviewing a session's working-tree diff as read-only sections.
+Mark a hunk with \\`SPC' and `c c' sends a comment about it to the session
+\(see `sprig-review-diff').  Move with \\`n' / \\`p', fold with TAB."
+  :group 'sprig
+  (setq-local revert-buffer-function #'sprig-diff-refresh)
+  (setq-local truncate-lines nil)
+  (setq-local word-wrap t)
+  (sprig-review--suppress-section-highlight))
+
+(defun sprig-diff--run-git (remote dir args)
+  "Run git ARGS in DIR and return stdout, on REMOTE over SSH or locally.
+REMOTE nil runs git in DIR through `process-file'; a host runs `cd DIR &&
+git ARGS' over the session's own SSH transport (`sprig--remote-sh'), a read
+that stays off TRAMP.  Signals on a non-zero git exit."
+  (if remote
+      (sprig--remote-sh
+       (concat "cd " (sprig--remote-dir-arg dir) " && "
+               (mapconcat #'shell-quote-argument (cons "git" args) " "))
+       remote)
+    (let ((default-directory (file-name-as-directory dir)))
+      (with-temp-buffer
+        (if (zerop (apply #'process-file "git" nil t nil args))
+            (buffer-string)
+          (error "git %s failed: %s" (string-join args " ")
+                 (string-trim (buffer-string))))))))
+
+(defun sprig-diff--toplevel (remote dir)
+  "Return the git top-level directory containing DIR on REMOTE, or nil."
+  (let ((out (ignore-errors
+               (sprig-diff--run-git remote dir '("rev-parse" "--show-toplevel")))))
+    (when out
+      (let ((root (string-trim out)))
+        (unless (string-empty-p root) root)))))
+
+(defun sprig-diff--git (remote root)
+  "Return `git diff' output for the repo at ROOT on REMOTE.
+The diff is against `sprig-diff-base' (default `HEAD', the net uncommitted
+changes); untracked files are not shown, since `git diff' omits them and
+staging them would touch the index."
+  (sprig-diff--run-git remote root (list "diff" sprig-diff-base)))
+
+(defun sprig-diff--render (text)
+  "Render git-diff TEXT as change sections in the current diff buffer.
+Marks anchor to sections about to be rebuilt, so they are cleared first."
+  (let ((inhibit-read-only t)
+        (changes (sprig-review-parse-diff text)))
+    (remove-overlays (point-min) (point-max) 'sprig-review-mark t)
+    (setq sprig-review--marks nil)
+    (erase-buffer)
+    (magit-insert-section (sprig-diff-root)
+      (if (null changes)
+          (insert (format "No changes against %s.\n" sprig-diff-base))
+        (dolist (change changes)
+          (sprig-review--insert-change change))))
+    (goto-char (point-min))))
+
+(defun sprig-review-diff ()
+  "Open this session's net working-tree diff in a separate buffer (`d').
+A magit-like view of `git diff' against `sprig-diff-base' (default `HEAD'):
+mark a hunk with \\`SPC' and `c c' sends a comment about it back to the
+session.  Works for a remote session too: the diff is read over the same
+SSH transport the navigator uses, not TRAMP (see DESIGN.md's invariant)."
+  (interactive)
+  (unless (derived-mode-p 'sprig-review-mode)
+    (user-error "Not in a sprig review buffer"))
+  (let* ((remote (sprig--remote))
+         (dir (or (sprig--directory)
+                  (and (not remote) default-directory)
+                  (user-error "This session has no working directory")))
+         (root (or (sprig-diff--toplevel remote dir)
+                   (user-error "Not inside a git repository: %s" dir)))
+         (review (current-buffer))
+         (buf (get-buffer-create
+               (format "*sprig-diff: %s*" (buffer-name review)))))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'sprig-diff-mode) (sprig-diff-mode))
+      (setq sprig-diff--review review
+            sprig-diff--remote remote
+            sprig-diff--root root
+            ;; `default-directory' anchors a `RET' file visit: a TRAMP name
+            ;; on the host for a remote session (as the review buffer visits),
+            ;; the plain root locally.  The bulk diff read does not use it.
+            default-directory (file-name-as-directory
+                               (if remote (format "/ssh:%s:%s" remote root) root)))
+      (sprig-diff--render (sprig-diff--git remote root)))
+    (pop-to-buffer buf)))
+
+(defun sprig-diff-refresh (&rest _)
+  "Re-run `git diff' and redraw the diff buffer (`g'); marks are cleared."
+  (interactive)
+  (unless (derived-mode-p 'sprig-diff-mode)
+    (user-error "Not in a sprig diff buffer"))
+  (sprig-diff--render (sprig-diff--git sprig-diff--remote sprig-diff--root))
+  (message "sprig: diff refreshed"))
+
+(defun sprig-diff-message (&optional queue)
+  "Comment on the marked diff hunks, sent to the owning session (`c c').
+Any marked hunks ride as context, the way `c c' attaches marks in the
+review buffer.  With QUEUE non-nil, hold it until the running turn ends."
+  (interactive)
+  (unless (buffer-live-p sprig-diff--review)
+    (user-error "The review buffer for this diff is gone"))
+  (sprig-review--compose sprig-diff--review (sprig-review--marked-context)
+                         nil queue))
+
+(defun sprig-diff-message-queue ()
+  "Comment on the marked diff hunks, queued for after the running turn (`c q')."
+  (interactive)
+  (sprig-diff-message t))
+
+(transient-define-prefix sprig-diff-dispatch ()
+  "Comment on the working-tree diff, sent to the session."
+  [["Comment (sent to the session)"
+    ("c" "compose & send (steers a running turn)" sprig-diff-message)
+    ("q" "compose & queue (after this turn)" sprig-diff-message-queue)]])
+
 ;;;; Verb keybindings
 
 (define-key sprig-review-mode-map (kbd "SPC") #'sprig-review-toggle-mark)
@@ -3545,6 +3722,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-review-mode-map (kbd "a")   #'sprig-review-answer-dispatch)
 (define-key sprig-review-mode-map (kbd "C")   #'sprig-review-commit)
 (define-key sprig-review-mode-map (kbd "x")   #'sprig-review-run)
+(define-key sprig-review-mode-map (kbd "d")   #'sprig-review-diff)
 (define-key sprig-review-mode-map (kbd "RET") #'sprig-review-visit)
 (define-key sprig-review-mode-map (kbd "t")   #'sprig-review-set-title)
 (define-key sprig-review-mode-map (kbd "T")   #'sprig-review-title-dispatch)

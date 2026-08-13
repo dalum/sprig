@@ -153,6 +153,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 | `k` | Take it back: on a diff hunk, ask the agent to undo the marked (or point) hunks (steers, so a bad hunk can be called out while the turn is still running); on a floated queued message, unstage just that one (a steer cannot go this way, since it is already on the wire) |
 | `x` | Run: ask the agent to run the marked tool call's command, or the fenced shell command in the prose block at point (a command it proposed but did not execute). Steers, so it lands in a turn already running |
 | `C` | Commit: ask the agent to commit the current changes |
+| `d` | Open the session's net working-tree diff in a separate buffer (see [Diff buffer](#diff-buffer)); works local or remote |
 | `a` | Transient for the agent's structured dialog: `a a` answer, `a r` take the recommended, `a s` skip |
 | `c` | Transient, listing every verb: `c c` compose & send (steering a running turn), `c q` compose & queue for after this turn, `c Q` drop the queued messages, `c y` / `c n` answer the agent's last prose question yes / no, `c p` compose in plan mode, `c r` an independent review of the latest changes (the agent spawns a subagent to critique them cold, then addresses its findings; marked sections narrow it), `c l` resend last turn, `c i` interrupt (anything queued then goes), `c z` compact the context (`C-u c z` steers the summary; queued behind a running turn, since a compaction is its own turn), `c b` a side question that leaves the turn and the log alone (see [Side questions](#side-questions)), and `c k` / `c C` / `c x` for reject / commit / run |
 | `s` | Transient for starting a session of its own: `s n` new conversation, `s c` new then straight into a first-message prompt, `s p` the same in plan mode, `s f` fork this one |
@@ -183,6 +184,16 @@ The choice rides back to the agent and the question settles in place, showing wh
 **A plan** (`ExitPlanMode`) comes the same way, and renders in full, fontified: `a a` approves or rejects it (a rejection reads the feedback the agent plans again against), `a r` approves. Approving used to be a `y-or-n-p` naming the plan's first line, over a buffer that rendered the plan nowhere at all.
 
 **A tool wanting permission** comes the same way too, showing what it wants to run: `a a` allows or denies it, `a s` denies. `a r` refuses to touch it, one keypress allowing an unread call being the wrong thing to make easy. Set `sprig-permission-function` to `always` to skip the asking, or to `sprig-permission-prompt` for the old minibuffer prompt, which blocks. When it presents a plan (`ExitPlanMode`), the plan renders in the buffer and Sprig asks you to approve it or reject it with feedback; approval exits plan mode and the agent starts work, a rejection sends your feedback back for a revised plan.
+
+### Diff buffer
+
+`d` opens the session's **net working-tree diff** in a separate Magit-like buffer, a view of `git diff` against `sprig-diff-base` (default `HEAD`). Where the review buffer reconstructs each edit from its tool payload, turn by turn, this is the one cumulative diff of the whole tree against the last commit, so it catches a change made by `Bash` (a formatter, a `sed`, codegen) that has no payload to render from. It reuses the review buffer's own grammar: the changes render as the same foldable coloured hunk sections, `n` / `p` move, `TAB` folds, and `SPC` / `m` mark a hunk. `g` re-runs the diff.
+
+It is also a steering surface, the way the review buffer is. Mark the hunks you want to talk about, then `c c` composes a comment with them attached and sends it to the session (`c q` queues it for after the running turn), exactly as `c c` does in the review buffer. So reviewing your net changes and replying about a hunk is one gesture, without leaving Emacs for a terminal.
+
+**What it diffs against.** `sprig-diff-base` is passed to `git diff` verbatim. The default `HEAD` shows the net *uncommitted* changes since the last commit. Set it to `"main"` to include everything the branch has changed on top of `main`, or to a range like `"main...HEAD"` for the committed changes alone. Untracked files are not shown, since `git diff` omits them.
+
+**Local and remote.** Sprig reads the tree by running `git diff` itself here, which is a read, not a change, so it keeps to the instruction invariant (every *write*, reject / commit / apply, still goes through the agent). For a remote session the diff is read over the same SSH transport the navigator reads logs over, not TRAMP; only an optional `RET` file visit uses TRAMP, exactly as the review buffer does.
 
 ### Side questions
 
@@ -227,6 +238,7 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-review-refresh-delay` | `0.1` | Floor, in seconds, for coalescing structural events before a re-render; widens toward the last render's cost on a big buffer |
 | `sprig-review-refresh-delay-max` | `0.5` | Ceiling, in seconds, on that adaptive coalescing delay; bounds how late a structural update can appear on a long history |
 | `sprig-review-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
+| `sprig-diff-base` | `"HEAD"` | Git revision the `d` diff buffer diffs against, passed to `git diff` verbatim (`"HEAD"` = uncommitted changes; `"main"` = everything on top of main; `"main...HEAD"` = committed changes only) |
 | `sprig-review-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
 | `sprig-review-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |
 | `sprig-review-defer-live-prose` | `t` | Reveal a streaming reply a whole paragraph at a time, fontified, rather than showing the half-typed last paragraph raw (nil streams it raw, in place) |
@@ -264,7 +276,7 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 - One turn at a time per session (several sessions can stream at once).
 - The host is per-session: the primary remote (the first of `sprig-remotes`) is the default for a session started outside the navigator, and inside it the group point is in decides. The navigator lists every host, so a local session no longer drops off the list once its review buffer is closed. Session ids are per-host: a session started on one machine (or the SSH host) cannot resume on another, which is why opening a row pins its buffer to the host the row came from. When the CLI reports the stored id is unknown, Sprig drops it and starts a fresh session automatically; the review buffer keeps showing the replayed history, but the new session does not carry the earlier turns' server-side memory.
 - Interrupt is graceful: `c i` asks the CLI to end the turn cleanly (an `interrupt` control request) and keeps the session live, so the next send continues it with no resume. If the CLI refuses the request (an error receipt) or does not honour it within `sprig-interrupt-timeout` seconds, Sprig falls back to killing the process, and the session resumes on the next send.
-- Diffs are reconstructed from tool-call payloads (`Edit` / `MultiEdit` / `Write`), so a `Bash`-driven edit is not yet attributed; git ground truth is a later slice.
+- The *inline* diffs are reconstructed from tool-call payloads (`Edit` / `MultiEdit` / `Write`), so a `Bash`-driven edit is not attributed in the transcript. The net working-tree diff (`d`, see [Diff buffer](#diff-buffer)) does show it, local or remote; folding it back into the transcript inline is still to come.
 - A **remote** session's `Agent` rows replay without their subagents' steps. Those transcripts are files beside the log rather than records inside it, and a remote log is read by shell over SSH rather than opened by path, so there is no name to find them by. The narration and the report are unaffected; only the replayed steps are missing, and only over SSH.
 - Thinking is shown on replay, not live. The reasoning is read back from the session log, so it appears on the next `g`, but the live stream parser does not surface it as it arrives.
 - The `sprig-status` navigator ships as a flat session list; the fork forest it will grow into is not built yet.

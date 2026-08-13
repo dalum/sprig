@@ -1941,16 +1941,18 @@ is visible without opening the header."
 (declare-function sprig-review-manual-mode "sprig-review-mode" ())
 (declare-function sprig-review-bypass-mode "sprig-review-mode" ())
 
-(defun sprig--remote-sh (command)
-  "Run shell COMMAND on the session host via SSH; return stdout.
-COMMAND is POSIX-sh syntax, so it is wrapped in `sh -c' rather than left
-to the host's login shell: a non-POSIX login shell such as fish rejects
-the scan's `for'-loop outright, which would silently strip every session
-of its recorded cwd.  Signals if SSH exits non-zero."
+(defun sprig--remote-sh (command &optional host)
+  "Run shell COMMAND on HOST via SSH; return stdout.
+HOST defaults to this buffer's session host (`sprig--remote'); pass it
+explicitly from a buffer that does not own the session, such as the diff
+buffer.  COMMAND is POSIX-sh syntax, so it is wrapped in `sh -c' rather
+than left to the host's login shell: a non-POSIX login shell such as fish
+rejects the scan's `for'-loop outright, which would silently strip every
+session of its recorded cwd.  Signals if SSH exits non-zero."
   (with-temp-buffer
     (let ((status (apply #'call-process sprig-ssh-program nil t nil
                          (append sprig-ssh-args
-                                 (list (sprig--remote)
+                                 (list (or host (sprig--remote))
                                        (concat "sh -c "
                                                (shell-quote-argument command)))))))
       (unless (eq status 0)
