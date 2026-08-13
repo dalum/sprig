@@ -1107,6 +1107,24 @@ claude"
       (sprig--ensure-broker "me@host")
       (should-not installed))))
 
+(ert-deftest sprig-test-broker-source-matches-file ()
+  ;; The embedded broker bytes must match broker/sprig-broker exactly, or a
+  ;; host would be shipped a stale script.  Regenerate with broker/embed.py.
+  (let* ((dir (file-name-directory
+               (or load-file-name buffer-file-name default-directory)))
+         (file (expand-file-name "broker/sprig-broker" dir)))
+    (skip-unless (file-readable-p file))
+    (let ((on-disk (with-temp-buffer
+                     (insert-file-contents-literally file)
+                     (buffer-string))))
+      (should (equal on-disk sprig--broker-source-text)))))
+
+(ert-deftest sprig-test-broker-source-ships-embedded-by-default ()
+  ;; With no override, the shipped bytes are the embedded copy; a set
+  ;; `sprig-broker-program' reads that file instead.
+  (let ((sprig-broker-program nil))
+    (should (equal (sprig--broker-source) sprig--broker-source-text))))
+
 (ert-deftest sprig-test-ensure-broker-installs-when-stale ()
   ;; A missing or older broker (version mismatch, or the check erroring) is
   ;; reshipped.
