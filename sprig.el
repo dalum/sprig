@@ -751,18 +751,26 @@ def do_spawn(broker, req):
         if \"=\" in kv:
             k, v = kv.split(\"=\", 1)
             env[k] = v
+    # A missing working directory is the most likely spawn failure (a session
+    # resumed against a host that lacks its recorded cwd); name it plainly
+    # rather than leaking a raw errno to the review buffer.
+    if cwd and not os.path.isdir(cwd):
+        raise RuntimeError(f\"working directory not found on host: {cwd}\")
     key = broker.new_key()
     err = open(err_path(key), \"ab\", buffering=0)
-    proc = subprocess.Popen(
-        [program] + args,
-        cwd=cwd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=err,
-        bufsize=0,
-        start_new_session=True,
-        env=env,
-    )
+    try:
+        proc = subprocess.Popen(
+            [program] + args,
+            cwd=cwd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=err,
+            bufsize=0,
+            start_new_session=True,
+            env=env,
+        )
+    except FileNotFoundError:
+        raise RuntimeError(f\"cannot run {program!r}: not found on host PATH\")
     sess = Session(key, proc, cwd, args)
     broker.add(sess)
     threading.Thread(target=sess.read_loop, daemon=True).start()
