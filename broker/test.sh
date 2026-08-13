@@ -26,6 +26,13 @@ cleanup() {
   pkill -f "$work/sprig-broker" 2>/dev/null
   pkill -f "sprig-broker daemon" 2>/dev/null
   rm -rf "$work"
+  # The spawned claude sessions ran with --cwd "$work" and so logged under
+  # the real config dir's projects/.  Remove that entry too, or every test
+  # run would leave throwaway sessions in the user's navigator.
+  local projects mangled
+  projects="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/projects"
+  mangled="$(printf '%s' "$work" | sed 's#[/.]#-#g')"
+  [ -n "$mangled" ] && rm -rf -- "$projects/$mangled"
 }
 trap cleanup EXIT
 
