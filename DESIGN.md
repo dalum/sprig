@@ -142,6 +142,18 @@ The buffer is a pure render of an append-only event log, so store and view are s
 
 So Sprig keeps essentially no local store: just a pointer (session id plus cwd) to locate the file, and even that the navigator could rediscover by scanning the projects directory. Markdown is at most an *export*, not the live truth.
 
+## Detach and reattach: the session broker
+
+The store survives a disconnect; the live process does not. A running session is a `claude` child wired straight to its transport (`ssh HOST 'cd DIR && exec claude ...'`), so dropping the SSH link hangs claude's stdin EOF and a SIGHUP on it and it dies. Because the JSONL is durable and Sprig already resumes from it (`--resume`), a *finished* turn is never lost; the one casualty is an **in-flight turn**, a long agent run cut off when you close the laptop. Closing that gap is the whole point of the broker.
+
+A probe settled the load-bearing fact first: a `claude` stream-json process does **not** self-exit on idle stdin and does **not** care which client feeds it. Given a persistent holder that keeps its stdin open, a session survives with no client attached, a reattaching client drives the next turn on the same live process, and its stdout replays cleanly from a saved byte offset. That is exactly a broker's job, so the design is sound rather than hopeful.
+
+The **broker** is a per-user, per-host long-lived process (a `systemd --user` unit, or a `setsid` launcher started on first use) that owns each session's claude child. It holds each child's stdin open (the holder fd, so no client's coming and going ever hits EOF), appends its stdout to a per-session spool file, and exposes attach over a Unix socket. A client attaches with `ssh HOST sprig-broker attach SESSION` and gets, in order: a replay of the spool from the byte offset it left off at (cut at newline boundaries, since `--include-partial-messages` streams mid-message lines), then the live tail, plus a stdin path back to the holder. Auth and forwarding ride the existing SSH channel, so there is no new exposed surface. The spool is a transient reattach buffer, not a second store: the CLI's JSONL stays the truth, and the spool can be trimmed to the last turn boundary once no client needs the older bytes.
+
+Sprig's transport gains exactly one mode. A remote session becomes `ssh HOST sprig-broker (spawn|attach) ...` in place of the direct `exec claude`. Session identity stays the CLI's own session id, so the broker degrades gracefully: if it dies, a client falls back to today's behaviour, resuming the JSONL by id, losing only an in-flight turn. The broker is never required for correctness; it only buys process durability across disconnects.
+
+The load-bearing decision is the **permission dialog with no client attached**. Sprig runs claude with `--permission-prompt-tool stdio`, so mid-turn claude can raise a control_request (a permission prompt, an `AskUserQuestion`) when nobody is listening. The broker **queues it and stalls the turn** until a client reattaches, rather than auto-deciding: an auto-deny corrupts the turn silently and an auto-allow is unsafe, whereas a stalled turn is recoverable and already has a home in the navigator's `?` waiting-on-you glyph. A configurable auto-policy (honour the session's permission mode, auto-allow inside an already-`auto` session) can layer on later; stall-and-wait is the safe default.
+
 ## Modes
 
 - **Review buffer**: `sprig-review-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
@@ -179,6 +191,7 @@ Everything above the "Authoring by hand" heading is **shipped**, and its core no
 - Finer **`x` granularity** (a code block inside prose, not just a tool command).
 - **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.
 - Drawing the **fork forest** in the navigator, now that `s f` makes forks real.
+- The **session broker** for detach and reattach (design above): a per-host holder process so a remote session survives a dropped SSH link and its in-flight turn is not lost. Probe-confirmed feasible; unbuilt.
 
 ### Deferred
 
@@ -191,3 +204,4 @@ Everything above the "Authoring by hand" heading is **shipped**, and its core no
 
 - How thin a backend interface can be while spanning providers that differ this much on memory and resume.
 - Whether a subagent's work is reviewable or merely visible: `k` on a hunk a subagent wrote is an instruction to the *main* agent, which did not make the edit itself.
+- For the **broker**: whether local sessions route through it too (symmetry, at the cost of a local daemon) or stay direct; the spool retention policy (last turn boundary, or last acked offset across clients); and how a broker and a newer Sprig negotiate version skew on attach.
