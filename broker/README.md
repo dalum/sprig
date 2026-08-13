@@ -75,15 +75,20 @@ and the ship-on-first-use install. You need an SSH host with `python3` and
    The turn's session should show in `list` with `"ended": false`.
 
 3. **Simulate a dropped link.** Kill the session's transport without a clean
-   teardown, so the SSH process dies the way a network drop would. Either pull
-   the network briefly, or from a shell:
+   teardown, so the SSH process dies the way a network drop would. Mind *where*
+   you run this: the SSH client is on the machine running Emacs, not the host.
 
    ```sh
-   pkill -f 'ssh.*sprig-broker open'
+   # On the machine running Emacs (truest: the link actually drops):
+   pkill -f 'sprig-broker open'
+
+   # Or on the host itself (kills the broker-side bridge, NOT the daemon):
+   pkill -f 'python3.*sprig-broker open'
    ```
 
    Do this *while a long turn is running* to test the real prize: start a turn
-   that takes a while (a big agent task), then kill the transport mid-turn.
+   that takes a while (a big agent task), then kill the transport mid-turn. The
+   host's `... sprig-broker list` should still show the session, `"ended": false`.
 
 4. **Reattach.** Back in the review buffer, send another message. Sprig
    reconnects on the next send (`sprig--ensure`), and because the session id is
