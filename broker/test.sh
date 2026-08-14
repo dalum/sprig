@@ -12,6 +12,10 @@ broker="$here/sprig-broker"
 # the test never touches a real broker.
 export XDG_RUNTIME_DIR="$(mktemp -d /tmp/sprig-broker-test.XXXXXX)"
 work="$XDG_RUNTIME_DIR"
+# Force the bare setsid daemon: an auto-start must never register the real
+# `systemd-run --user' unit, which would escape this test's throwaway sandbox
+# and collide with a user's live broker.
+export SPRIG_BROKER_NO_SYSTEMD=1
 fail=0
 say() { printf '== %s\n' "$*"; }
 ok()  { printf 'PASS %s\n' "$*"; }
@@ -171,7 +175,39 @@ if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else b
 "$broker" stop "$rsid" >/dev/null 2>&1
 
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "2" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "3" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+
+# 10. Auto-start prefers a `systemd-run --user' unit (so the daemon lives under
+#     user@UID.service, not the SSH login's session scope that logout kills)
+#     when systemd-run is on PATH, and the escape hatch forces the setsid path.
+#     Unit-test the selection directly: no real user manager, no daemon spawned.
+if python3 - "$broker" <<'PY'
+import importlib.util, os, sys
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("broker_under_test", sys.argv[1])  # file has no .py
+spec = importlib.util.spec_from_loader(loader.name, loader)
+b = importlib.util.module_from_spec(spec)
+loader.exec_module(b)
+calls = {}
+b.shutil.which = lambda n: "/usr/bin/systemd-run" if n == "systemd-run" else None
+b.subprocess.call = lambda argv, **kw: (calls.__setitem__("argv", argv), 0)[1]
+os.environ["XDG_RUNTIME_DIR"] = "/tmp/does-not-matter"
+os.environ.pop("SPRIG_BROKER_NO_SYSTEMD", None)
+daemon = ["python3", "/some/sprig-broker", "daemon"]
+assert b._systemd_run_daemon(daemon) is True, "should report the unit launched"
+a = calls["argv"]
+assert "--user" in a, a
+assert f"--unit=sprig-broker-{os.getuid()}" in a, a
+assert a[-len(daemon):] == daemon, a          # the daemon argv rides after `--'
+assert "--" in a and a.index("--") < len(a) - len(daemon), a
+os.environ["SPRIG_BROKER_NO_SYSTEMD"] = "1"   # escape hatch forces setsid
+assert b._systemd_run_daemon(daemon) is False, "escape hatch must skip systemd"
+del os.environ["SPRIG_BROKER_NO_SYSTEMD"]
+b.shutil.which = lambda n: None               # no systemd-run -> setsid
+assert b._systemd_run_daemon(daemon) is False, "absent systemd-run must skip"
+PY
+then ok "auto-start selects systemd-run --user, honours the escape hatch"
+else bad "systemd-run selection logic wrong"; fi
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi

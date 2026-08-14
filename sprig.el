@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.38.0
+;; Version: 0.39.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -143,7 +143,7 @@ the broker script would otherwise be missing.  Set this to a path to ship a
 different script, for instance your working copy while iterating on it."
   :type '(choice (const :tag "Embedded copy" nil) (file :tag "Broker script")))
 
-(defconst sprig-broker-version "2"
+(defconst sprig-broker-version "3"
   "Broker wire-protocol version sprig expects.
 Mirrors the `VERSION' constant in the broker script; a host whose installed
 broker reports a different value is reinstalled before use.")
@@ -676,6 +676,7 @@ import glob
 import json
 import os
 import selectors
+import shutil
 import socket
 import subprocess
 import sys
@@ -685,7 +686,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = \"2\"
+VERSION = \"3\"
 
 
 # --- paths -----------------------------------------------------------------
@@ -1157,9 +1158,51 @@ def run_daemon():
         threading.Thread(target=handle, args=(broker, conn), daemon=True).start()
 
 
+def _systemd_run_daemon(argv):
+    \"\"\"Try to start the daemon as a transient `--user' unit; True if launched.
+
+    A plain `setsid' fork (below) still lives in the SSH login's
+    `session-N.scope' cgroup, which `systemd-logind' tears down on logout,
+    killing the daemon with it wherever `KillUserProcesses=yes' (the systemd
+    default).  A `systemd-run --user' unit runs under `user@UID.service'
+    instead, which logout leaves alone as long as lingering is on
+    (`loginctl enable-linger'); the socket then outlives the client that
+    started it.  Best-effort: any failure falls through to the `setsid' path,
+    so a host without systemd, without a user manager, or without linger is no
+    worse off than before.\"\"\"
+    # An escape hatch: the test suite (and anyone who wants the bare setsid
+    # daemon) sets this so a run never touches the real user manager, e.g.
+    # registering the fixed unit name outside the test's throwaway sandbox.
+    if os.environ.get(\"SPRIG_BROKER_NO_SYSTEMD\"):
+        return False
+    run = shutil.which(\"systemd-run\")
+    if not run or not os.environ.get(\"XDG_RUNTIME_DIR\"):
+        return False
+    # A fixed unit name makes a second start a harmless no-op (the unit is
+    # already active) rather than a duplicate daemon racing for the socket.
+    unit = f\"sprig-broker-{os.getuid()}\"
+    try:
+        rc = subprocess.call(
+            [run, \"--user\", \"--quiet\", \"--collect\",
+             f\"--unit={unit}\", \"--property=Type=simple\", \"--\"] + argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except OSError:
+        return False
+    # rc 0 means the unit started; a nonzero rc when the unit is already
+    # running (a benign \"unit already exists\") still leaves a daemon up, so
+    # treat a live socket as success regardless.
+    return rc == 0 or socket_is_live(sock_path())
+
+
 def start_daemon():
+    argv = [sys.executable, os.path.abspath(__file__), \"daemon\"]
+    if _systemd_run_daemon(argv):
+        return
     subprocess.Popen(
-        [sys.executable, os.path.abspath(__file__), \"daemon\"],
+        argv,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
