@@ -4,6 +4,10 @@
 .\#*
 *.elc
 
+# Python bytecode (the broker is a plain script)
+__pycache__/
+*.pyc
+
 # Scratch conversation buffers
 /diary.md
 
