@@ -3548,7 +3548,7 @@ printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; \
 printf '\\037'; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 [ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; \
-printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; done"
+printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; :; done"
           root
           (if subagents "" " -not -path '*/subagents/*'")
           cap sprig--status-preview-bytes))
