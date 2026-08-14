@@ -175,7 +175,7 @@ if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else b
 "$broker" stop "$rsid" >/dev/null 2>&1
 
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "3" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "4" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 # 10. Auto-start prefers a `systemd-run --user' unit (so the daemon lives under
 #     user@UID.service, not the SSH login's session scope that logout kills)
@@ -194,10 +194,13 @@ b.subprocess.call = lambda argv, **kw: (calls.__setitem__("argv", argv), 0)[1]
 os.environ["XDG_RUNTIME_DIR"] = "/tmp/does-not-matter"
 os.environ.pop("SPRIG_BROKER_NO_SYSTEMD", None)
 daemon = ["python3", "/some/sprig-broker", "daemon"]
+os.environ["PATH"] = "/opt/claude/bin:/usr/bin"
 assert b._systemd_run_daemon(daemon) is True, "should report the unit launched"
 a = calls["argv"]
 assert "--user" in a, a
 assert f"--unit=sprig-broker-{os.getuid()}" in a, a
+# The caller's PATH must ride into the unit, or the daemon cannot find claude.
+assert "--setenv=PATH=/opt/claude/bin:/usr/bin" in a, a
 assert a[-len(daemon):] == daemon, a          # the daemon argv rides after `--'
 assert "--" in a and a.index("--") < len(a) - len(daemon), a
 os.environ["SPRIG_BROKER_NO_SYSTEMD"] = "1"   # escape hatch forces setsid

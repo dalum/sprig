@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.39.0
+;; Version: 0.40.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -143,7 +143,7 @@ the broker script would otherwise be missing.  Set this to a path to ship a
 different script, for instance your working copy while iterating on it."
   :type '(choice (const :tag "Embedded copy" nil) (file :tag "Broker script")))
 
-(defconst sprig-broker-version "3"
+(defconst sprig-broker-version "4"
   "Broker wire-protocol version sprig expects.
 Mirrors the `VERSION' constant in the broker script; a host whose installed
 broker reports a different value is reinstalled before use.")
@@ -686,7 +686,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = \"3\"
+VERSION = \"4\"
 
 
 # --- paths -----------------------------------------------------------------
@@ -1181,10 +1181,18 @@ def _systemd_run_daemon(argv):
     # A fixed unit name makes a second start a harmless no-op (the unit is
     # already active) rather than a duplicate daemon racing for the socket.
     unit = f\"sprig-broker-{os.getuid()}\"
+    # A `--user' unit inherits the user manager's environment, not the caller's,
+    # so carry across the two that the daemon and its `claude' children need:
+    # PATH (the manager's is minimal, and claude is often on a login-only path
+    # such as ~/.local/bin, so without this the spawn fails \"not found on host
+    # PATH\"), and XDG_RUNTIME_DIR (so the daemon's socket lands where the client
+    # that started it looks for it).
+    setenv = [f\"--setenv={var}={os.environ[var]}\"
+              for var in (\"PATH\", \"XDG_RUNTIME_DIR\") if os.environ.get(var)]
     try:
         rc = subprocess.call(
             [run, \"--user\", \"--quiet\", \"--collect\",
-             f\"--unit={unit}\", \"--property=Type=simple\", \"--\"] + argv,
+             f\"--unit={unit}\", \"--property=Type=simple\"] + setenv + [\"--\"] + argv,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
