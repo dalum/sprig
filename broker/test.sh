@@ -22,9 +22,19 @@ jget() { python3 -c 'import json,sys;print(json.load(sys.stdin)'"$1"')'; }
 cleanup() {
   [ -n "${fifoA:-}" ] && exec 4>&- 2>/dev/null
   [ -n "${fifoB:-}" ] && exec 5>&- 2>/dev/null
-  "$broker" stop "$sid" >/dev/null 2>&1
-  pkill -f "$work/sprig-broker" 2>/dev/null
-  pkill -f "sprig-broker daemon" 2>/dev/null
+  # Stop every session this test started, while its daemon is still up.
+  for s in "${sid:-}" "${open_sid:-}" "${rsid:-}"; do
+    [ -n "$s" ] && "$broker" stop "$s" >/dev/null 2>&1
+  done
+  # Kill ONLY this test's own daemon, by the pid we tracked when we started it.
+  # The old code ran `pkill -f "sprig-broker daemon"', which killed every
+  # sprig-broker on the box, a user's real brokered sessions included; and it
+  # still leaked, because an auto-started daemon detaches with setsid and left
+  # the shell no pid to match reliably.  Starting it ourselves fixes both.
+  [ -n "${broker_pid:-}" ] && kill "$broker_pid" 2>/dev/null
+  # A mid-test failure can orphan a hermetic sleeper child; it is unique to
+  # this run's work dir, so match on that alone.
+  pkill -f "$work/sleeper" 2>/dev/null
   rm -rf "$work"
   # The spawned claude sessions ran with --cwd "$work" and so logged under
   # the real config dir's projects/.  Remove that entry too, or every test
@@ -36,7 +46,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# 1. Spawn a session (auto-starts the daemon).
+# Start this test's daemon ourselves, in its isolated XDG_RUNTIME_DIR, and track
+# its pid so cleanup can stop exactly this one.  `run_daemon' runs in the
+# foreground, so the backgrounded process IS the daemon and $! is its pid; an
+# auto-start (a spawn with no daemon up) would instead setsid it away, leaving
+# no pid to kill.  Every spawn below then finds this daemon already listening.
+"$broker" daemon &
+broker_pid=$!
+sock="$XDG_RUNTIME_DIR/sprig-broker/control.sock"
+for _ in $(seq 1 50); do [ -S "$sock" ] && break; sleep 0.1; done
+if [ ! -S "$sock" ]; then bad "daemon did not come up"; exit 1; fi
+
+# 1. Spawn a session on the daemon started above.
 sid="$("$broker" spawn --cwd "$work" -- \
   -p --input-format stream-json --output-format stream-json --verbose)"
 if [ -z "$sid" ]; then bad "spawn returned no session"; exit 1; fi
