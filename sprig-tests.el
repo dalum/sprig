@@ -1330,6 +1330,30 @@ claude"
         (sprig--status-reattach-live nil rows))
       (should-not calls))))
 
+(ert-deftest sprig-test-spawn-flags-attach-only-probe ()
+  ;; An attach-only spawn is the navigator's reattach probe; `sprig--spawn' must
+  ;; flag its process `:reattach-probe'/`:deliberate' at creation.  A `--no-start'
+  ;; probe whose daemon is gone exits nonzero almost at once, so flagging only
+  ;; after the spawn returns can miss the window and let the sentinel log a
+  ;; spurious "session exited abnormally".  A plain spawn carries neither flag.
+  (let ((put nil) (sprig-use-broker nil))
+    (cl-letf (((symbol-function 'sprig--make-stderr) (lambda () nil))
+              ((symbol-function 'sprig--command) (lambda () (list "true")))
+              ((symbol-function 'sprig--send-initialize) #'ignore)
+              ((symbol-function 'sprig--directory) (lambda () nil))
+              ((symbol-function 'make-process) (lambda (&rest _) 'proc))
+              ((symbol-function 'process-put)
+               (lambda (_p k v) (push (cons k v) put))))
+      (with-temp-buffer
+        (let ((sprig--broker-attach-only t)) (sprig--spawn))
+        (should (eq t (cdr (assq :reattach-probe put))))
+        (should (eq t (cdr (assq :deliberate put)))))
+      (setq put nil)
+      (with-temp-buffer
+        (let ((sprig--broker-attach-only nil)) (sprig--spawn))
+        (should-not (assq :reattach-probe put))
+        (should-not (assq :deliberate put))))))
+
 (ert-deftest sprig-test-status-collect-marks-broker-held ()
   ;; A scanned session whose log carries a `.sprig-live' marker (the trailing
   ;; live flag) is collected as `held' (alive on its host), not `disconnected',

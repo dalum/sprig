@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.37.0
+;; Version: 0.38.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -488,7 +488,9 @@ local'), so it survives Emacs itself exiting."
   "When non-nil, a brokered `open' is attach-only: no spawn, no daemon start.
 Dynamically bound around the navigator's auto-reattach (`sprig--reattach-
 session'), so a stale `<id>.sprig-live' marker left by a crashed daemon
-fails to attach rather than resurrecting a dead session.")
+fails to attach rather than resurrecting a dead session.  It also tells
+`sprig--spawn' to flag the process `:reattach-probe', so the sentinel keeps
+that fast-failing exit quiet.")
 
 (defun sprig--broker-command (host)
   "Command vector running a brokered remote session on HOST.
@@ -1839,6 +1841,16 @@ Markdown transcript and a session-owning review buffer share it."
     (process-put proc :conv-buffer (current-buffer))
     (process-put proc :stderr-proc stderr)
     (setq sprig--process proc)
+    ;; An attach-only spawn is the navigator's best-effort reattach probe.  Flag
+    ;; it here, at creation, not at the call site: a `--no-start' probe whose
+    ;; daemon is gone exits nonzero almost at once, so a caller that flags the
+    ;; process only after `sprig--ensure' returns can find it already dead and
+    ;; miss the window, leaving the sentinel to log a spurious failure.  The
+    ;; flag clears the instant the attach streams (`sprig--filter'), so a real
+    ;; failure after a landed reattach still reports.
+    (when sprig--broker-attach-only
+      (process-put proc :deliberate t)
+      (process-put proc :reattach-probe t))
     ;; Announce our capabilities before any user turn, so the CLI enables
     ;; the interactive tools it would otherwise withhold in headless mode.
     (sprig--send-initialize)
@@ -2722,16 +2734,14 @@ so a stale marker cannot spawn a fresh session.  Errors are swallowed: a
 reattach that cannot land must never disturb the navigator."
   (with-current-buffer (sprig--review-session-buffer dir id host nil)
     (unless (process-live-p sprig--process)
-      (let ((sprig--broker-attach-only t))
-        (ignore-errors (sprig--ensure)))
       ;; Reattach is best-effort: a marker whose daemon is gone or unreachable
-      ;; fails attach-only and the process exits nonzero.  Flag it so the
-      ;; sentinel keeps that quiet rather than logging a session failure; the
-      ;; flag clears the moment the attach actually streams (`sprig--filter'),
-      ;; so a genuine failure after a successful reattach still reports.
-      (when (process-live-p sprig--process)
-        (process-put sprig--process :deliberate t)
-        (process-put sprig--process :reattach-probe t)))))
+      ;; fails attach-only and the process exits nonzero.  `sprig--broker-attach-
+      ;; only' both routes the `open' as attach-only and, in `sprig--spawn',
+      ;; flags the process so the sentinel keeps that failure quiet rather than
+      ;; logging a session failure.  Flagging at spawn (not here, after) avoids a
+      ;; race where a fast-failing probe is already dead before we could set it.
+      (let ((sprig--broker-attach-only t))
+        (ignore-errors (sprig--ensure))))))
 
 (defun sprig--status-reattach-live (host rows)
   "Reattach every broker-held (:live) row in ROWS on HOST, once each.
