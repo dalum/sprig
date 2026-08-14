@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.36.0
+;; Version: 0.37.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -524,6 +524,20 @@ dir rides `--cwd', and the `claude' argv follows a `--'."
 `sprig-broker-remote-path' names the install path on any host; run here it
 is a local path, so its leading `~' is expanded."
   (expand-file-name sprig-broker-remote-path))
+
+(defun sprig--broker-local-runtime-dir ()
+  "Runtime dir the local broker's control socket lives under.
+The broker keys its socket path off `XDG_RUNTIME_DIR' (see the broker's
+`runtime_dir'), but that variable is not always in Emacs's environment: a
+GUI or systemd-launched Emacs can lack it, and then a daemon started once
+with it set is unreachable from a later reattach without it, which reads as
+`no broker running'.  Compute it here the same way every launch, so the two
+always agree: the variable when set, else the standard per-user runtime dir
+`/run/user/UID' when it exists, else a private `/tmp' dir."
+  (or (getenv "XDG_RUNTIME_DIR")
+      (let ((std (format "/run/user/%d" (user-uid))))
+        (and (file-directory-p std) std))
+      (format "/tmp/sprig-broker-%d" (user-uid))))
 
 (defun sprig--broker-command-local ()
   "Command vector running a brokered LOCAL session, no SSH.
@@ -1369,6 +1383,12 @@ script.  Regenerate with broker/embed.py after editing the broker.")
     (dolist (line (butlast lines))
       (setq line (string-trim line))
       (unless (string-empty-p line)
+        ;; The first line a reattach emits means the attach landed (the broker
+        ;; replied), so it is a live session now, not a probe: drop the quiet-
+        ;; failure flags so a later genuine exit reports normally.
+        (when (process-get proc :reattach-probe)
+          (process-put proc :reattach-probe nil)
+          (process-put proc :deliberate nil))
         (sprig--handle proc line)))))
 
 (defun sprig--handle (proc line)
@@ -1710,9 +1730,13 @@ fresh session rather than fail.")
             (sprig--status-refresh)
             (cond
              ;; A clean, expected teardown: interrupt, disconnect, or exit 0.
+             ;; A background reattach that never landed (an unreachable or
+             ;; stale marker) is silent: it was best-effort and the user never
+             ;; asked for it, so a message would only be noise.
              ((or deliberate (and (eq (process-status proc) 'exit)
                                   (zerop status)))
-              (message "sprig: session ended (%s)" (string-trim event)))
+              (unless (process-get proc :reattach-probe)
+                (message "sprig: session ended (%s)" (string-trim event))))
              ;; Stale/foreign resume id: the session does not exist on this
              ;; host.  Drop it and reconnect fresh so the user is not stuck;
              ;; the new session's id replaces the stale one on init.  Only
@@ -1785,13 +1809,22 @@ Markdown transcript and a session-owning review buffer share it."
             default-directory))
          ;; A local session's CLAUDE_CONFIG_DIR rides the process env (no
          ;; shell to expand `~', so expand it here); a remote one is set in
-         ;; the `env' prefix of `sprig--command'.
+         ;; the `env' prefix of `sprig--command'.  A local brokered session
+         ;; also pins XDG_RUNTIME_DIR, so the broker's socket lands in the same
+         ;; place whether or not this Emacs happens to have the variable set;
+         ;; otherwise a daemon started with it set is unreachable from a later
+         ;; reattach without it (see `sprig--broker-local-runtime-dir').
          (process-environment
-          (if (and sprig-config-directory (not (sprig--remote)))
-              (cons (concat "CLAUDE_CONFIG_DIR="
-                            (expand-file-name sprig-config-directory))
-                    process-environment)
-            process-environment))
+          (let ((env process-environment))
+            (when (and sprig-config-directory (not (sprig--remote)))
+              (setq env (cons (concat "CLAUDE_CONFIG_DIR="
+                                      (expand-file-name sprig-config-directory))
+                              env)))
+            (when (and (sprig--broker-local-p) (not (sprig--remote)))
+              (setq env (cons (concat "XDG_RUNTIME_DIR="
+                                      (sprig--broker-local-runtime-dir))
+                              env)))
+            env))
          (stderr (sprig--make-stderr))
          (proc (make-process
                 :name "sprig"
@@ -2690,7 +2723,15 @@ reattach that cannot land must never disturb the navigator."
   (with-current-buffer (sprig--review-session-buffer dir id host nil)
     (unless (process-live-p sprig--process)
       (let ((sprig--broker-attach-only t))
-        (ignore-errors (sprig--ensure))))))
+        (ignore-errors (sprig--ensure)))
+      ;; Reattach is best-effort: a marker whose daemon is gone or unreachable
+      ;; fails attach-only and the process exits nonzero.  Flag it so the
+      ;; sentinel keeps that quiet rather than logging a session failure; the
+      ;; flag clears the moment the attach actually streams (`sprig--filter'),
+      ;; so a genuine failure after a successful reattach still reports.
+      (when (process-live-p sprig--process)
+        (process-put sprig--process :deliberate t)
+        (process-put sprig--process :reattach-probe t)))))
 
 (defun sprig--status-reattach-live (host rows)
   "Reattach every broker-held (:live) row in ROWS on HOST, once each.

@@ -1165,6 +1165,25 @@ claude"
           (sprig-directory nil) (sprig--fork-session nil))
       (should-not (member "--attach-only" (sprig--command))))))
 
+(ert-deftest sprig-test-broker-local-runtime-dir ()
+  ;; A set XDG_RUNTIME_DIR wins; unset falls back to /run/user/UID when it
+  ;; exists, else a private /tmp dir.  The point is determinism: the same
+  ;; value every launch, so a daemon and a later reattach agree.
+  (let ((process-environment (cons "XDG_RUNTIME_DIR=/run/user/1000"
+                                   process-environment)))
+    (should (equal (sprig--broker-local-runtime-dir) "/run/user/1000")))
+  ;; Unset: `/run/user/UID' when present (this box has one for the test user),
+  ;; else the /tmp fallback.  Assert whichever branch applies, but never the
+  ;; env (it is unset here).
+  (let* ((process-environment
+          (seq-remove (lambda (e) (string-prefix-p "XDG_RUNTIME_DIR=" e))
+                      process-environment))
+         (std (format "/run/user/%d" (user-uid)))
+         (got (sprig--broker-local-runtime-dir)))
+    (should-not (getenv "XDG_RUNTIME_DIR"))
+    (should (equal got (if (file-directory-p std) std
+                         (format "/tmp/sprig-broker-%d" (user-uid)))))))
+
 (ert-deftest sprig-test-broker-local-path-expands ()
   ;; The local broker path is `sprig-broker-remote-path' with `~' expanded.
   (let ((sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"))
