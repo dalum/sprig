@@ -130,8 +130,27 @@ if "$broker" open --attach-only --no-start --session no-such-session -- -p 2>&1 
 for _ in $(seq 1 30); do [ -f "$marker" ] || break; sleep 0.1; done
 if [ ! -f "$marker" ]; then ok "live marker removed when the session stopped"; else bad "marker lingered after stop"; fi
 
+# 8b. A resume names its session id up front (`--resume ID'), so the marker is
+#     written at spawn from that id, without waiting for the session to stream.
+#     Prove it with a program that emits nothing: no stream, yet a marker lands.
+cat >"$work/sleeper" <<'EOF'
+#!/bin/sh
+# Emit nothing (so the broker keys liveness on the marker, not the stream) but
+# keep stdout open, and block reading stdin so the session stays held; exit
+# cleanly when the broker closes stdin on `stop'.
+while IFS= read -r _; do :; done
+EOF
+chmod +x "$work/sleeper"
+: >"$projects/$mangled/resume-fake-0001.jsonl"   # the log a resume would find
+rmarker="$projects/$mangled/resume-fake-0001.sprig-live"
+rsid="$("$broker" spawn --cwd "$work" --program "$work/sleeper" \
+  -- -p --resume resume-fake-0001)"
+for _ in $(seq 1 30); do [ -f "$rmarker" ] && break; sleep 0.1; done
+if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else bad "no marker for a resumed-but-idle session"; fi
+"$broker" stop "$rsid" >/dev/null 2>&1
+
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "1" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "2" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi

@@ -36,7 +36,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = "1"
+VERSION = "2"
 
 
 # --- paths -----------------------------------------------------------------
@@ -103,6 +103,18 @@ def extract_session_id(buf):
         sid = obj.get("session_id")
         if sid:
             return sid
+    return None
+
+
+def resume_id_from_args(args):
+    """The id a `--resume ID' argv resumes, or None.  A `--fork-session' run
+    resumes a parent only to branch off a fresh id, so it is not a resume for
+    marker purposes and returns None."""
+    if "--fork-session" in args:
+        return None
+    for i, a in enumerate(args):
+        if a == "--resume" and i + 1 < len(args):
+            return args[i + 1]
     return None
 
 
@@ -283,6 +295,16 @@ def do_spawn(broker, req):
     except FileNotFoundError:
         raise RuntimeError(f"cannot run {program!r}: not found on host PATH")
     sess = Session(key, proc, cwd, args, config_dir)
+    # A resume names its session id up front (`--resume ID' in the argv), so
+    # seed it and mark the session held at once rather than waiting to scrape
+    # the id back out of the stream: a resumed-but-idle session emits nothing
+    # until its first turn, so the marker would otherwise not appear until then
+    # and the navigator could not see the session was held.  A fork (`--fork-
+    # session') gets a fresh id we do not know yet, so it is left to the stream.
+    resume_id = resume_id_from_args(args)
+    if resume_id:
+        sess.cli_session_id = resume_id
+        threading.Thread(target=sess.write_marker, daemon=True).start()
     broker.add(sess)
     threading.Thread(target=sess.read_loop, daemon=True).start()
     return {"ok": True, "session": key, "spool": sess.spool}

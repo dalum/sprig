@@ -1087,6 +1087,90 @@ claude"
       (should (string-match-p "--env CLAUDE_CONFIG_DIR=~/.config/sprig/claude"
                               (car (last (sprig--command))))))))
 
+(ert-deftest sprig-test-broker-predicates ()
+  ;; nil is off; `remote' and legacy `t' broker remote only; `all' also local.
+  (let ((sprig-use-broker nil))
+    (should-not (sprig--broker-remote-p))
+    (should-not (sprig--broker-local-p)))
+  (dolist (v '(t remote))
+    (let ((sprig-use-broker v))
+      (should (sprig--broker-remote-p))
+      (should-not (sprig--broker-local-p))))
+  (let ((sprig-use-broker 'all))
+    (should (sprig--broker-remote-p))
+    (should (sprig--broker-local-p))))
+
+(ert-deftest sprig-test-command-remote-value-leaves-local-direct ()
+  ;; `remote' (and legacy `t') brokers remote only: a local session stays a
+  ;; plain `claude' child, not a brokered one.
+  (with-temp-buffer
+    (dolist (v '(t remote))
+      (let ((sprig-use-broker v) (sprig-remotes nil) (sprig-program "claude")
+            (sprig-directory nil))
+        (should (equal (car (sprig--command)) "claude"))))))
+
+(ert-deftest sprig-test-command-all-brokers-local ()
+  ;; With `all', a local session runs `python3 BROKER open ... -- <claude argv>'
+  ;; as a direct child: a plain argv list (not an ssh string), the broker path
+  ;; expanded here, and the claude args unquoted after `--'.
+  (with-temp-buffer
+    (let ((sprig-use-broker 'all) (sprig-remotes nil) (sprig-program "claude")
+          (sprig-directory "~/proj") (sprig-config-directory nil)
+          (sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"))
+      (let ((cmd (sprig--command)))
+        (should (equal (car cmd) "python3"))
+        (should (equal (nth 1 cmd)
+                       (expand-file-name "~/.local/share/sprig/sprig-broker")))
+        (should (equal (nth 2 cmd) "open"))
+        (should (member "--program" cmd))
+        (should (member "claude" cmd))
+        (should (member "--cwd" cmd))
+        (should (member (expand-file-name "~/proj") cmd))
+        (should (member "--" cmd))
+        ;; The claude argv rides as real list elements, never shell-quoted.
+        (should (member "--input-format" cmd))
+        ;; A fresh session names none to attach to.
+        (should-not (member "--session" cmd))))))
+
+(ert-deftest sprig-test-broker-command-local-resume-and-config ()
+  ;; A resumed local session passes `--session ID' and `--resume ID', and a
+  ;; config dir rides `--env CLAUDE_CONFIG_DIR=' expanded here.
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker 'all) (sprig-remotes nil) (sprig-program "claude")
+          (sprig-directory nil) (sprig--fork-session nil)
+          (sprig-config-directory "~/cfg"))
+      (let ((cmd (sprig--command)))
+        (should (member "--session" cmd))
+        (should (member "sess-1" cmd))
+        (should (member "--resume" cmd))
+        (should (member (concat "CLAUDE_CONFIG_DIR=" (expand-file-name "~/cfg"))
+                        cmd))))))
+
+(ert-deftest sprig-test-broker-command-local-attach-only ()
+  ;; `sprig--broker-attach-only' adds `--attach-only --no-start' to the local
+  ;; command too, so a stale local marker cannot spawn or start a daemon.
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker 'all) (sprig-remotes nil) (sprig-program "claude")
+          (sprig-directory nil) (sprig--fork-session nil)
+          (sprig--broker-attach-only t))
+      (let ((cmd (sprig--command)))
+        (should (member "--attach-only" cmd))
+        (should (member "--no-start" cmd)))))
+  ;; A normal local open carries neither.
+  (with-temp-buffer
+    (setq sprig--session-id "sess-1")
+    (let ((sprig-use-broker 'all) (sprig-remotes nil) (sprig-program "claude")
+          (sprig-directory nil) (sprig--fork-session nil))
+      (should-not (member "--attach-only" (sprig--command))))))
+
+(ert-deftest sprig-test-broker-local-path-expands ()
+  ;; The local broker path is `sprig-broker-remote-path' with `~' expanded.
+  (let ((sprig-broker-remote-path "~/.local/share/sprig/sprig-broker"))
+    (should (equal (sprig--broker-local-path)
+                   (expand-file-name "~/.local/share/sprig/sprig-broker")))))
+
 (ert-deftest sprig-test-broker-install-command-is-atomic ()
   ;; The install writes a temp file, marks it executable, then moves it into
   ;; place, so a half-shipped broker is never run.
@@ -1205,6 +1289,24 @@ claude"
             (sprig--status-reattach-attempted nil))
         (sprig--status-reattach-live "h" rows))
       (let ((sprig-use-broker t) (sprig-status-auto-reattach t)
+            (sprig--status-reattach-attempted nil))
+        (sprig--status-reattach-live nil rows))
+      (should-not calls))))
+
+(ert-deftest sprig-test-status-reattach-live-local ()
+  ;; With `all', a local (nil-host) :live row reattaches; with `remote' a local
+  ;; row does not (local sessions are brokered only under `all').
+  (let ((calls nil)
+        (rows (list (list :session "a" :dir "/d" :live t))))
+    (cl-letf (((symbol-function 'sprig--reattach-session)
+               (lambda (dir id host) (push (list dir id host) calls)))
+              ((symbol-function 'sprig--title-live-buffer) (lambda (_) nil)))
+      (let ((sprig-use-broker 'all) (sprig-status-auto-reattach t)
+            (sprig--status-reattach-attempted nil))
+        (sprig--status-reattach-live nil rows))
+      (should (equal calls '(("/d" "a" nil))))
+      (setq calls nil)
+      (let ((sprig-use-broker 'remote) (sprig-status-auto-reattach t)
             (sprig--status-reattach-attempted nil))
         (sprig--status-reattach-live nil rows))
       (should-not calls))))
