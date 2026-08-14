@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.34.0
+;; Version: 0.35.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -3211,8 +3211,11 @@ amount, and either read is bounded however large the session grows.")
     (waiting      . "?")
     (idle         . "●")
     (interrupted  . "◼")
+    (held         . "◌")
     (disconnected . "○"))
-  "Glyph shown in the status column for each session state.")
+  "Glyph shown in the status column for each session state.
+`held' is a session the broker still runs on its host that no buffer here
+has attached to yet (alive, but not in front of you); see `:live'.")
 
 (defvar sprig-claude-projects-directory "~/.claude/projects"
   "Root under which the `claude' CLI stores per-project session logs.
@@ -3969,10 +3972,15 @@ group filtered down to nothing keeps its heading all the same."
                            :dir (plist-get e :dir)
                            :project (plist-get e :project)
                            :title (plist-get e :title)
-                           :status 'disconnected
+                           ;; A session the broker still holds is alive on its
+                           ;; host though no buffer here owns it: `held', not
+                           ;; `disconnected', so it survives the live filter and
+                           ;; reads as alive.
+                           :status (if (plist-get e :live) 'held 'disconnected)
                            :mtime (plist-get e :mtime)
                            :created (plist-get e :created)
                            :starred (plist-get e :starred)
+                           :live (plist-get e :live)
                            :session (plist-get e :session))
                      table))
            ;; An owning buffer borrows the log's mtime (so an open row shows
@@ -3990,6 +3998,7 @@ group filtered down to nothing keeps its heading all the same."
             (unless (plist-get existing :file)
               (setq existing (plist-put existing :file (plist-get e :file))))
             (setq existing (plist-put existing :starred (plist-get e :starred)))
+            (setq existing (plist-put existing :live (plist-get e :live)))
             (puthash key existing table))))))
     (let ((rows (mapcar (lambda (k)
                           (let ((e (gethash k table)))
@@ -4052,7 +4061,8 @@ sorts to the top of a newest-first list rather than the bottom."
 (defun sprig--status-rank (status)
   "Return a sort rank for STATUS, busiest (streaming) first."
   (pcase status
-    ('streaming 0) ('agent 1) ('waiting 2) ('idle 3) ('interrupted 4) (_ 5)))
+    ('streaming 0) ('agent 1) ('waiting 2) ('idle 3) ('interrupted 4)
+    ('held 5) (_ 6)))
 
 (defun sprig--status-row-less (name)
   "Return an ascending `sort' predicate over status entries for column NAME."
@@ -4117,6 +4127,7 @@ Matching is case-insensitive."
     ('agent 'warning)
     ('waiting 'sprig-review-waiting)
     ('idle 'success)
+    ('held 'success)
     ('interrupted 'font-lock-comment-face)
     (_ 'shadow)))
 

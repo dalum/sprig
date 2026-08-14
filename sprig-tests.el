@@ -1209,6 +1209,28 @@ claude"
         (sprig--status-reattach-live nil rows))
       (should-not calls))))
 
+(ert-deftest sprig-test-status-collect-marks-broker-held ()
+  ;; A scanned session whose log carries a `.sprig-live' marker (the trailing
+  ;; live flag) is collected as `held' (alive on its host), not `disconnected',
+  ;; so it survives the live filter and shows the held glyph.
+  (let ((sprig-remotes '("me@host"))
+        (sprig--status-scan-cache nil)
+        (sprig-claude-projects-directory "/x"))
+    (cl-letf (((symbol-function 'sprig--remote-sh)
+               (lambda (_cmd)
+                 (concat "\03620.0\037/r/-p/held-1.jsonl\037\037"
+                         "{\"cwd\":\"/home/me/p\","
+                         "\"timestamp\":\"2026-08-07T14:10:58.784Z\","
+                         "\"aiTitle\":\"Held one\"}\037\0371"))))
+      (sprig-tests--warm-remote-scan "me@host")
+      (let* ((rows (sprig--status-collect))
+             (e (seq-find (lambda (r) (equal (plist-get r :session) "held-1"))
+                          rows)))
+        (should e)
+        (should (plist-get e :live))
+        (should (eq (plist-get e :status) 'held))
+        (should (equal (alist-get 'held sprig--status-glyphs) "◌"))))))
+
 (ert-deftest sprig-test-btw-args ()
   ;; A side question resumes and forks the session so it sees the whole
   ;; conversation, but turns persistence off, so it writes no log and leaves
