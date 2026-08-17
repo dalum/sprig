@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.42.0
+;; Version: 0.43.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2953,19 +2953,35 @@ suggestion but without asking the agent."
 
 (defun sprig--star-write (log host starred)
   "Create (STARRED non-nil) or delete session LOG's star marker on HOST.
-HOST is nil for the local machine, else the SSH destination the log lives
-on, where the `<id>.sprig-star' marker (`sprig--star-file') is written or
-removed: it sits beside the log, so it travels with the session and every
-navigator on that host reads it back off the same scan."
-  (let ((marker (sprig--star-file log)))
+HOST is nil for the local machine, else the SSH destination the log lives on.
+Starring writes the `<id>.sprig-star' marker (`sprig--star-file') beside the
+log, so it travels with the session and every navigator on that host reads it
+back off the same scan.  Unstarring removes every `<id>.sprig-star' under the
+projects root, not just this one: the CLI re-homes a session's log across
+project directories, so an earlier star can be stranded in a directory the
+log has since left (see `sprig--star-ids-local'), and a single stray copy
+would keep the session starred.  So the id is cleared host-wide."
+  (let* ((marker (sprig--star-file log))
+         (id (file-name-base log))
+         (root (sprig--projects-directory)))
     (if host
-        (let ((sprig-remotes (list host))
-              (q (shell-quote-argument marker)))
-          (sprig--remote-sh (if starred (format "touch %s" q)
-                              (format "rm -f %s" q))))
+        (let ((sprig-remotes (list host)))
+          (if starred
+              (sprig--remote-sh (format "touch %s" (shell-quote-argument marker)))
+            ;; Remove the sibling and sweep the root for any stranded copy.
+            (sprig--remote-sh
+             (format "rm -f %s; find %s -name %s -delete 2>/dev/null; :"
+                     (shell-quote-argument marker)
+                     (sprig--remote-dir-arg (directory-file-name root))
+                     (shell-quote-argument (concat id ".sprig-star"))))))
       (if starred
           (write-region "" nil marker nil 'silent)
-        (when (file-exists-p marker) (delete-file marker))))))
+        (when (file-exists-p marker) (delete-file marker))
+        (let ((dir (expand-file-name root)))
+          (when (file-directory-p dir)
+            (dolist (f (directory-files-recursively
+                        dir (concat "\\`" (regexp-quote id) "\\.sprig-star\\'")))
+              (ignore-errors (delete-file f)))))))))
 
 (defun sprig-status-star ()
   "Star or unstar the session on the row at point, floating it up its group.
@@ -3768,9 +3784,23 @@ sessions still paints fast."
       (sprig--scan-session-logs-remote (sprig--status-limit))
     (sprig--scan-session-logs-local (sprig--status-limit))))
 
+(defun sprig--star-ids-local (root)
+  "Ids of every `.sprig-star' marker anywhere under ROOT, as a hash set.
+A star lives beside its session's log, but the CLI re-homes a session's log
+to a new project directory when it resumes from a different working directory
+\(a git worktree, say), stranding the marker in the old one.  Collecting the
+ids host-wide lets a star be matched by session id, so it follows the session
+across the move rather than being lost with the old directory."
+  (let ((set (make-hash-table :test 'equal)))
+    (when (file-directory-p root)
+      (dolist (f (directory-files-recursively root "\\.sprig-star\\'"))
+        (puthash (file-name-base f) t set)))
+    set))
+
 (defun sprig--scan-session-logs-local (limit)
   "Scan the LIMIT newest local logs under the session host's projects dir."
   (let* ((root (expand-file-name (sprig--projects-directory)))
+         (star-ids (sprig--star-ids-local root))
          (files (seq-remove
                  (lambda (f)
                    (or (sprig--log-ignored-p f)
@@ -3797,7 +3827,9 @@ sessions still paints fast."
                            (sprig--session-log-head f)
                            (lambda () (sprig--local-title-line f))
                            (<= size sprig--status-preview-bytes))))
-                  (plist-put pl :starred (file-exists-p (sprig--star-file f)))
+                  (plist-put pl :starred
+                             (or (gethash (file-name-base f) star-ids)
+                                 (file-exists-p (sprig--star-file f))))
                   (plist-put pl :live (file-exists-p (sprig--live-file f)))
                   pl)))
             dated)))
@@ -3827,8 +3859,19 @@ US(\\037)-separated, for `sprig--parse-scan-rows'.
 
 Subagent transcripts (`.../subagents/agent-*.jsonl', see
 `sprig--log-subagent-p') are pruned in the `find' itself unless SUBAGENTS is
-non-nil, so they never eat into the newest-N cap."
-  (format "find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
+non-nil, so they never eat into the newest-N cap.
+
+A leading `stars' record lists every `<id>.sprig-star' marker's id under ROOT,
+so a star is matched by session id host-wide rather than only beside the log
+it was written next to: the CLI re-homes a session's log to a new project dir
+when it resumes from a different working directory (a git worktree), stranding
+the marker in the old dir, and id-keying lets the star follow the session
+across the move (see `sprig--parse-scan-rows').  The newest-N cap never drops
+a star, since the preamble scans them whole."
+  (format "printf '\\036stars\\037'; \
+find %s -name '*.sprig-star' 2>/dev/null | while IFS= read -r s; do \
+b=${s##*/}; printf '%%s\\037' \"${b%%.sprig-star}\"; done; \
+find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
 | sort -rn | head -n %d | while IFS='\t' read -r m p; do \
 printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; \
 [ -e \"${p%%.jsonl}.sprig-star\" ] && printf 1; \
@@ -3836,6 +3879,7 @@ printf '\\037'; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 [ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; \
 printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; :; done"
+          root
           root
           (if subagents "" " -not -path '*/subagents/*'")
           cap sprig--status-preview-bytes))
@@ -3847,15 +3891,29 @@ the `ai-title' line, and a trailing live flag, US(\\037)-separated.  The star
 and live flags are `1' when a `.sprig-star' or `.sprig-live' marker sits
 beside the log, else empty (live means the broker still holds the session).
 The live flag is last and optional, so an older blob without it still parses,
-its session simply not live.  Ignored logs
+its session simply not live.
+
+A leading `stars' record (its first field the literal `stars', the rest a
+US-separated list of ids) names every starred session host-wide; a row is
+starred when its own id is in that set or its per-log star flag is `1', so a
+star found by id in a re-homed session's old directory still counts (see
+`sprig--remote-scan-all-command').  An older blob without the record just
+falls back to the per-log flag.  Ignored logs
 are
 dropped and the rest capped to LIMIT, newest first, matching
 `sprig--scan-session-logs'.  The head holds no US byte in any real log, so it
 is bounded by the separators around it."
-  (let (rows)
-    (dolist (chunk (and blob (split-string blob "\036" t)))
+  (let ((chunks (and blob (split-string blob "\036" t)))
+        (star-ids (make-hash-table :test 'equal))
+        rows)
+    (dolist (chunk chunks)
       (let ((p1 (string-search "\037" chunk)))
-        (when p1
+        (when (and p1 (equal (substring chunk 0 p1) "stars"))
+          (dolist (id (split-string (substring chunk (1+ p1)) "\037" t))
+            (puthash id t star-ids)))))
+    (dolist (chunk chunks)
+      (let ((p1 (string-search "\037" chunk)))
+        (when (and p1 (not (equal (substring chunk 0 p1) "stars")))
           (let* ((mtime (string-to-number (substring chunk 0 p1)))
                  (rest1 (substring chunk (1+ p1)))
                  (p2 (string-search "\037" rest1)))
@@ -3881,7 +3939,9 @@ is bounded by the separators around it."
                     (unless (sprig--log-ignored-p path)
                       (let ((pl (sprig--log-plist
                                  path mtime head (lambda () title))))
-                        (plist-put pl :starred star)
+                        (plist-put pl :starred
+                                   (or star (gethash (plist-get pl :session)
+                                                     star-ids)))
                         (push (plist-put pl :live live) rows)))))))))))
     (setq rows (nreverse rows))
     (if limit (seq-take rows limit) rows)))
@@ -4377,8 +4437,9 @@ still held without querying the broker (see the broker script)."
 
 (defun sprig--status-starred-p (entry)
   "Non-nil when ENTRY's session carries a star marker.
-The flag rides in on the log scan (`file-exists-p' locally, an `-e' test
-folded into the one remote `find'), so reading it here costs nothing."
+The flag rides in on the log scan, which matches the star by session id
+host-wide so it follows a re-homed log (see `sprig--parse-scan-rows' and
+`sprig--star-ids-local'), so reading it here costs nothing."
   (plist-get entry :starred))
 
 (defun sprig--status-sort-rows (rows)

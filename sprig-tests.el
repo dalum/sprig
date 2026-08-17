@@ -1297,6 +1297,50 @@ claude"
     (should-not (plist-get (nth 1 rows) :live))
     (should (eq (plist-get (nth 1 rows) :starred) t))))
 
+(ert-deftest sprig-test-parse-scan-rows-stars-by-id ()
+  ;; A `stars' preamble marks a row starred by session id even when the row's
+  ;; own per-log star flag is empty (its marker was stranded in another dir when
+  ;; the log was re-homed), and a row whose id is absent stays unstarred.  The
+  ;; per-log flag still stars on its own, so the two sources union.
+  (let* ((blob (concat "\036stars\037aaa\037ccc\037"
+                       "\036100\037/p/-x/aaa.jsonl\037\037\037T1\0371"
+                       "\036090\037/p/-y/bbb.jsonl\0371\037\037\037"
+                       "\036080\037/p/-z/ddd.jsonl\037\037\037\037"))
+         (rows (sprig--parse-scan-rows blob nil)))
+    (should (= (length rows) 3))
+    ;; aaa: starred by the id preamble though its per-log flag is empty
+    (should (equal (plist-get (nth 0 rows) :session) "aaa"))
+    (should (eq (plist-get (nth 0 rows) :starred) t))
+    ;; bbb: absent from the preamble, but its own per-log flag stars it
+    (should (equal (plist-get (nth 1 rows) :session) "bbb"))
+    (should (eq (plist-get (nth 1 rows) :starred) t))
+    ;; ddd: neither source, so unstarred
+    (should (equal (plist-get (nth 2 rows) :session) "ddd"))
+    (should-not (plist-get (nth 2 rows) :starred))))
+
+(ert-deftest sprig-test-star-write-unstar-clears-strays ()
+  ;; A session's log is re-homed across project dirs, stranding an old star.
+  ;; `sprig--star-ids-local' finds the star by id wherever it sits, and
+  ;; unstarring removes every copy so no stray keeps the session starred.
+  (let* ((root (make-temp-file "sprigstar" t))
+         (id "ID1")
+         (log (expand-file-name "-p-b/ID1.jsonl" root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "-p-a" root))
+          (make-directory (expand-file-name "-p-b" root))
+          (write-region "" nil log)
+          ;; a stranded star in the old dir and one beside the current log
+          (write-region "" nil (expand-file-name "-p-a/ID1.sprig-star" root))
+          (write-region "" nil (expand-file-name "-p-b/ID1.sprig-star" root))
+          (should (gethash id (sprig--star-ids-local root)))
+          (let ((sprig-config-directory nil)
+                (sprig-claude-projects-directory root))
+            (sprig--star-write log nil nil))
+          (should (= 0 (hash-table-count (sprig--star-ids-local root))))
+          (should (file-exists-p log)))       ; the log itself is untouched
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-status-reattach-live-attaches-each-once ()
   ;; Each :live row is reattached once; a second pass over the same rows adds
   ;; nothing (the attempted set), and non-live rows are left alone.
