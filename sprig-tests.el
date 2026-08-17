@@ -139,6 +139,25 @@
       (sprig--review-sink '(compacting nil))
       (should-not sprig--compacting))))
 
+(ert-deftest sprig-test-sink-excludes-transport-from-consume ()
+  ;; A control-request/response is transport, not conversation, and must not be
+  ;; consumed: consuming pushes onto `sprig-review--events', so an attach's
+  ;; `initialize' ack (a control-response) alone would make a reattached buffer
+  ;; non-pristine and suppress its background history seed.  Conversation events
+  ;; still pass through.
+  (with-temp-buffer
+    (let ((consumed nil))
+      (cl-letf (((symbol-function 'sprig-review-consume)
+                 (lambda (ev) (push ev consumed)))
+                ((symbol-function 'sprig--status-refresh-soon) #'ignore)
+                ((symbol-function 'sprig--interrupt-receipt) #'ignore)
+                ((symbol-function 'sprig--answer-control-request) #'ignore))
+        (sprig--review-sink '(control-response "sprig-1" "success"))
+        (sprig--review-sink '(control-request "sprig-2" (:subtype "x")))
+        (should-not consumed)
+        (sprig--review-sink '(text "hello"))
+        (should (equal consumed '((text "hello"))))))))
+
 (ert-deftest sprig-test-sink-done-clears-compacting ()
   ;; An interrupted compaction need never report a result, and a flag left
   ;; set would leave the line claiming one that stopped with the turn.

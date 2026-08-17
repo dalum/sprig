@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.40.0
+;; Version: 0.41.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2374,9 +2374,14 @@ model via `sprig-review-consume'."
      ;; render a beat later.
      (sprig--status-refresh-cancel)
      (sprig--status-refresh)))
-  ;; A control-request is transport, not conversation: it carries no
-  ;; renderable content, so it is answered above and not consumed.
-  (unless (eq (car-safe event) 'control-request)
+  ;; A control-request/response is transport, not conversation: it carries no
+  ;; renderable content (the model never reads either), so it is handled above
+  ;; and not consumed.  Consuming it would matter beyond the wasted event: it
+  ;; would push onto `sprig-review--events', so an attach's `initialize' ack
+  ;; alone makes the buffer non-pristine and the background history fetch
+  ;; (`sprig--review-session-buffer', which seeds settled history only while the
+  ;; buffer is pristine) then skips, leaving a reattached session with no history.
+  (unless (memq (car-safe event) '(control-request control-response))
     (sprig-review-consume event))
   ;; Keep the open navigator's live row current through the turn: its context
   ;; readout and status move with the events, not only at `done'.  Coalesced,
