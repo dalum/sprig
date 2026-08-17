@@ -38,7 +38,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = "5"
+VERSION = "6"
 
 
 # --- paths -----------------------------------------------------------------
@@ -686,7 +686,17 @@ def cmd_list(a):
 
 
 def cmd_stop(a):
-    resp = request({"cmd": "stop", "session": a.session})
+    """Stop a held session.  Connects without autostart: with no daemon there
+    is nothing to stop, and starting an empty one just to learn that would
+    leave it running."""
+    c = connect(autostart=False)
+    if c is None:
+        sys.stderr.write("sprig-broker: no broker running (nothing to stop)\n")
+        return 1
+    send_json(c, {"cmd": "stop", "session": a.session})
+    line, _ = recv_line(c)
+    c.close()
+    resp = json.loads(line) if line else {}
     if not resp.get("ok"):
         sys.stderr.write(f"sprig-broker: {resp.get('error')}\n")
         return 1

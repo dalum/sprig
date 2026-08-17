@@ -1341,26 +1341,26 @@ claude"
           (should (file-exists-p log)))       ; the log itself is untouched
       (delete-directory root t))))
 
-(ert-deftest sprig-test-disconnect-suppresses-auto-reattach ()
-  ;; A broker-held session's row stays :live after `d' (the broker keeps it
-  ;; running), so without a mark the next scan's auto-reattach would quietly
-  ;; reconnect it.  Disconnect must mark the id, and the following reattach
-  ;; pass must then leave it alone; `o' (connect) lifts the mark again.
+(ert-deftest sprig-test-disconnect-stops-a-held-session ()
+  ;; `d' on a broker-held row stops the session on its host (the broker closes
+  ;; the child's stdin) rather than leaving it running detached, works without
+  ;; an open buffer, marks the id against auto-reattach so a scan that still
+  ;; sees the live marker cannot race the stop, and the following reattach
+  ;; pass leaves it alone; `o' (connect) lifts the mark again.
   (let ((sprig-use-broker t) (sprig-status-auto-reattach t)
-        (sprig--status-reattach-attempted nil) (calls nil)
+        (sprig--status-reattach-attempted nil) (stops nil) (calls nil)
         (entry (list :session "a" :dir "/d" :host "me@host" :live t)))
     (cl-letf (((symbol-function 'sprig--status-entry-at-point) (lambda () entry))
-              ((symbol-function 'sprig--status-owning-buffer)
-               (lambda (_) (current-buffer)))
+              ((symbol-function 'sprig--broker-stop-session)
+               (lambda (id host) (push (cons id host) stops) t))
               ((symbol-function 'sprig--status-refresh) #'ignore)
               ((symbol-function 'sprig--reattach-session)
                (lambda (dir id host) (push (list dir id host) calls)))
               ((symbol-function 'sprig--title-live-buffer) (lambda (_) nil)))
-      (with-temp-buffer
-        (setq-local sprig--process nil)
-        (sprig-status-disconnect))
+      (sprig-status-disconnect)                ; no :buffer: held row, not open
+      (should (equal stops '(("a" . "me@host"))))
       (should (member "a" sprig--status-reattach-attempted))
-      ;; The scan lands afterwards: the disconnected session is not reattached.
+      ;; The scan lands afterwards: the stopped session is not reattached.
       (sprig--status-reattach-live "me@host" (list entry))
       (should-not calls)
       ;; A hand reconnect lifts the mark, so auto-reattach serves it again.
@@ -1371,6 +1371,32 @@ claude"
           (setq-local sprig--process nil)
           (sprig-status-connect)))
       (should-not (member "a" sprig--status-reattach-attempted)))))
+
+(ert-deftest sprig-test-disconnect-unbrokered-needs-a-connection ()
+  ;; With no broker covering the host, `d' still tears down an open buffer's
+  ;; live process and never calls the broker; a row with neither a live buffer
+  ;; nor a held session is a user error.
+  (let ((sprig-use-broker nil) (stops nil)
+        (sprig--status-reattach-attempted nil))
+    (cl-letf (((symbol-function 'sprig--broker-stop-session)
+               (lambda (id host) (push (cons id host) stops) t))
+              ((symbol-function 'sprig--status-refresh) #'ignore))
+      (with-temp-buffer
+        (let* ((buf (current-buffer))
+               (proc (make-process :name "sprig-test-sleep"
+                                   :command '("sleep" "30") :noquery t)))
+          (setq-local sprig--process proc)
+          (unwind-protect
+              (cl-letf (((symbol-function 'sprig--status-entry-at-point)
+                         (lambda () (list :session "a" :host "me@host"
+                                          :buffer buf))))
+                (sprig-status-disconnect)
+                (should-not (process-live-p proc))
+                (should-not stops))
+            (when (process-live-p proc) (delete-process proc)))))
+      (cl-letf (((symbol-function 'sprig--status-entry-at-point)
+                 (lambda () (list :session "b" :host "me@host"))))
+        (should-error (sprig-status-disconnect) :type 'user-error)))))
 
 (ert-deftest sprig-test-status-reattach-live-attaches-each-once ()
   ;; Each :live row is reattached once; a second pass over the same rows adds

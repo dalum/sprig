@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.44.0
+;; Version: 0.45.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -143,7 +143,7 @@ the broker script would otherwise be missing.  Set this to a path to ship a
 different script, for instance your working copy while iterating on it."
   :type '(choice (const :tag "Embedded copy" nil) (file :tag "Broker script")))
 
-(defconst sprig-broker-version "5"
+(defconst sprig-broker-version "6"
   "Broker wire-protocol version sprig expects.
 Mirrors the `VERSION' constant in the broker script; a host whose installed
 broker reports a different value is reinstalled before use.")
@@ -564,6 +564,31 @@ child), and the `claude' argv follows a `--'."
      (list "--")
      (sprig--base-args))))
 
+(defun sprig--broker-stop-session (id host)
+  "Ask HOST's broker to stop held session ID; return non-nil when it did.
+nil HOST stops on the local machine.  The broker closes the child's stdin,
+so `claude' exits cleanly and the session is dropped (and its live marker
+removed); the JSONL survives, so the session resumes fresh on the next
+open.  Best-effort and fail-fast: the broker's `stop' connects without
+autostart, so a broker that is not running is never started just to be
+told there is nothing to stop."
+  (ignore-errors
+    (if host
+        (progn
+          (sprig--remote-sh
+           (format "python3 %s stop %s"
+                   (sprig--remote-dir-arg sprig-broker-remote-path)
+                   (shell-quote-argument id))
+           host)
+          t)
+      ;; Pin XDG_RUNTIME_DIR the same way the local spawn does, so the stop
+      ;; reaches the same socket the daemon was started with.
+      (let ((process-environment
+             (cons (concat "XDG_RUNTIME_DIR=" (sprig--broker-local-runtime-dir))
+                   process-environment)))
+        (eq 0 (call-process "python3" nil nil nil
+                            (sprig--broker-local-path) "stop" id))))))
+
 (defun sprig--broker-local-version ()
   "Version the installed local broker reports, or nil if absent or unrunnable."
   (with-temp-buffer
@@ -687,7 +712,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = \"5\"
+VERSION = \"6\"
 
 
 # --- paths -----------------------------------------------------------------
@@ -1335,7 +1360,17 @@ def cmd_list(a):
 
 
 def cmd_stop(a):
-    resp = request({\"cmd\": \"stop\", \"session\": a.session})
+    \"\"\"Stop a held session.  Connects without autostart: with no daemon there
+    is nothing to stop, and starting an empty one just to learn that would
+    leave it running.\"\"\"
+    c = connect(autostart=False)
+    if c is None:
+        sys.stderr.write(\"sprig-broker: no broker running (nothing to stop)\\n\")
+        return 1
+    send_json(c, {\"cmd\": \"stop\", \"session\": a.session})
+    line, _ = recv_line(c)
+    c.close()
+    resp = json.loads(line) if line else {}
     if not resp.get(\"ok\"):
         sys.stderr.write(f\"sprig-broker: {resp.get('error')}\\n\")
         return 1
@@ -5312,19 +5347,41 @@ session again should this connection drop."
 
 (defun sprig-status-disconnect ()
   "Disconnect the session on the current line (its log is kept).
-A broker-held session keeps running on its host; disconnecting detaches
-this Emacs only, and the id is marked so the navigator's auto-reattach
-does not quietly reconnect it on the next background scan (see
-`sprig--status-reattach-attempted').  Reconnect with `o', or by opening
-the navigator afresh."
+A broker-held session is stopped on its host too: the broker closes the
+child's stdin so `claude' exits and the session is dropped, rather than
+kept running detached (see `sprig--broker-stop-session'); the log
+survives, so the next `o' resumes it fresh.  Works on a held row whether
+or not its buffer is open here.  The id is also marked against
+auto-reattach (`sprig--status-reattach-attempted'), so a background scan
+that still sees the live marker while the stop settles cannot race it
+back to life."
   (interactive)
-  (let ((entry (sprig--status-entry-at-point)))
-    (when-let* ((id (plist-get entry :session)))
+  (let* ((entry (sprig--status-entry-at-point))
+         (id (plist-get entry :session))
+         (host (plist-get entry :host))
+         (buf (plist-get entry :buffer))
+         (had-live (and (buffer-live-p buf)
+                        (process-live-p
+                         (buffer-local-value 'sprig--process buf))))
+         ;; Brokered when the broker covers this host and either the scan saw
+         ;; the live marker or this Emacs holds a live connection (a session
+         ;; spawned moments ago can be held before any scan reports it).
+         (brokered (and id
+                        (if host (sprig--broker-remote-p)
+                          (sprig--broker-local-p))
+                        (or (plist-get entry :live) had-live))))
+    (unless (or had-live brokered)
+      (user-error "That session is not connected"))
+    (when id
       (unless (member id sprig--status-reattach-attempted)
         (push id sprig--status-reattach-attempted)))
-    (with-current-buffer (sprig--status-owning-buffer entry)
-      (when (process-live-p sprig--process) (sprig--teardown-process))))
-  (sprig--status-refresh))
+    (when had-live
+      (with-current-buffer buf (sprig--teardown-process)))
+    (when brokered
+      (if (sprig--broker-stop-session id host)
+          (message "sprig: session stopped (its log is kept)")
+        (message "sprig: disconnected, but the broker stop failed")))
+    (sprig--status-refresh)))
 
 (defun sprig--delete-session-log (entry)
   "Permanently delete ENTRY's stored session log and transcripts beside it.
@@ -5362,12 +5419,15 @@ beside the log and goes with it.  Signals when the log cannot be found."
   "Permanently delete the session on the current line, log and all.
 Where `d' (disconnect) keeps the CLI's session log, this removes it, so
 the session is gone for good and does not return on the next refresh.  A
-live session is torn down and its buffer killed first, so nothing writes
-the log back.  Asks first, since there is no undo."
+live session is torn down and its buffer killed first, and a broker-held
+one is stopped on its host (else its `claude' child would linger, running
+against a log that no longer exists), so nothing writes the log back.
+Asks first, since there is no undo."
   (interactive)
   (let* ((entry (sprig--status-entry-at-point))
          (title (plist-get entry :title))
-         (id (plist-get entry :session)))
+         (id (plist-get entry :session))
+         (host (plist-get entry :host)))
     (when (yes-or-no-p
            (format "Permanently delete session %s (%s)? "
                    (if (and title (not (string-empty-p title)))
@@ -5378,6 +5438,9 @@ the log back.  Asks first, since there is no undo."
           (with-current-buffer buf
             (when (process-live-p sprig--process) (sprig--teardown-process)))
           (kill-buffer buf)))
+      (when (and id (plist-get entry :live)
+                 (if host (sprig--broker-remote-p) (sprig--broker-local-p)))
+        (sprig--broker-stop-session id host))
       (when id (sprig--delete-session-log entry))
       (sprig--status-refresh)
       (message "Deleted session %s"
@@ -5441,7 +5504,7 @@ not here: they act on a diff section, which the navigator has none of."
     ("b" "by the way: side question (writes no log)" sprig-status-btw)]
    ["Session"
     ("o" "open & connect" sprig-status-connect)
-    ("d" "disconnect" sprig-status-disconnect)]])
+    ("d" "disconnect (stops a held session)" sprig-status-disconnect)]])
 
 (transient-define-prefix sprig-status-answer-dispatch ()
   "Answer the question the session on the row at point is waiting on.
@@ -5627,11 +5690,13 @@ They are hidden by default (they are not sessions you drive); see
 ;; time the prefix is compiled (as with `sprig-status-dispatch').
 (transient-define-prefix sprig-status-remove ()
   "Take the session on the row at point out of the navigator.
-`d d' disconnects the live process but keeps the CLI's log, so the session
-returns on the next refresh; `d D' also deletes the log, so it is gone for
+`d d' disconnects the live process, stopping a broker-held session on its
+host too, but keeps the CLI's log, so the session returns on the next
+refresh and resumes fresh; `d D' also deletes the log, so it is gone for
 good.  Deleting asks first, since there is no undo."
   [["Remove"
-    ("d" "disconnect (keep the log)" sprig-status-disconnect)
+    ("d" "disconnect (stop a held session; keep the log)"
+     sprig-status-disconnect)
     ("D" "delete (disconnect, then remove the log; no undo)"
      sprig-status-delete)]])
 

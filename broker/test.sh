@@ -175,7 +175,7 @@ if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else b
 "$broker" stop "$rsid" >/dev/null 2>&1
 
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "5" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "6" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 # 10. Auto-start prefers a `systemd-run --user' unit (so the daemon lives under
 #     user@UID.service, not the SSH login's session scope that logout kills)
@@ -256,6 +256,19 @@ assert s3.pending == {b"req_3": 0}, s3.pending
 PY
 then ok "reattach rewinds to an unanswered control_request"
 else bad "pending-request tracking wrong"; fi
+
+# 12. `stop' with no daemon fails fast and starts nothing: there is nothing to
+#     stop, and autostarting an empty daemon just to learn that would leave it
+#     running.
+stopdir=$(mktemp -d)
+if XDG_RUNTIME_DIR="$stopdir" "$broker" stop nonexistent >/dev/null 2>&1; then
+  bad "stop with no daemon should fail"
+elif [ -e "$stopdir/sprig-broker/control.sock" ]; then
+  bad "stop started a daemon it should not have"
+else
+  ok "stop with no daemon fails fast, starts nothing"
+fi
+rm -rf "$stopdir"
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi
