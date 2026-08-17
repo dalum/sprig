@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.43.0
+;; Version: 0.44.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2852,9 +2852,13 @@ next render."
             (buffer-list)))
 
 (defvar sprig--status-reattach-attempted nil
-  "Session ids the navigator has tried to auto-reattach since it was opened.
-Keeps a failed reattach (a stale `<id>.sprig-live' marker) from being retried
-on every background scan; reset when `sprig-status' is opened afresh.")
+  "Session ids the navigator will not auto-reattach again.
+An id lands here when a reattach is tried (so a failed one off a stale
+`<id>.sprig-live' marker is not retried on every background scan) and when
+you disconnect a session deliberately (a broker-held session's row stays
+`:live', so without the mark the next scan would quietly reconnect it and
+undo the disconnect).  Reset when `sprig-status' is opened afresh, which
+re-expresses attach-everything-held.")
 
 (defun sprig--reattach-session (dir id host)
   "Attach in the background to broker-held session ID on HOST, rooted at DIR.
@@ -5285,12 +5289,19 @@ opening at the top of a long transcript."
     (sprig--status-refresh)))
 
 (defun sprig-status-connect ()
-  "Open the session on the current line and start or resume it."
+  "Open the session on the current line and start or resume it.
+Connecting by hand lifts any do-not-reattach mark a deliberate disconnect
+left (see `sprig--status-reattach-attempted'), so auto-reattach serves the
+session again should this connection drop."
   (interactive)
-  (let ((buf (sprig--status-review-buffer (sprig--status-entry-at-point))))
-    (with-current-buffer buf
-      (unless (process-live-p sprig--process) (sprig-review-connect)))
-    (sprig--status-refresh)))
+  (let ((entry (sprig--status-entry-at-point)))
+    (when-let* ((id (plist-get entry :session)))
+      (setq sprig--status-reattach-attempted
+            (delete id sprig--status-reattach-attempted)))
+    (let ((buf (sprig--status-review-buffer entry)))
+      (with-current-buffer buf
+        (unless (process-live-p sprig--process) (sprig-review-connect)))
+      (sprig--status-refresh))))
 
 (defun sprig-status-interrupt ()
   "Interrupt the streaming session on the current line."
@@ -5300,10 +5311,19 @@ opening at the top of a long transcript."
   (sprig--status-refresh))
 
 (defun sprig-status-disconnect ()
-  "Disconnect the session on the current line (its log is kept)."
+  "Disconnect the session on the current line (its log is kept).
+A broker-held session keeps running on its host; disconnecting detaches
+this Emacs only, and the id is marked so the navigator's auto-reattach
+does not quietly reconnect it on the next background scan (see
+`sprig--status-reattach-attempted').  Reconnect with `o', or by opening
+the navigator afresh."
   (interactive)
-  (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
-    (when (process-live-p sprig--process) (sprig--teardown-process)))
+  (let ((entry (sprig--status-entry-at-point)))
+    (when-let* ((id (plist-get entry :session)))
+      (unless (member id sprig--status-reattach-attempted)
+        (push id sprig--status-reattach-attempted)))
+    (with-current-buffer (sprig--status-owning-buffer entry)
+      (when (process-live-p sprig--process) (sprig--teardown-process))))
   (sprig--status-refresh))
 
 (defun sprig--delete-session-log (entry)

@@ -1341,6 +1341,37 @@ claude"
           (should (file-exists-p log)))       ; the log itself is untouched
       (delete-directory root t))))
 
+(ert-deftest sprig-test-disconnect-suppresses-auto-reattach ()
+  ;; A broker-held session's row stays :live after `d' (the broker keeps it
+  ;; running), so without a mark the next scan's auto-reattach would quietly
+  ;; reconnect it.  Disconnect must mark the id, and the following reattach
+  ;; pass must then leave it alone; `o' (connect) lifts the mark again.
+  (let ((sprig-use-broker t) (sprig-status-auto-reattach t)
+        (sprig--status-reattach-attempted nil) (calls nil)
+        (entry (list :session "a" :dir "/d" :host "me@host" :live t)))
+    (cl-letf (((symbol-function 'sprig--status-entry-at-point) (lambda () entry))
+              ((symbol-function 'sprig--status-owning-buffer)
+               (lambda (_) (current-buffer)))
+              ((symbol-function 'sprig--status-refresh) #'ignore)
+              ((symbol-function 'sprig--reattach-session)
+               (lambda (dir id host) (push (list dir id host) calls)))
+              ((symbol-function 'sprig--title-live-buffer) (lambda (_) nil)))
+      (with-temp-buffer
+        (setq-local sprig--process nil)
+        (sprig-status-disconnect))
+      (should (member "a" sprig--status-reattach-attempted))
+      ;; The scan lands afterwards: the disconnected session is not reattached.
+      (sprig--status-reattach-live "me@host" (list entry))
+      (should-not calls)
+      ;; A hand reconnect lifts the mark, so auto-reattach serves it again.
+      (cl-letf (((symbol-function 'sprig--status-review-buffer)
+                 (lambda (_) (current-buffer)))
+                ((symbol-function 'sprig-review-connect) #'ignore))
+        (with-temp-buffer
+          (setq-local sprig--process nil)
+          (sprig-status-connect)))
+      (should-not (member "a" sprig--status-reattach-attempted)))))
+
 (ert-deftest sprig-test-status-reattach-live-attaches-each-once ()
   ;; Each :live row is reattached once; a second pass over the same rows adds
   ;; nothing (the attempted set), and non-live rows are left alone.
