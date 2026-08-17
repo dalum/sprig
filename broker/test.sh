@@ -175,7 +175,7 @@ if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else b
 "$broker" stop "$rsid" >/dev/null 2>&1
 
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "4" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "5" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 # 10. Auto-start prefers a `systemd-run --user' unit (so the daemon lives under
 #     user@UID.service, not the SSH login's session scope that logout kills)
@@ -211,6 +211,51 @@ assert b._systemd_run_daemon(daemon) is False, "absent systemd-run must skip"
 PY
 then ok "auto-start selects systemd-run --user, honours the escape hatch"
 else bad "systemd-run selection logic wrong"; fi
+
+# 11. A reattach rewinds to an unanswered control_request, so a question raised
+#     while detached is re-delivered instead of skipped (which would hang the
+#     child forever).  Unit-test the tracking directly, no daemon, no child.
+if python3 - "$broker" <<'PY'
+import importlib.util, sys, threading
+from importlib.machinery import SourceFileLoader
+loader = SourceFileLoader("broker_under_test", sys.argv[1])  # file has no .py
+spec = importlib.util.spec_from_loader(loader.name, loader)
+b = importlib.util.module_from_spec(spec)
+loader.exec_module(b)
+
+class Fake(b.Session):
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.pending, self._out_buf, self._out_pos, self._in_buf = {}, b"", 0, b""
+        self.spool = "/nonexistent-spool"       # so getsize fails -> 0 tail
+
+s = Fake()
+# Settled assistant text lands first, then the child blocks on a question.
+s._track_out(b'{"type":"assistant","message":{}}\n')
+q_off = s._out_pos
+s._track_out(b'{"type":"control_request","request_id":"req_1",'
+             b'"request":{"subtype":"can_use_tool"}}\n')
+assert s.pending == {b"req_1": q_off}, s.pending
+# Reattach rewinds to the question, not past it, and not to the earlier text.
+assert s.reattach_offset() == q_off, s.reattach_offset()
+# Answering it (a client control_response) clears the rewind.
+s._track_in(b'{"type":"control_response","response":'
+            b'{"request_id":"req_1","subtype":"success"}}\n')
+assert s.pending == {}, s.pending
+assert s.reattach_offset() == 0, s.reattach_offset()  # spool missing -> tail 0
+# A control_request split across two writes is still caught, at its true offset.
+s2 = Fake()
+s2._track_out(b'{"type":"control_req')
+s2._track_out(b'uest","request_id":"req_2"}\n')
+assert s2.pending == {b"req_2": 0}, s2.pending
+# A client's own control_request (an interrupt) is not an answer.
+s3 = Fake()
+s3._track_out(b'{"type":"control_request","request_id":"req_3"}\n')
+s3._track_in(b'{"type":"control_request","request_id":"req_3"}\n')
+assert s3.pending == {b"req_3": 0}, s3.pending
+PY
+then ok "reattach rewinds to an unanswered control_request"
+else bad "pending-request tracking wrong"; fi
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi

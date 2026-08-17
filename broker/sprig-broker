@@ -26,6 +26,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import selectors
 import shutil
 import socket
@@ -37,7 +38,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = "4"
+VERSION = "5"
 
 
 # --- paths -----------------------------------------------------------------
@@ -119,6 +120,17 @@ def resume_id_from_args(args):
     return None
 
 
+_REQUEST_ID_RE = re.compile(rb'"request_id"\s*:\s*"([^"]+)"')
+
+
+def request_id_of(line):
+    """The `request_id' a stream-json control line names, or None.  A request
+    carries it at top level; a response nests it inside `response', but the
+    same field name serves both, so one search finds either."""
+    m = _REQUEST_ID_RE.search(line)
+    return m.group(1) if m else None
+
+
 # --- session ---------------------------------------------------------------
 
 class Session:
@@ -137,6 +149,18 @@ class Session:
         self.marker = None                  # <id>.sprig-live path once written
         self.ended = False
         self.created = time.time()
+        # A control_request the child emits (a permission prompt, an
+        # AskUserQuestion) blocks the child until a client answers it.  If the
+        # client detaches first, the request sits in the spool unanswered; a
+        # plain live-tail reattach would skip past it and the session would
+        # hang.  Track each still-pending request's spool offset (keyed by id,
+        # cleared when a client's control_response answers it) so a reattach
+        # can rewind to it.  Requests cluster at the tail, since a blocked
+        # child emits nothing after, so rewinding replays only the prompts.
+        self.pending = {}                   # request_id -> spool byte offset
+        self._out_buf = b""                 # partial stdout line, for scanning
+        self._out_pos = 0                   # spool offset of `_out_buf' start
+        self._in_buf = b""                  # partial stdin line, for scanning
 
     def find_log(self):
         """The CLI's JSONL log for this session, found by id, or None.
@@ -193,6 +217,7 @@ class Session:
                         s.sendall(chunk)
                     except OSError:
                         self.subscribers.discard(s)
+            self._track_out(chunk)
             if self.cli_session_id is None:
                 sniff += chunk
                 sid = extract_session_id(sniff)
@@ -216,9 +241,58 @@ class Session:
         with self.stdin_lock:
             try:
                 write_all(self.proc.stdin.fileno(), data)
-                return True
             except (OSError, ValueError):
                 return False
+        self._track_in(data)
+        return True
+
+    def _track_out(self, chunk):
+        """Note any control_request the child emits, by spool offset, so a
+        reattach can find prompts left unanswered.  Scans whole lines only;
+        `_out_pos' stays at the start of the partial line still buffered."""
+        self._out_buf += chunk
+        while True:
+            nl = self._out_buf.find(b"\n")
+            if nl < 0:
+                break
+            line = self._out_buf[:nl]
+            start = self._out_pos
+            self._out_pos += nl + 1
+            self._out_buf = self._out_buf[nl + 1:]
+            if b'"type":"control_request"' in line:
+                rid = request_id_of(line)
+                if rid:
+                    with self.lock:
+                        self.pending[rid] = start
+
+    def _track_in(self, data):
+        """Clear a pending request once a client's control_response answers it.
+        A client's own control_request (an interrupt) is not a response, so it
+        leaves `pending' alone."""
+        self._in_buf += data
+        while True:
+            nl = self._in_buf.find(b"\n")
+            if nl < 0:
+                break
+            line = self._in_buf[:nl]
+            self._in_buf = self._in_buf[nl + 1:]
+            if b'"type":"control_response"' in line:
+                rid = request_id_of(line)
+                if rid:
+                    with self.lock:
+                        self.pending.pop(rid, None)
+
+    def reattach_offset(self):
+        """Where a reattaching client should resume: the oldest unanswered
+        control_request, so its prompt is re-delivered, else the spool end."""
+        with self.lock:
+            pend = min(self.pending.values()) if self.pending else None
+        if pend is not None:
+            return pend
+        try:
+            return os.path.getsize(self.spool)
+        except OSError:
+            return 0
 
     def close_stdin(self):
         try:
@@ -411,7 +485,9 @@ def do_open(broker, conn, rest, req):
     A caller that does not yet know a session (or whose session is gone) gets
     a spawn and a full replay from offset 0, so it sees the init line and the
     CLI session id.  A caller reattaching to a live session gets the live tail
-    only (from the current spool end), since settled history is in the JSONL."""
+    only (from the current spool end), since settled history is in the JSONL,
+    except that an unanswered control_request rewinds the tail to itself so the
+    prompt is re-delivered and the session does not hang (see reattach_offset)."""
     sid = req.get("session")
     key = broker.resolve(sid) if sid else None
     if key is None:
@@ -426,10 +502,7 @@ def do_open(broker, conn, rest, req):
         spawned = True
     else:
         sess = broker.sessions[key]
-        try:
-            offset = os.path.getsize(sess.spool)
-        except OSError:
-            offset = 0
+        offset = sess.reattach_offset()
         spawned = False
     send_json(conn, {
         "ok": True,
