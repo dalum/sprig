@@ -6088,9 +6088,115 @@ follows when the account has it enabled."
                 (format "%-20s" "Extra usage")
                 (or (sprig--usage-money .spend.used) "?") " of "
                 (or (sprig--usage-money .spend.limit) "?") "\n")))
+    ;; The consumption count is still out (see `sprig--usage-consumption');
+    ;; its sentinel replaces this line, found by its property.
+    (insert (propertize "\nCounting local consumption...\n"
+                        'face 'shadow 'sprig-usage-consumption t))
     (insert (propertize (format "\nFetched %s\n" (format-time-string "%H:%M"))
                         'face 'shadow))
     (goto-char (point-min))))
+
+(defconst sprig--usage-consumption-script "
+import json, glob, os, sys, collections
+root = os.path.expanduser(sys.argv[1])
+days = collections.defaultdict(
+    lambda: collections.defaultdict(lambda: [0, 0, 0]))
+seen = set()
+for path in glob.glob(os.path.join(root, '*', '*.jsonl')):
+    try:
+        with open(path, 'rb') as f:
+            for line in f:
+                if b'\"usage\"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get('type') != 'assistant':
+                    continue
+                msg = rec.get('message') or {}
+                usage = msg.get('usage') or {}
+                model = msg.get('model') or '?'
+                if not usage or model == '<synthetic>':
+                    continue
+                key = (msg.get('id'), rec.get('requestId'))
+                if key[0] and key in seen:
+                    continue
+                seen.add(key)
+                cell = days[(rec.get('timestamp') or '?')[:10]][model]
+                cell[0] += ((usage.get('input_tokens') or 0)
+                            + (usage.get('cache_creation_input_tokens') or 0))
+                cell[1] += usage.get('cache_read_input_tokens') or 0
+                cell[2] += usage.get('output_tokens') or 0
+    except OSError:
+        pass
+print(json.dumps([
+    {'day': d, 'model': m, 'fresh': c[0], 'read': c[1], 'out': c[2]}
+    for d in sorted(days)[-7:] for m, c in sorted(days[d].items())]))
+"
+  "Python that sums token usage by day and model across a host's logs.
+Argv: the projects root.  Reads every session's JSONL (subagent transcripts
+too: their calls bill like any other), counts each (message id, request id)
+pair once (a reply's record can repeat as it streams), and prints the last
+seven active days as JSON.  Cache reads are kept apart from fresh input:
+they cost a tenth, so one number would mislead.")
+
+(defun sprig--usage-consumption-insert (rows)
+  "Replace the view's counting placeholder with the consumption ROWS.
+Called in the usage buffer.  ROWS nil (python missing, or a root with no
+logs) leaves a shrug rather than a stuck \"Counting...\"."
+  (let ((at (text-property-any (point-min) (point-max)
+                               'sprig-usage-consumption t))
+        (inhibit-read-only t))
+    (when at
+      (save-excursion
+        (goto-char at)
+        (delete-region at (or (text-property-not-all
+                               at (point-max) 'sprig-usage-consumption t)
+                              (point-max)))
+        (insert "\n")
+        (if (null rows)
+            (insert (propertize "No local consumption found.\n" 'face 'shadow))
+          (insert (propertize "Local consumption (last 7 active days)\n"
+                              'face 'bold))
+          (dolist (row rows)
+            (let-alist row
+              (insert
+               (propertize (format "  %-6s %-19s"
+                                   (if (> (length .day) 5) (substring .day 5)
+                                     .day)
+                                   (string-remove-prefix "claude-" .model))
+                           'face 'shadow)
+               (format " %8s in %9s cached %8s out\n"
+                       (sprig--format-tokens .fresh)
+                       (sprig--format-tokens .read)
+                       (sprig--format-tokens .out))))))))))
+
+(defun sprig--usage-consumption (buf)
+  "Sum the local logs' token consumption and add it to BUF, asynchronously.
+Local logs only: the gauges above are account-wide already, and a remote
+host's logs would double-count the sessions this machine also ran.  The
+count is a python pass over every JSONL (`sprig--usage-consumption-script'),
+off the Emacs thread because the logs run to megabytes."
+  (let ((out (generate-new-buffer " *sprig-usage-count*")))
+    (make-process
+     :name "sprig-usage-count" :buffer out :noquery t
+     :command (list "python3" "-c" sprig--usage-consumption-script
+                    (expand-file-name (sprig--projects-directory)))
+     :sentinel
+     (lambda (proc _event)
+       (unless (process-live-p proc)
+         (let ((rows (and (eq (process-exit-status proc) 0)
+                          (ignore-errors
+                            (with-current-buffer out
+                              (json-parse-string (buffer-string)
+                                                 :object-type 'alist
+                                                 :array-type 'list
+                                                 :null-object nil))))))
+           (kill-buffer out)
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (sprig--usage-consumption-insert rows)))))))))
 
 (define-derived-mode sprig-usage-mode special-mode "Sprig-Usage"
   "Major mode for the plan-usage view (see `sprig-usage').
@@ -6142,7 +6248,9 @@ cover remote hosts too."
            (kill-buffer (current-buffer))
            (when (buffer-live-p buf)
              (with-current-buffer buf
-               (if data (sprig--usage-render data)
+               (if data
+                   (progn (sprig--usage-render data)
+                          (sprig--usage-consumption buf))
                  (let ((inhibit-read-only t))
                    (erase-buffer)
                    (insert (propertize

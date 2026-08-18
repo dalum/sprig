@@ -4445,5 +4445,60 @@ without a real SSH process."
           (should-not (sprig--usage-token)))
       (delete-directory dir t))))
 
+(ert-deftest sprig-test-usage-consumption-script-sums-once-per-request ()
+  ;; The consumption count reads the logs raw, so it has to dedupe: a
+  ;; reply's assistant record repeats under one (message id, request id)
+  ;; pair as it streams, and counting each copy would multiply the bill.
+  ;; Synthetic error records carry no real usage and are skipped.
+  (skip-unless (executable-find "python3"))
+  (let ((root (make-temp-file "sprig-test-usage" t)))
+    (unwind-protect
+        (let ((proj (expand-file-name "proj" root)))
+          (make-directory proj)
+          (with-temp-file (expand-file-name "a.jsonl" proj)
+            (dolist (line '("{\"type\":\"assistant\",\"timestamp\":\"2026-08-18T10:00:00Z\",\"requestId\":\"r1\",\"message\":{\"id\":\"m1\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":90,\"cache_read_input_tokens\":1000,\"output_tokens\":50}}}"
+                            "{\"type\":\"assistant\",\"timestamp\":\"2026-08-18T10:00:01Z\",\"requestId\":\"r1\",\"message\":{\"id\":\"m1\",\"model\":\"claude-fable-5\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":90,\"cache_read_input_tokens\":1000,\"output_tokens\":50}}}"
+                            "{\"type\":\"assistant\",\"timestamp\":\"2026-08-17T09:00:00Z\",\"requestId\":\"r2\",\"message\":{\"id\":\"m2\",\"model\":\"claude-opus-4-8\",\"usage\":{\"input_tokens\":5,\"cache_read_input_tokens\":0,\"output_tokens\":7}}}"
+                            "{\"type\":\"assistant\",\"timestamp\":\"2026-08-18T11:00:00Z\",\"requestId\":\"r3\",\"message\":{\"id\":\"m3\",\"model\":\"<synthetic>\",\"usage\":{\"input_tokens\":999}}}"
+                            "{\"type\":\"user\",\"timestamp\":\"2026-08-18T10:00:02Z\",\"message\":{\"usage\":{\"input_tokens\":999}}}"))
+              (insert line "\n")))
+          (with-temp-buffer
+            (should (eq 0 (call-process "python3" nil t nil "-c"
+                                        sprig--usage-consumption-script root)))
+            (let ((rows (json-parse-string (buffer-string)
+                                           :object-type 'alist
+                                           :array-type 'list
+                                           :null-object nil)))
+              (should (equal
+                       rows
+                       '(((day . "2026-08-17") (model . "claude-opus-4-8")
+                          (fresh . 5) (read . 0) (out . 7))
+                        ((day . "2026-08-18") (model . "claude-fable-5")
+                         (fresh . 100) (read . 1000) (out . 50))))))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-usage-consumption-insert-replaces-the-placeholder ()
+  ;; The gauges render before the log count returns, so the view holds the
+  ;; count's place with a marked line; the rows land where it was, and a
+  ;; nil result (no python, no logs) resolves it rather than leaving
+  ;; "Counting..." forever.
+  (with-temp-buffer
+    (sprig--usage-render '((limits) (spend)))
+    (sprig--usage-consumption-insert
+     '(((day . "2026-08-18") (model . "claude-fable-5")
+        (fresh . 100) (read . 1000) (out . 50))))
+    (let ((text (buffer-string)))
+      (should-not (string-match-p "Counting" text))
+      (should (string-match-p "Local consumption" text))
+      (should (string-match-p "08-18" text))
+      (should (string-match-p "fable-5" text))
+      (should (string-match-p "0\\.1k in" text))
+      (should (string-match-p "1\\.0k cached" text))))
+  (with-temp-buffer
+    (sprig--usage-render '((limits) (spend)))
+    (sprig--usage-consumption-insert nil)
+    (should-not (string-match-p "Counting" (buffer-string)))
+    (should (string-match-p "No local consumption" (buffer-string)))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
