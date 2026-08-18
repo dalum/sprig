@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.49.0
+;; Version: 0.50.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -5866,11 +5866,13 @@ description runs with its own popup buffer current, not the navigator's."
     (concat label (and on (propertize "  [on]" 'face 'transient-value)))))
 
 (transient-define-prefix sprig-status-show ()
-  "Inspect a host's session roots.
+  "Inspect a host's session roots, or the plan's usage limits.
 `S S' pops the roots view for the host of the group point is in (see
-`sprig-status-roots').  Sorting lives under `l s' and a column-header click."
+`sprig-status-roots'); `S u' the account's rolling usage gauges (see
+`sprig-usage').  Sorting lives under `l s' and a column-header click."
   [["Show"
-    ("S" "session roots on this host" sprig-status-roots)]])
+    ("S" "session roots on this host" sprig-status-roots)
+    ("u" "plan usage limits" sprig-usage)]])
 
 (transient-define-prefix sprig-status-view ()
   "Switch how the navigator lists its sessions.
@@ -5975,6 +5977,182 @@ live session.  Narrow with `/', lift the cap with `l a'."
       (setq sprig--status-reattach-attempted nil)
       (sprig--status-render))
     (pop-to-buffer buf)))
+
+;;;; Plan usage
+;;
+;; The CLI's `/usage' panel is a render of one HTTP call: GET
+;; https://api.anthropic.com/api/oauth/usage with the login's OAuth token
+;; (and the CLI's oauth beta header).  Sprig asks the same endpoint, so the
+;; plan's rolling limits (session, weekly, per-model) are a keystroke away
+;; instead of a trip through an interactive `claude'.  The limits are
+;; account-wide, so the local login's token answers for every host; nothing
+;; here reads a session or touches a remote.
+
+(defconst sprig-usage-buffer-name "*sprig-usage*"
+  "Name of the plan-usage buffer.")
+
+(defconst sprig--usage-endpoint "https://api.anthropic.com/api/oauth/usage"
+  "The account usage endpoint behind the CLI's `/usage' panel.")
+
+(defvar url-http-end-of-headers)
+(defvar url-http-response-status)
+(defvar url-request-extra-headers)
+
+(defun sprig--usage-token ()
+  "The local login's OAuth access token, or nil when not logged in.
+Read from the CLI's credential store under `sprig-config-directory' (default
+~/.claude).  Never logged or displayed; it leaves Emacs only as the
+Authorization header of the usage request."
+  (let ((file (expand-file-name
+               ".credentials.json"
+               (or sprig-config-directory "~/.claude"))))
+    (and (file-readable-p file)
+         (ignore-errors
+           (let-alist (with-temp-buffer
+                        (insert-file-contents file)
+                        (json-parse-string (buffer-string)
+                                           :object-type 'alist
+                                           :null-object nil))
+             .claudeAiOauth.accessToken)))))
+
+(defun sprig--usage-bar (percent)
+  "A ten-cell bar showing PERCENT of a limit consumed."
+  (let ((cells (max 0 (min 10 (round (or percent 0) 10)))))
+    (concat "[" (make-string cells ?█) (make-string (- 10 cells) ?░) "]")))
+
+(defun sprig--usage-label (limit)
+  "Human label for LIMIT, a row of the endpoint's `limits' array."
+  (let-alist limit
+    (pcase .kind
+      ("session" "Session (5h)")
+      ("weekly_all" "Week (all models)")
+      ("weekly_scoped" (format "Week (%s)" (or .scope.model.display_name
+                                               "scoped")))
+      (_ (or .kind "?")))))
+
+(defun sprig--usage-countdown (time)
+  "TIME's distance from now as a short \"3h 40m\" string, or nil when past."
+  (let ((secs (floor (float-time (time-subtract time nil)))))
+    (cond ((< secs 0) nil)
+          ((>= secs 86400) (format "%dd %dh" (/ secs 86400)
+                                   (/ (% secs 86400) 3600)))
+          ((>= secs 3600) (format "%dh %dm" (/ secs 3600)
+                                  (/ (% secs 3600) 60)))
+          (t (format "%dm" (max 1 (/ secs 60)))))))
+
+(defun sprig--usage-money (money)
+  "The endpoint's MONEY object (minor units and an exponent) as a string.
+nil when MONEY is missing or malformed."
+  (let-alist money
+    (when (numberp .amount_minor)
+      (let ((exponent (if (numberp .exponent) .exponent 2)))
+        (format (format "%%.%df %%s" exponent)
+                (/ .amount_minor (expt 10.0 exponent))
+                (or .currency ""))))))
+
+(defun sprig--usage-render (data)
+  "Render DATA, the parsed usage endpoint reply, into the current buffer.
+The `limits' array is the panel: one gauge per rolling limit, coloured by
+the endpoint's own severity.  The spend block (usage credits past the plan)
+follows when the account has it enabled."
+  (let ((inhibit-read-only t))
+    (erase-buffer)
+    (insert (propertize "Plan usage\n" 'face 'bold)
+            (propertize "g refresh   q quit\n\n" 'face 'shadow))
+    (let-alist data
+      (if (null .limits)
+          (insert (propertize "No limits reported.\n" 'face 'shadow))
+        (dolist (limit .limits)
+          (let-alist limit
+            (insert
+             (format "  %-20s" (sprig--usage-label limit))
+             (propertize (format "%s %3d%%" (sprig--usage-bar .percent)
+                                 (or .percent 0))
+                         'face (pcase .severity
+                                 ("normal" 'success)
+                                 ("warning" 'warning)
+                                 (_ 'error)))
+             (let ((time (and (stringp .resets_at)
+                              (ignore-errors
+                                (encode-time (iso8601-parse .resets_at))))))
+               (if (not time) ""
+                 (propertize
+                  (format "   resets %s%s"
+                          (sprig--format-time-value time)
+                          (let ((left (sprig--usage-countdown time)))
+                            (if left (format " (in %s)" left) "")))
+                  'face 'shadow)))
+             "\n"))))
+      (when (eq .spend.enabled t)
+        (insert "\n  "
+                (format "%-20s" "Extra usage")
+                (or (sprig--usage-money .spend.used) "?") " of "
+                (or (sprig--usage-money .spend.limit) "?") "\n")))
+    (insert (propertize (format "\nFetched %s\n" (format-time-string "%H:%M"))
+                        'face 'shadow))
+    (goto-char (point-min))))
+
+(define-derived-mode sprig-usage-mode special-mode "Sprig-Usage"
+  "Major mode for the plan-usage view (see `sprig-usage').
+Read-only gauges; `g' refetches."
+  (setq-local truncate-lines t)
+  (setq-local revert-buffer-function (lambda (&rest _) (sprig-usage))))
+
+;;;###autoload
+(defun sprig-usage ()
+  "Show the plan's rolling usage limits (the CLI's `/usage', as a buffer).
+Fetches the account usage endpoint with the local login's token,
+asynchronously, and renders the reply into `*sprig-usage*'; also on the
+navigator's `S u'.  Needs a `claude' login on this machine (the plain CLI's
+or `sprig-config-directory''s); the limits shown are account-wide, so they
+cover remote hosts too."
+  (interactive)
+  (let ((token (sprig--usage-token))
+        (buf (get-buffer-create sprig-usage-buffer-name)))
+    (unless token
+      (user-error "No Claude login found (no readable .credentials.json)"))
+    (with-current-buffer buf
+      (unless (derived-mode-p 'sprig-usage-mode) (sprig-usage-mode))
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (propertize "Fetching plan usage...\n" 'face 'shadow))))
+    (pop-to-buffer buf)
+    (let ((url-request-extra-headers
+           `(("Authorization" . ,(concat "Bearer " token))
+             ("anthropic-beta" . "oauth-2025-04-20"))))
+      (url-retrieve
+       sprig--usage-endpoint
+       (lambda (status)
+         ;; In the retrieval buffer.  Take what the render needs out of it,
+         ;; kill it, then paint the view; a dead view buffer just drops the
+         ;; reply.
+         (let* ((code (and (boundp 'url-http-response-status)
+                           url-http-response-status))
+                (data (and (not (plist-get status :error))
+                           (eq code 200)
+                           (ignore-errors
+                             (goto-char url-http-end-of-headers)
+                             (json-parse-string
+                              (decode-coding-string
+                               (buffer-substring-no-properties
+                                (point) (point-max))
+                               'utf-8)
+                              :object-type 'alist :array-type 'list
+                              :null-object nil)))))
+           (kill-buffer (current-buffer))
+           (when (buffer-live-p buf)
+             (with-current-buffer buf
+               (if data (sprig--usage-render data)
+                 (let ((inhibit-read-only t))
+                   (erase-buffer)
+                   (insert (propertize
+                            (if (eq code 401)
+                                "Login token rejected (HTTP 401): run the \
+`claude' CLI once to refresh it, then `g'.\n"
+                              (format "Usage fetch failed%s.\n"
+                                      (if code (format " (HTTP %s)" code) "")))
+                            'face 'error))))))))
+       nil t t))))
 
 ;;;; Development
 

@@ -4382,5 +4382,68 @@ without a real SSH process."
           (should (eq (face-attribute face :weight nil t) 'bold)))
       (put face 'face-defface-spec nil))))
 
+(ert-deftest sprig-test-usage-render-paints-the-plan-gauges ()
+  ;; The usage view is a render of the endpoint's `limits' array: one gauge
+  ;; per rolling limit, labelled by kind (and by model for a scoped one),
+  ;; with the spend block following when the account has credits enabled.
+  (let ((data (json-parse-string "
+{\"limits\": [
+   {\"kind\": \"session\", \"percent\": 76, \"severity\": \"warning\",
+    \"resets_at\": \"2099-01-01T16:19:59.730664+00:00\", \"scope\": null},
+   {\"kind\": \"weekly_all\", \"percent\": 59, \"severity\": \"normal\",
+    \"resets_at\": null, \"scope\": null},
+   {\"kind\": \"weekly_scoped\", \"percent\": 40, \"severity\": \"normal\",
+    \"resets_at\": null,
+    \"scope\": {\"model\": {\"id\": null, \"display_name\": \"Fable\"}}}],
+ \"spend\": {\"enabled\": true,
+             \"used\": {\"amount_minor\": 1250, \"currency\": \"EUR\",
+                        \"exponent\": 2},
+             \"limit\": {\"amount_minor\": 17000, \"currency\": \"EUR\",
+                         \"exponent\": 2}}}"
+                                 :object-type 'alist :array-type 'list
+                                 :null-object nil)))
+    (with-temp-buffer
+      (sprig--usage-render data)
+      (let ((text (buffer-string)))
+        (should (string-match-p "Session (5h)" text))
+        (should (string-match-p "76%" text))
+        (should (string-match-p "Week (all models)" text))
+        (should (string-match-p "Week (Fable)" text))
+        ;; The gauge is proportional: 76% paints eight of the ten cells.
+        (should (string-match-p (regexp-quote "[████████░░]") text))
+        ;; A reset instant renders with a countdown; a null one renders
+        ;; nothing rather than "resets nil".
+        (should (string-match-p "resets .* (in " text))
+        (should-not (string-match-p "resets nil" text))
+        ;; Money is minor units scaled by the exponent, not raw.
+        (should (string-match-p "12.50 EUR of 170.00 EUR" text))))))
+
+(ert-deftest sprig-test-usage-render-skips-a-disabled-spend-block ()
+  ;; An account without usage credits still answers with a spend object;
+  ;; `enabled' false means the row would be noise, so it is not drawn.
+  (let ((data (json-parse-string
+               "{\"limits\": [], \"spend\": {\"enabled\": false}}"
+               :object-type 'alist :array-type 'list :null-object nil)))
+    (with-temp-buffer
+      (sprig--usage-render data)
+      (should-not (string-match-p "Extra usage" (buffer-string)))
+      (should (string-match-p "No limits reported" (buffer-string))))))
+
+(ert-deftest sprig-test-usage-token-reads-the-cli-login ()
+  ;; The token comes from the CLI's own credential store, honouring
+  ;; `sprig-config-directory'; a missing or unreadable file is nil, never
+  ;; an error, so `sprig-usage' can say "log in" instead of backtracing.
+  (let ((dir (make-temp-file "sprig-test-cred" t)))
+    (unwind-protect
+        (let ((sprig-config-directory dir))
+          (should-not (sprig--usage-token))
+          (with-temp-file (expand-file-name ".credentials.json" dir)
+            (insert "{\"claudeAiOauth\": {\"accessToken\": \"sk-ant-test\"}}"))
+          (should (equal (sprig--usage-token) "sk-ant-test"))
+          (with-temp-file (expand-file-name ".credentials.json" dir)
+            (insert "not json"))
+          (should-not (sprig--usage-token)))
+      (delete-directory dir t))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
