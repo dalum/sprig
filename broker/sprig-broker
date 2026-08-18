@@ -38,7 +38,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = "6"
+VERSION = "7"
 
 
 # --- paths -----------------------------------------------------------------
@@ -681,7 +681,17 @@ def cmd_spawn(a):
 
 
 def cmd_list(a):
-    print(json.dumps(request({"cmd": "list"}), indent=2))
+    """List held sessions.  With no daemon running nothing is held, so print
+    an empty listing rather than starting a daemon just to ask it: a caller
+    verifying live markers reads that as `none held', exactly right."""
+    c = connect(autostart=False)
+    if c is None:
+        print(json.dumps({"ok": True, "sessions": []}))
+        return 0
+    send_json(c, {"cmd": "list"})
+    line, _ = recv_line(c)
+    c.close()
+    print(json.dumps(json.loads(line) if line else {}, indent=2))
     return 0
 
 

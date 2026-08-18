@@ -175,7 +175,7 @@ if [ -f "$rmarker" ]; then ok "resume seeds the marker without a stream"; else b
 "$broker" stop "$rsid" >/dev/null 2>&1
 
 # 9. version prints without needing the daemon (used for the install check).
-if [ "$("$broker" version)" = "6" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
+if [ "$("$broker" version)" = "7" ]; then ok "version prints the protocol version"; else bad "version wrong"; fi
 
 # 10. Auto-start prefers a `systemd-run --user' unit (so the daemon lives under
 #     user@UID.service, not the SSH login's session scope that logout kills)
@@ -269,6 +269,21 @@ else
   ok "stop with no daemon fails fast, starts nothing"
 fi
 rm -rf "$stopdir"
+
+# 13. `list' with no daemon answers an empty held set (exit 0) and starts
+#     nothing: a marker verifier reads that as "none held", exactly right.
+listdir=$(mktemp -d)
+listout=$(XDG_RUNTIME_DIR="$listdir" "$broker" list 2>/dev/null)
+if [ "$?" != "0" ]; then
+  bad "list with no daemon should exit 0"
+elif ! printf '%s' "$listout" | grep -q '"sessions": \[\]'; then
+  bad "list with no daemon should answer an empty held set: $listout"
+elif [ -e "$listdir/sprig-broker/control.sock" ]; then
+  bad "list started a daemon it should not have"
+else
+  ok "list with no daemon answers empty, starts nothing"
+fi
+rm -rf "$listdir"
 
 echo
 if [ "$fail" = "0" ]; then echo "ALL PASS"; else echo "FAILURES"; fi

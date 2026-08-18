@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.48.0
+;; Version: 0.49.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -143,7 +143,7 @@ the broker script would otherwise be missing.  Set this to a path to ship a
 different script, for instance your working copy while iterating on it."
   :type '(choice (const :tag "Embedded copy" nil) (file :tag "Broker script")))
 
-(defconst sprig-broker-version "6"
+(defconst sprig-broker-version "7"
   "Broker wire-protocol version sprig expects.
 Mirrors the `VERSION' constant in the broker script; a host whose installed
 broker reports a different value is reinstalled before use.")
@@ -750,7 +750,7 @@ import time
 # Bumped when the wire protocol or install path changes, so Sprig can tell a
 # stale remote copy from a current one and reinstall.  Mirrored in sprig.el as
 # `sprig-broker-version'.
-VERSION = \"6\"
+VERSION = \"7\"
 
 
 # --- paths -----------------------------------------------------------------
@@ -1393,7 +1393,17 @@ def cmd_spawn(a):
 
 
 def cmd_list(a):
-    print(json.dumps(request({\"cmd\": \"list\"}), indent=2))
+    \"\"\"List held sessions.  With no daemon running nothing is held, so print
+    an empty listing rather than starting a daemon just to ask it: a caller
+    verifying live markers reads that as `none held', exactly right.\"\"\"
+    c = connect(autostart=False)
+    if c is None:
+        print(json.dumps({\"ok\": True, \"sessions\": []}))
+        return 0
+    send_json(c, {\"cmd\": \"list\"})
+    line, _ = recv_line(c)
+    c.close()
+    print(json.dumps(json.loads(line) if line else {}, indent=2))
     return 0
 
 
@@ -4253,11 +4263,12 @@ re-render off the disk and off SSH (see `sprig--status-scan-cache')."
       (let ((rows (let ((sprig-remotes (list host))) (sprig--scan-session-logs))))
         (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
               (cons (current-time) rows))
-        ;; The async scan reattaches held sessions from its sentinel; this
-        ;; synchronous first read must do the same, or a broker-held (or
-        ;; stale-marked) local session sits unprobed until something later
-        ;; happens to trigger an async re-scan.
+        ;; The async scan reattaches held sessions from its sentinel and
+        ;; verifies their markers; this synchronous first read must do the
+        ;; same, or a broker-held (or stale-marked) local session sits
+        ;; unprobed and unverified until an async re-scan happens.
         (sprig--status-reattach-live host rows)
+        (sprig--status-verify-live host rows)
         rows)))))
 
 (defun sprig--status-scan-async (host)
@@ -4312,8 +4323,11 @@ mark, caches the parsed rows, and refreshes the open navigator."
                (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
                      (cons (current-time) rows))
                ;; Now that this host's rows are known, reattach any the broker
-               ;; still holds (see `sprig-status-auto-reattach').
-               (sprig--status-reattach-live host rows)))
+               ;; still holds (see `sprig-status-auto-reattach'), and verify
+               ;; the held claims themselves (a stranded marker must not show
+               ;; a dead session as running; see `sprig--status-verify-live').
+               (sprig--status-reattach-live host rows)
+               (sprig--status-verify-live host rows)))
            (when (buffer-live-p (process-buffer p))
              (kill-buffer (process-buffer p)))
            (sprig--status-render-if-live)))))))
@@ -4339,6 +4353,82 @@ not only written to disk beside the log."
       (dolist (row (cddr cell))
         (when (equal (plist-get row :session) session)
           (plist-put row :starred starred))))))
+
+(defun sprig--status-scan-cache-set-live (host session live)
+  "Set the LIVE flag on HOST's cached scan row for SESSION, if cached.
+A marker proven stale is removed from disk, but the cached row would keep
+saying held until the next background scan; patching the cache lets the
+repaint show the truth at once (compare `sprig--status-scan-cache-set-star')."
+  (let ((cell (assoc (cons host (sprig--projects-directory))
+                     sprig--status-scan-cache)))
+    (when cell
+      (dolist (row (cddr cell))
+        (when (equal (plist-get row :session) session)
+          (plist-put row :live live))))))
+
+(defun sprig--verify-live-apply (host rows json)
+  "Reconcile ROWS' `:live' flags against the broker's `list' answer JSON.
+Every `:live' row whose session the broker does not name is stale: its
+marker is removed on HOST, its cached row downgraded, and non-nil returned
+so the caller repaints.  A JSON that does not parse to an `ok' listing
+proves nothing and changes nothing (nil).  The held set is matched on the
+broker's `cli_session_id', the same id the marker and the log carry."
+  (let* ((data (ignore-errors
+                 (json-parse-string json :object-type 'alist
+                                    :null-object nil)))
+         (ok (and data (eq (alist-get 'ok data) t)))
+         (held (and ok (mapcar (lambda (s) (alist-get 'cli_session_id s))
+                               (append (alist-get 'sessions data) nil))))
+         (changed nil))
+    (when ok
+      (dolist (row rows)
+        (let ((id (plist-get row :session)))
+          (when (and (plist-get row :live) id (not (member id held)))
+            (sprig--remove-live-marker id host)
+            (sprig--status-scan-cache-set-live host id nil)
+            (setq changed t)))))
+    changed))
+
+(defun sprig--status-verify-live (host rows)
+  "Check HOST's broker really holds ROWS' `:live' sessions, in the background.
+The scan takes a `<id>.sprig-live' marker on faith, but a daemon that died
+without cleanup (a machine restart) strands its markers, and a dead session
+then shows as running for good.  So one `list' query asks the broker what
+it actually holds, and `sprig--verify-live-apply' cleans up any row it
+cannot vouch for.  The broker's `list' answers an empty set without
+starting a daemon when none runs; a transport failure exits nonzero,
+proving nothing, and nothing is touched.  A no-op when no row claims to be
+live or the broker does not cover HOST."
+  (when (and (seq-some (lambda (r) (plist-get r :live)) rows)
+             (if host (sprig--broker-remote-p) (sprig--broker-local-p)))
+    (let* ((buffer (generate-new-buffer " *sprig-broker-list*"))
+           (proc
+            (if host
+                (apply #'start-process "sprig-broker-list" buffer
+                       sprig-ssh-program
+                       (append sprig-ssh-args
+                               (list host
+                                     (concat "python3 "
+                                             (sprig--remote-dir-arg
+                                              sprig-broker-remote-path)
+                                             " list"))))
+              (let ((process-environment
+                     (cons (concat "XDG_RUNTIME_DIR="
+                                   (sprig--broker-local-runtime-dir))
+                           process-environment)))
+                (start-process "sprig-broker-list" buffer
+                               "python3" (sprig--broker-local-path) "list")))))
+      (set-process-query-on-exit-flag proc nil)
+      (set-process-sentinel
+       proc
+       (lambda (p _event)
+         (when (memq (process-status p) '(exit signal))
+           (let ((buf (process-buffer p)))
+             (when (and (eq (process-exit-status p) 0) (buffer-live-p buf))
+               (when (sprig--verify-live-apply
+                      host rows (with-current-buffer buf (buffer-string)))
+                 (sprig--status-render-if-live)))
+             (when (buffer-live-p buf) (kill-buffer buf)))))))))
 
 (defun sprig--status-collect ()
   "Return status plists for all branches, grouped by the host they run on.

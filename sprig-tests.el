@@ -1351,6 +1351,43 @@ claude"
       (sprig--status-revert))
     (should-not sprig--status-reattach-attempted)))
 
+(ert-deftest sprig-test-verify-live-cleans-what-the-broker-disowns ()
+  ;; The broker's `list' answer is the truth about held sessions: a :live row
+  ;; it does not name loses its marker and its cached live flag, one it does
+  ;; name is untouched, and an answer that is not an ok listing changes
+  ;; nothing (a transport hiccup must not strip a genuinely held session).
+  (let* ((root (make-temp-file "sprigverify" t))
+         (pdir (expand-file-name "-p-a" root)))
+    (unwind-protect
+        (progn
+          (make-directory pdir)
+          (write-region "" nil (expand-file-name "DEAD1.sprig-live" pdir))
+          (write-region "" nil (expand-file-name "HELD1.sprig-live" pdir))
+          (let ((sprig-config-directory nil)
+                (sprig-claude-projects-directory root)
+                (rows (list (list :session "DEAD1" :live t)
+                            (list :session "HELD1" :live t)
+                            (list :session "COLD1" :live nil))))
+            ;; Not an ok listing: nothing changes.
+            (should-not (sprig--verify-live-apply nil rows "garbage"))
+            (should (file-exists-p (expand-file-name "DEAD1.sprig-live" pdir)))
+            ;; The broker vouches for HELD1 only: DEAD1 is cleaned, HELD1
+            ;; and the never-live COLD1 are untouched.
+            (should (sprig--verify-live-apply
+                     nil rows
+                     (concat "{\"ok\": true, \"sessions\": "
+                             "[{\"session\": \"s1-1\","
+                             " \"cli_session_id\": \"HELD1\"}]}")))
+            (should-not (file-exists-p
+                         (expand-file-name "DEAD1.sprig-live" pdir)))
+            (should (file-exists-p
+                     (expand-file-name "HELD1.sprig-live" pdir)))
+            ;; Nothing left to clean: a second pass reports no change.
+            (should-not (sprig--verify-live-apply
+                         nil (list (list :session "HELD1" :live t))
+                         "{\"ok\": true, \"sessions\": [{\"cli_session_id\": \"HELD1\"}]}"))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-remove-live-marker-clears-a-stale-one ()
   ;; A daemon that died without cleanup (machine restart) leaves `.sprig-live'
   ;; markers behind; removing by id clears every copy under the projects root
