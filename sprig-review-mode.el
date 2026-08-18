@@ -1,7 +1,7 @@
 ;;; sprig-review-mode.el --- Read-only review buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.32.0
+;; Version: 0.33.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -867,14 +867,28 @@ block still un-fontified, and re-arms), and re-arms while the queue holds more."
                      (setq sprig-review--fontify-buffers nil))))
       (when any
         (dolist (buf buffers)
-          (when (and (buffer-live-p buf) (get-buffer-window buf t))
+          (when (buffer-live-p buf)
             (with-current-buffer buf
               (when (derived-mode-p 'sprig-review-mode)
                 ;; Name the blocks that just gained faces so the incremental
                 ;; render redraws from the earliest of them, rather than
                 ;; keeping them all in the prefix and leaving them raw.
-                (setq sprig-review--fontify-fresh fresh)
-                (sprig-review--refresh)))))))
+                ;; Merged, not replaced: an earlier drain's set can still be
+                ;; waiting on a buffer that has not been shown in between.
+                (if sprig-review--fontify-fresh
+                    (maphash (lambda (k _)
+                               (puthash k t sprig-review--fontify-fresh))
+                             fresh)
+                  (setq sprig-review--fontify-fresh (copy-hash-table fresh)))
+                (if (get-buffer-window buf t)
+                    (sprig-review--refresh)
+                  ;; Off-screen (a reattached session seeded in the
+                  ;; background, say): skipping it outright would strand the
+                  ;; buffer raw for good, since its texts are now cached and
+                  ;; nothing later re-queues them.  Leave it dirty instead,
+                  ;; so `sprig-review--flush-when-shown' redraws it the
+                  ;; moment it is displayed and the blocks gain their faces.
+                  (setq sprig-review--dirty t))))))))
     (when sprig-review--fontify-queue
       (sprig-review--fontify-arm))))
 
