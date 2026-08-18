@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.45.0
+;; Version: 0.46.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -563,6 +563,44 @@ child), and the `claude' argv follows a `--'."
                              (expand-file-name sprig-config-directory))))
      (list "--")
      (sprig--base-args))))
+
+(defconst sprig--broker-not-held-re
+  "no broker running (session not held)\\|session not held by broker"
+  "Broker stderr that proves it does not hold the probed session.
+The first is the client failing fast with no daemon listening (a reboot
+took the daemon and its sessions); the second is a live daemon answering
+that the session is gone.  Either way the session's `.sprig-live' marker
+is stale.  A transport failure (ssh dying) prints neither and proves
+nothing, so it must not match.")
+
+(defun sprig--remove-live-marker (id host)
+  "Delete session ID's stale `.sprig-live' marker on HOST, best-effort.
+nil HOST is the local machine.  The broker removes the marker when a
+session ends, but a daemon that dies without cleanup (the machine
+restarted) leaves it behind, and nothing else ever removes it: the
+navigator would keep showing the session as held, a ghost row.  Called
+when a reattach probe has proven the marker stale (see
+`sprig--broker-not-held-re').  A remote marker is removed with one
+fire-and-forget ssh, so the caller (a process sentinel) never blocks."
+  (let ((name (concat id ".sprig-live")))
+    (if host
+        (ignore-errors
+          (apply #'start-process "sprig-marker-rm" nil sprig-ssh-program
+                 (append sprig-ssh-args
+                         (list host
+                               (concat "sh -c "
+                                       (shell-quote-argument
+                                        (format "find %s -name %s -delete 2>/dev/null; :"
+                                                (sprig--remote-dir-arg
+                                                 (directory-file-name
+                                                  (sprig--projects-directory)))
+                                                (shell-quote-argument name))))))))
+      (let ((root (expand-file-name (sprig--projects-directory))))
+        (when (file-directory-p root)
+          (dolist (f (directory-files-recursively
+                      root (concat "\\`" (regexp-quote id)
+                                   "\\.sprig-live\\'")))
+            (ignore-errors (delete-file f))))))))
 
 (defun sprig--broker-stop-session (id host)
   "Ask HOST's broker to stop held session ID; return non-nil when it did.
@@ -1896,8 +1934,19 @@ fresh session rather than fail.")
              ;; asked for it, so a message would only be noise.
              ((or deliberate (and (eq (process-status proc) 'exit)
                                   (zerop status)))
-              (unless (process-get proc :reattach-probe)
-                (message "sprig: session ended (%s)" (string-trim event))))
+              (if (not (process-get proc :reattach-probe))
+                  (message "sprig: session ended (%s)" (string-trim event))
+                ;; The probe never streamed, so the reattach did not land.
+                ;; When the broker itself answered that it does not hold the
+                ;; session, the live marker is proven stale (a reboot took
+                ;; the daemon, or it dropped the session) and nothing else
+                ;; ever removes it, so the navigator would show the session
+                ;; as held for good, a ghost.  Clean it up and re-render.  A
+                ;; transport failure proves nothing and leaves it alone.
+                (when (and err sprig--session-id
+                           (string-match-p sprig--broker-not-held-re err))
+                  (sprig--remove-live-marker sprig--session-id (sprig--remote))
+                  (sprig--status-refresh))))
              ;; Stale/foreign resume id: the session does not exist on this
              ;; host.  Drop it and reconnect fresh so the user is not stuck;
              ;; the new session's id replaces the stale one on init.  Only

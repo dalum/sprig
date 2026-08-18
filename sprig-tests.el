@@ -1341,6 +1341,44 @@ claude"
           (should (file-exists-p log)))       ; the log itself is untouched
       (delete-directory root t))))
 
+(ert-deftest sprig-test-remove-live-marker-clears-a-stale-one ()
+  ;; A daemon that died without cleanup (machine restart) leaves `.sprig-live'
+  ;; markers behind; removing by id clears every copy under the projects root
+  ;; and touches nothing else, so the ghost row goes and the log survives.
+  (let* ((root (make-temp-file "sprigghost" t))
+         (log (expand-file-name "-p-a/ID1.jsonl" root)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "-p-a" root))
+          (make-directory (expand-file-name "-p-b" root))
+          (write-region "" nil log)
+          (write-region "" nil (expand-file-name "-p-a/ID1.sprig-live" root))
+          (write-region "" nil (expand-file-name "-p-b/ID1.sprig-live" root))
+          (write-region "" nil (expand-file-name "-p-b/ID2.sprig-live" root))
+          (let ((sprig-config-directory nil)
+                (sprig-claude-projects-directory root))
+            (sprig--remove-live-marker "ID1" nil))
+          (should-not (file-exists-p
+                       (expand-file-name "-p-a/ID1.sprig-live" root)))
+          (should-not (file-exists-p
+                       (expand-file-name "-p-b/ID1.sprig-live" root)))
+          ;; Another session's marker and the log itself are untouched.
+          (should (file-exists-p (expand-file-name "-p-b/ID2.sprig-live" root)))
+          (should (file-exists-p log)))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-broker-not-held-re-matches-only-proof ()
+  ;; The stale-marker cleanup must fire on the broker's own two not-held
+  ;; answers and never on a transport failure, which proves nothing.
+  (should (string-match-p sprig--broker-not-held-re
+                          "sprig-broker: no broker running (session not held)\n"))
+  (should (string-match-p sprig--broker-not-held-re
+                          "sprig-broker: session not held by broker\n"))
+  (should-not (string-match-p sprig--broker-not-held-re
+                              "ssh: connect to host opal.local port 22: No route to host\n"))
+  (should-not (string-match-p sprig--broker-not-held-re
+                              "Connection closed by remote host\n")))
+
 (ert-deftest sprig-test-disconnect-stops-a-held-session ()
   ;; `d' on a broker-held row stops the session on its host (the broker closes
   ;; the child's stdin) rather than leaving it running detached, works without
