@@ -1341,6 +1341,16 @@ claude"
           (should (file-exists-p log)))       ; the log itself is untouched
       (delete-directory root t))))
 
+(ert-deftest sprig-test-status-revert-rearms-reattach ()
+  ;; `g' is the "show me what is there now" gesture, so it re-arms
+  ;; auto-reattach like a fresh open: an id in the attempted list (a failed
+  ;; probe, an earlier disconnect) gets one new try on the scan it triggers.
+  (let ((sprig--status-reattach-attempted (list "a" "b")))
+    (cl-letf (((symbol-function 'sprig--status-scan-invalidate) #'ignore)
+              ((symbol-function 'sprig--status-render) #'ignore))
+      (sprig--status-revert))
+    (should-not sprig--status-reattach-attempted)))
+
 (ert-deftest sprig-test-remove-live-marker-clears-a-stale-one ()
   ;; A daemon that died without cleanup (machine restart) leaves `.sprig-live'
   ;; markers behind; removing by id clears every copy under the projects root

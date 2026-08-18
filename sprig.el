@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.46.0
+;; Version: 0.47.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1910,6 +1910,13 @@ fresh session rather than fail.")
   (let ((buf (process-get proc :conv-buffer))
         (stderr-proc (process-get proc :stderr-proc)))
     (when (memq (process-status proc) '(exit signal))
+      ;; The stderr rides a separate pipe process, and this sentinel can run
+      ;; before that pipe's final chunk reaches its filter: a decision read
+      ;; off `:acc' now (the stale-resume detection, the stale live-marker
+      ;; cleanup) would then see nothing and silently skip.  Drain any
+      ;; pending output first, bounded, so `err' holds what was written.
+      (when (process-live-p stderr-proc)
+        (while (accept-process-output stderr-proc 0.05)))
       (let ((err (and stderr-proc (process-get stderr-proc :acc)))
             (status (process-exit-status proc))
             (deliberate (process-get proc :deliberate)))
@@ -2941,8 +2948,9 @@ An id lands here when a reattach is tried (so a failed one off a stale
 `<id>.sprig-live' marker is not retried on every background scan) and when
 you disconnect a session deliberately (a broker-held session's row stays
 `:live', so without the mark the next scan would quietly reconnect it and
-undo the disconnect).  Reset when `sprig-status' is opened afresh, which
-re-expresses attach-everything-held.")
+undo the disconnect).  Reset when `sprig-status' is opened afresh and on
+`g' (`sprig--status-revert'), both of which re-express
+attach-everything-held.")
 
 (defun sprig--reattach-session (dir id host)
   "Attach in the background to broker-held session ID on HOST, rooted at DIR.
@@ -5154,7 +5162,12 @@ interrupt with \\[sprig-status-interrupt], refresh with \\[revert-buffer]."
 (defun sprig--status-revert (&rest _)
   "Revert the navigator (the `g' / `revert-buffer' path), keeping previews.
 Drops the cached log scan first, so `g' always re-reads the disk: it is the
-explicit \"show me what is there now\" gesture, cache or no cache."
+explicit \"show me what is there now\" gesture, cache or no cache.  It
+re-arms auto-reattach the same way opening afresh does (see
+`sprig--status-reattach-attempted'): a probe that failed earlier gets one
+new try, so a broker that has since come back is picked up, and a stale
+marker gets another chance to be proven stale and cleaned."
+  (setq sprig--status-reattach-attempted nil)
   (sprig--status-scan-invalidate)
   (sprig--status-render))
 
