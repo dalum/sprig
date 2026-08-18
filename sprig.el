@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.47.0
+;; Version: 0.48.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -4253,6 +4253,11 @@ re-render off the disk and off SSH (see `sprig--status-scan-cache')."
       (let ((rows (let ((sprig-remotes (list host))) (sprig--scan-session-logs))))
         (setf (alist-get key sprig--status-scan-cache nil nil #'equal)
               (cons (current-time) rows))
+        ;; The async scan reattaches held sessions from its sentinel; this
+        ;; synchronous first read must do the same, or a broker-held (or
+        ;; stale-marked) local session sits unprobed until something later
+        ;; happens to trigger an async re-scan.
+        (sprig--status-reattach-live host rows)
         rows)))))
 
 (defun sprig--status-scan-async (host)
