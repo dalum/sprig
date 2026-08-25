@@ -18,10 +18,10 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'sprig)
-(require 'sprig-review)
+(require 'sprig-session)
 
 ;; Declared special so a test can dynamically bind the context thresholds,
-;; which live in `sprig-review-mode' and are not loaded by this suite.
+;; which live in `sprig-session-mode' and are not loaded by this suite.
 (defvar sprig-context-large-tokens)
 (defvar sprig-context-huge-tokens)
 
@@ -133,7 +133,7 @@
 (ert-deftest sprig-test-sink-tracks-compacting ()
   ;; Live state, not model state: a replayed log must not resurrect it.
   (with-temp-buffer
-    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+    (cl-letf (((symbol-function 'sprig-session-consume) #'ignore))
       (sprig--review-sink '(compacting t))
       (should sprig--compacting)
       (sprig--review-sink '(compacting nil))
@@ -141,13 +141,13 @@
 
 (ert-deftest sprig-test-sink-excludes-transport-from-consume ()
   ;; A control-request/response is transport, not conversation, and must not be
-  ;; consumed: consuming pushes onto `sprig-review--events', so an attach's
+  ;; consumed: consuming pushes onto `sprig-session--events', so an attach's
   ;; `initialize' ack (a control-response) alone would make a reattached buffer
   ;; non-pristine and suppress its background history seed.  Conversation events
   ;; still pass through.
   (with-temp-buffer
     (let ((consumed nil))
-      (cl-letf (((symbol-function 'sprig-review-consume)
+      (cl-letf (((symbol-function 'sprig-session-consume)
                  (lambda (ev) (push ev consumed)))
                 ((symbol-function 'sprig--status-refresh-soon) #'ignore)
                 ((symbol-function 'sprig--interrupt-receipt) #'ignore)
@@ -162,7 +162,7 @@
   ;; An interrupted compaction need never report a result, and a flag left
   ;; set would leave the line claiming one that stopped with the turn.
   (with-temp-buffer
-    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+    (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
               ((symbol-function 'sprig--status-render) #'ignore))
       (sprig--review-sink '(compacting t))
       (sprig--review-sink '(done nil nil))
@@ -172,7 +172,7 @@
   "`c q' holds a message mid-turn and sends nothing until `done'."
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
@@ -191,7 +191,7 @@
   ;; holding it would strand the message until some later turn happened to end.
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
@@ -206,7 +206,7 @@
   ;; into one message the agent reads as a single instruction.
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
@@ -229,7 +229,7 @@
   ;; for, or the transcript shows it sent into the turn it queued behind.
   (with-temp-buffer
     (let ((folded nil))
-      (cl-letf (((symbol-function 'sprig-review-consume)
+      (cl-letf (((symbol-function 'sprig-session-consume)
                  (lambda (event) (push (car-safe event) folded)))
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
@@ -245,7 +245,7 @@
   ;; `c i' with one queued reads as `stop, do this instead'.
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-interrupt) (lambda () "req-1"))
@@ -264,7 +264,7 @@
   ;; queue and nothing else, leaving the turn running.
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
@@ -290,7 +290,7 @@
   ;; and the survivor still flushes on the next `done'.
   (with-temp-buffer
     (let ((sent nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-render) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
@@ -323,7 +323,7 @@
 (ert-deftest sprig-test-teardown-drops-the-queue ()
   ;; The session is gone, so there is no turn left for the message to follow.
   (with-temp-buffer
-    (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+    (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
               ((symbol-function 'sprig--status-render) #'ignore))
       (setq-local sprig--busy t)
       (setq-local sprig--queued '("later"))
@@ -459,7 +459,7 @@ with an empty, actionless list."
   "Visiting a root starts a fresh session in it, pinned to the line's host;
 a local line (no host) pins to this machine rather than following a remote."
   (let (captured)
-    (cl-letf (((symbol-function 'sprig-review-session)
+    (cl-letf (((symbol-function 'sprig-session-session)
                (lambda (dir &optional id host &rest _)
                  (setq captured (list dir id host))))
               ((symbol-function 'sprig--status-refresh) #'ignore))
@@ -507,17 +507,17 @@ without this a refreshed `Agent' call would lose the work you just watched."
                         "\"message\":{\"role\":\"user\",\"content\":"
                         "[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_1\","
                         "\"content\":\"hello\"}]}}"))))
-    (should (equal (sprig-review-subagent-events "toolu_P" lines)
+    (should (equal (sprig-session-subagent-events "toolu_P" lines)
                    ;; The log stores input as an object; the model reads either
                    ;; spelling, so it is passed on as it lies.
                    '((subagent-call "toolu_P" "toolu_1" "Read"
                                     ((file_path . "/tmp/n.txt")))
                      (subagent-result "toolu_P" "toolu_1" nil "hello"))))
     ;; And they fold onto the row exactly as the live ones do.
-    (let* ((model (sprig-review-build
+    (let* ((model (sprig-session-build
                    (append '((tool-call "toolu_P" "Agent" "{}")
                              (tool-result "toolu_P" nil "done"))
-                           (sprig-review-subagent-events "toolu_P" lines))))
+                           (sprig-session-subagent-events "toolu_P" lines))))
            (steps (plist-get (plist-get (car (plist-get model :blocks)) :agent) :steps)))
       (should (equal (mapcar (lambda (s) (plist-get s :name)) steps) '("Read")))
       (should (equal (plist-get (plist-get (car steps) :result) :text) "hello")))))
@@ -526,16 +526,16 @@ without this a refreshed `Agent' call would lose the work you just watched."
   ;; Each task record carries its own subset, so a nil means `not carried',
   ;; never `clear it': a plain overwrite would drop the agent type that only
   ;; `task_started' names.
-  (should (equal (sprig-review--merge-plist
+  (should (equal (sprig-session--merge-plist
                   '(:status "running" :agent-type "Explore" :description "old")
                   '(:status "running" :agent-type nil :description "new"))
                  '(:status "running" :agent-type "Explore" :description "new")))
-  (should (equal (sprig-review--merge-plist nil '(:status "running"))
+  (should (equal (sprig-session--merge-plist nil '(:status "running"))
                  '(:status "running"))))
 
 (ert-deftest sprig-test-subagent-folds-onto-its-agent-call ()
   "Progress lands on the `Agent' row it runs under, and accumulates."
-  (let* ((model (sprig-review-build
+  (let* ((model (sprig-session-build
                  '((tool-call "toolu_A" "Agent" "{\"description\":\"find it\"}")
                    (subagent "toolu_A" (:status "running" :agent-type "Explore"
                                         :description "starting"))
@@ -552,24 +552,24 @@ without this a refreshed `Agent' call would lose the work you just watched."
 (ert-deftest sprig-test-agent-running-outlives-the-turn ()
   "A background agent still running is detected, so a done turn need not read
 as over while its work is in flight."
-  (let ((running (sprig-review-build
+  (let ((running (sprig-session-build
                   '((tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")
                     (subagent "toolu_A" (:status "running" :agent-type "Explore"))
                     (done nil nil))))
-        (finished (sprig-review-build
+        (finished (sprig-session-build
                    '((tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")
                      (subagent "toolu_A" (:status "running" :agent-type "Explore"))
                      (subagent "toolu_A" (:status "completed"))
                      (done nil nil)))))
     ;; Running while the turn is already done: the case the state line is for.
     (should (plist-get running :done))
-    (should (sprig-review-agent-running running))
+    (should (sprig-session-agent-running running))
     ;; Its notification closes it, and the turn reads as over again.
-    (should-not (sprig-review-agent-running finished))))
+    (should-not (sprig-session-agent-running finished))))
 
 (ert-deftest sprig-test-subagent-steps-nest-under-the-agent-call ()
   "A subagent's steps become tool blocks under the `Agent' row, not beside it."
-  (let* ((model (sprig-review-build
+  (let* ((model (sprig-session-build
                  '((text-block) (text "Off we go.")
                    (tool-call "toolu_P" "Agent" "{\"description\":\"find it\"}")
                    (subagent-call "toolu_P" "toolu_1" "Bash" "{\"command\":\"ls\"}")
@@ -594,7 +594,7 @@ as over while its work is in flight."
   ;; The replay path reads the steps from the subagent's own file and folds
   ;; them in after the whole transcript, so the `Agent' call already has its
   ;; result by then: a finder that skipped finished blocks would drop them all.
-  (let* ((model (sprig-review-build
+  (let* ((model (sprig-session-build
                  '((tool-call "toolu_P" "Agent" "{}")
                    (tool-result "toolu_P" nil "done")
                    (subagent-call "toolu_P" "toolu_1" "Read" "{\"file_path\":\"/tmp/n\"}")
@@ -607,7 +607,7 @@ as over while its work is in flight."
 (ert-deftest sprig-test-subagent-edit-gets-a-real-diff ()
   ;; A step is an ordinary tool block, so a subagent editing a file shows the
   ;; change the same way the main agent's edit does.
-  (let* ((model (sprig-review-build
+  (let* ((model (sprig-session-build
                  (list '(tool-call "toolu_P" "Agent" "{}")
                        (list 'subagent-call "toolu_P" "toolu_1" "Edit"
                              (json-serialize
@@ -619,7 +619,7 @@ as over while its work is in flight."
 (ert-deftest sprig-test-subagent-does-not-split-the-agent-prose ()
   ;; The subagent's narration is not the main agent speaking, so it must not
   ;; close the open text block and cut the main agent's prose in two.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 '((text-block) (text "I'll launch an agent. ")
                   (tool-call "toolu_A" "Agent" "{}")
                   (subagent "toolu_A" (:status "running" :description "working"))
@@ -630,15 +630,15 @@ as over while its work is in flight."
 
 (defun sprig-tests--incremental-model (chron)
   "Fold CHRON (chronological events) one at a time through the live memo.
-Returns the model `sprig-review--current-model' ends on, having taken the
+Returns the model `sprig-session--current-model' ends on, having taken the
 incremental fold path from the second event on."
   (with-temp-buffer
     (dolist (ev chron)
-      (push ev sprig-review--events)
+      (push ev sprig-session--events)
       ;; Build after each push, so all but the first fold continue the
       ;; running builder rather than restart it.
-      (sprig-review--current-model))
-    (sprig-review--current-model)))
+      (sprig-session--current-model))
+    (sprig-session--current-model)))
 
 (ert-deftest sprig-test-incremental-model-matches-full ()
   ;; The live buffer folds events into a running builder as they arrive; that
@@ -667,17 +667,17 @@ incremental fold path from the second event on."
             '((dialog "d1" "ask_user_question" "{\"question\":\"pick\"}")
               (dialog-answer "d1" ["yes"]) (text "ok"))))
     (should (equal (sprig-tests--incremental-model chron)
-                   (sprig-review-build chron)))))
+                   (sprig-session-build chron)))))
 
 (ert-deftest sprig-test-incremental-model-independent-copies ()
   ;; Each build is a value of its own: mutating a returned block must not
   ;; reach through the running builder into the next build.
   (with-temp-buffer
-    (push '(text "one") sprig-review--events)
-    (let ((first (sprig-review--current-model)))
+    (push '(text "one") sprig-session--events)
+    (let ((first (sprig-session--current-model)))
       (plist-put (car (plist-get first :blocks)) :text "TAMPERED")
-      (push '(user "two") sprig-review--events)
-      (let ((second (sprig-review--current-model)))
+      (push '(user "two") sprig-session--events)
+      (let ((second (sprig-session--current-model)))
         (should (equal (plist-get (car (plist-get second :blocks)) :text)
                        "one"))))))
 
@@ -981,7 +981,7 @@ agent's own work."
   ;; the next send would fork the parent again instead of continuing here.
   (with-temp-buffer
     (let ((sprig--session-id "parent-1") (sprig--fork-session t))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore))
         (sprig--review-sink '(session "fork-2")))
       (should (equal sprig--session-id "fork-2"))
       (should-not sprig--fork-session)))
@@ -989,7 +989,7 @@ agent's own work."
   ;; every resume, and taking it again would be a no-op at best.
   (with-temp-buffer
     (let ((sprig--session-id "sess-1") (sprig--fork-session nil))
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore))
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore))
         (sprig--review-sink '(session "sess-1")))
       (should (equal sprig--session-id "sess-1")))))
 
@@ -1451,7 +1451,7 @@ claude"
       ;; A hand reconnect lifts the mark, so auto-reattach serves it again.
       (cl-letf (((symbol-function 'sprig--status-review-buffer)
                  (lambda (_) (current-buffer)))
-                ((symbol-function 'sprig-review-connect) #'ignore))
+                ((symbol-function 'sprig-session-connect) #'ignore))
         (with-temp-buffer
           (setq-local sprig--process nil)
           (sprig-status-connect)))
@@ -1708,23 +1708,23 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                    (list "-T" "-A" "me@host"
                          (concat "sh -c " (shell-quote-argument command)))))))
 
-;;;; Review model and diff engine (sprig-review.el)
+;;;; Review model and diff engine (sprig-session.el)
 
-(ert-deftest sprig-review-test-lines ()
+(ert-deftest sprig-session-test-lines ()
   ;; A trailing newline does not add a spurious final empty line.
-  (should (equal (sprig-review--lines "foo\nbar\n") '("foo" "bar")))
-  (should (equal (sprig-review--lines "foo\nbar") '("foo" "bar")))
+  (should (equal (sprig-session--lines "foo\nbar\n") '("foo" "bar")))
+  (should (equal (sprig-session--lines "foo\nbar") '("foo" "bar")))
   ;; A blank line inside the text is preserved.
-  (should (equal (sprig-review--lines "a\n\nb") '("a" "" "b")))
+  (should (equal (sprig-session--lines "a\n\nb") '("a" "" "b")))
   ;; Empty text is no lines, not one empty line.
-  (should (equal (sprig-review--lines "") nil))
-  (should (equal (sprig-review--lines nil) nil)))
+  (should (equal (sprig-session--lines "") nil))
+  (should (equal (sprig-session--lines nil) nil)))
 
-(ert-deftest sprig-review-test-edit-changes ()
+(ert-deftest sprig-session-test-edit-changes ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/x.el" :old_string "old\nline"
                        :new_string "new\nline\nhere")))
-         (changes (sprig-review-tool-changes "Edit" input))
+         (changes (sprig-session-tool-changes "Edit" input))
          (change (car changes)))
     (should (= (length changes) 1))
     (should (equal (plist-get change :file) "/tmp/x.el"))
@@ -1733,47 +1733,47 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
       (should (equal (plist-get hunk :old) '("old" "line")))
       (should (equal (plist-get hunk :new) '("new" "line" "here"))))
     ;; +3 / -2.
-    (should (equal (sprig-review-change-stat change) '(3 . 2)))))
+    (should (equal (sprig-session-change-stat change) '(3 . 2)))))
 
-(ert-deftest sprig-review-test-edit-replace-all ()
+(ert-deftest sprig-session-test-edit-replace-all ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/x.el" :old_string "a"
                        :new_string "b" :replace_all t)))
-         (hunk (car (plist-get (car (sprig-review-tool-changes "Edit" input))
+         (hunk (car (plist-get (car (sprig-session-tool-changes "Edit" input))
                                :hunks))))
     (should (eq (plist-get hunk :replace-all) t))))
 
-(ert-deftest sprig-review-test-multiedit-changes ()
+(ert-deftest sprig-session-test-multiedit-changes ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/x.el"
                        :edits (vector (list :old_string "a" :new_string "b")
                                       (list :old_string "c" :new_string "d")))))
-         (change (car (sprig-review-tool-changes "MultiEdit" input))))
+         (change (car (sprig-session-tool-changes "MultiEdit" input))))
     (should (= (length (plist-get change :hunks)) 2))
     (should (equal (plist-get (nth 1 (plist-get change :hunks)) :old) '("c")))))
 
-(ert-deftest sprig-review-test-write-changes ()
+(ert-deftest sprig-session-test-write-changes ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/new.el" :content "line1\nline2\n")))
-         (change (car (sprig-review-tool-changes "Write" input))))
+         (change (car (sprig-session-tool-changes "Write" input))))
     (should (eq (plist-get change :kind) 'write))
     (let ((hunk (car (plist-get change :hunks))))
       ;; A write has no removals, only additions.
       (should (null (plist-get hunk :old)))
       (should (equal (plist-get hunk :new) '("line1" "line2"))))
-    (should (equal (sprig-review-change-stat change) '(2 . 0)))))
+    (should (equal (sprig-session-change-stat change) '(2 . 0)))))
 
-(ert-deftest sprig-review-test-non-file-tool ()
-  (should (null (sprig-review-tool-changes
+(ert-deftest sprig-session-test-non-file-tool ()
+  (should (null (sprig-session-tool-changes
                  "Bash" (json-serialize (list :command "ls")))))
   ;; A file tool missing its path yields no change rather than an error.
-  (should (null (sprig-review-tool-changes "Edit" "{}"))))
+  (should (null (sprig-session-tool-changes "Edit" "{}"))))
 
-(ert-deftest sprig-review-test-format-change ()
+(ert-deftest sprig-session-test-format-change ()
   (let* ((input (json-serialize
                  (list :file_path "x" :old_string "a\nb" :new_string "c")))
-         (change (car (sprig-review-tool-changes "Edit" input))))
-    (should (equal (sprig-review-format-change change)
+         (change (car (sprig-session-tool-changes "Edit" input))))
+    (should (equal (sprig-session-format-change change)
                    "x\n-a\n-b\n+c"))))
 
 ;;;; Courier
@@ -1863,7 +1863,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
 
 ;;;; Ground-truth diff parser
 
-(ert-deftest sprig-review-test-parse-diff-modified ()
+(ert-deftest sprig-session-test-parse-diff-modified ()
   "A modified file yields an `edit' change with one hunk per change run."
   (let* ((diff (concat "diff --git a/x.el b/x.el\n"
                        "index abc..def 100644\n"
@@ -1874,7 +1874,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "-old\n"
                        "+new\n"
                        " tail\n"))
-         (changes (sprig-review-parse-diff diff))
+         (changes (sprig-session-parse-diff diff))
          (change (car changes)))
     (should (= (length changes) 1))
     (should (equal (plist-get change :file) "x.el"))
@@ -1884,20 +1884,20 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
       ;; Context lines are dropped, matching the tool-payload model.
       (should (equal (plist-get hunk :old) '("old")))
       (should (equal (plist-get hunk :new) '("new"))))
-    (should (equal (sprig-review-change-stat change) '(1 . 1)))))
+    (should (equal (sprig-session-change-stat change) '(1 . 1)))))
 
-(ert-deftest sprig-review-test-parse-diff-splits-runs ()
+(ert-deftest sprig-session-test-parse-diff-splits-runs ()
   "Two change runs separated by context in one hunk become two hunks."
   (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
                        "@@ -1,6 +1,6 @@\n a\n-b\n+B\n c\n d\n-e\n+E\n f\n"))
-         (hunks (plist-get (car (sprig-review-parse-diff diff)) :hunks)))
+         (hunks (plist-get (car (sprig-session-parse-diff diff)) :hunks)))
     (should (= (length hunks) 2))
     (should (equal (plist-get (nth 0 hunks) :old) '("b")))
     (should (equal (plist-get (nth 0 hunks) :new) '("B")))
     (should (equal (plist-get (nth 1 hunks) :old) '("e")))
     (should (equal (plist-get (nth 1 hunks) :new) '("E")))))
 
-(ert-deftest sprig-review-test-parse-diff-new-file ()
+(ert-deftest sprig-session-test-parse-diff-new-file ()
   "A new file is a `write': /dev/null old side, all lines added."
   (let* ((diff (concat "diff --git a/n.el b/n.el\n"
                        "new file mode 100644\n"
@@ -1905,72 +1905,72 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "--- /dev/null\n"
                        "+++ b/n.el\n"
                        "@@ -0,0 +1,2 @@\n+line1\n+line2\n"))
-         (change (car (sprig-review-parse-diff diff)))
+         (change (car (sprig-session-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
     (should (equal (plist-get change :file) "n.el"))
     (should (eq (plist-get change :kind) 'write))
     (should (null (plist-get hunk :old)))
     (should (equal (plist-get hunk :new) '("line1" "line2")))
-    (should (equal (sprig-review-change-stat change) '(2 . 0)))))
+    (should (equal (sprig-session-change-stat change) '(2 . 0)))))
 
-(ert-deftest sprig-review-test-parse-diff-deleted-file ()
+(ert-deftest sprig-session-test-parse-diff-deleted-file ()
   "A deleted file is an `edit' with a nil new side (a pure deletion)."
   (let* ((diff (concat "diff --git a/d.el b/d.el\n"
                        "deleted file mode 100644\n"
                        "--- a/d.el\n"
                        "+++ /dev/null\n"
                        "@@ -1,2 +0,0 @@\n-line1\n-line2\n"))
-         (change (car (sprig-review-parse-diff diff)))
+         (change (car (sprig-session-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
     (should (equal (plist-get change :file) "d.el"))
     (should (eq (plist-get change :kind) 'edit))
     (should (equal (plist-get hunk :old) '("line1" "line2")))
     (should (null (plist-get hunk :new)))
-    (should (equal (sprig-review-change-stat change) '(0 . 2)))))
+    (should (equal (sprig-session-change-stat change) '(0 . 2)))))
 
-(ert-deftest sprig-review-test-parse-diff-multi-file ()
+(ert-deftest sprig-session-test-parse-diff-multi-file ()
   "Each `diff --git' header starts a fresh file."
   (let* ((diff (concat "diff --git a/one b/one\n--- a/one\n+++ b/one\n"
                        "@@ -1 +1 @@\n-a\n+A\n"
                        "diff --git a/two b/two\n--- a/two\n+++ b/two\n"
                        "@@ -1 +1 @@\n-b\n+B\n"))
-         (changes (sprig-review-parse-diff diff)))
+         (changes (sprig-session-parse-diff diff)))
     (should (equal (mapcar (lambda (c) (plist-get c :file)) changes)
                    '("one" "two")))))
 
-(ert-deftest sprig-review-test-parse-diff-content-looks-like-header ()
+(ert-deftest sprig-session-test-parse-diff-content-looks-like-header ()
   "A removed/added line reading `--- '/`+++ ' is content, not a header.
 Position disambiguates: once inside a hunk a `-'/`+' line is a change."
   (let* ((diff (concat "diff --git a/md b/md\n--- a/md\n+++ b/md\n"
                        "@@ -1,2 +1,2 @@\n"
                        "---- old rule\n"          ; a removed line "--- old rule"
                        "++++ new rule\n"))        ; an added line "+++ new rule"
-         (change (car (sprig-review-parse-diff diff)))
+         (change (car (sprig-session-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
-    (should (= (length (sprig-review-parse-diff diff)) 1))
+    (should (= (length (sprig-session-parse-diff diff)) 1))
     (should (equal (plist-get change :file) "md"))
     (should (equal (plist-get hunk :old) '("--- old rule")))
     (should (equal (plist-get hunk :new) '("+++ new rule")))))
 
-(ert-deftest sprig-review-test-parse-diff-binary-skipped ()
+(ert-deftest sprig-session-test-parse-diff-binary-skipped ()
   "Binary files carry no hunks and are dropped."
   (let ((diff (concat "diff --git a/img.png b/img.png\n"
                       "Binary files a/img.png and b/img.png differ\n")))
-    (should (null (sprig-review-parse-diff diff)))))
+    (should (null (sprig-session-parse-diff diff)))))
 
-(ert-deftest sprig-review-test-parse-diff-empty ()
-  (should (null (sprig-review-parse-diff "")))
-  (should (null (sprig-review-parse-diff nil))))
+(ert-deftest sprig-session-test-parse-diff-empty ()
+  (should (null (sprig-session-parse-diff "")))
+  (should (null (sprig-session-parse-diff nil))))
 
-(ert-deftest sprig-review-test-parse-diff-round-trips-format ()
+(ert-deftest sprig-session-test-parse-diff-round-trips-format ()
   "Parsing then formatting a single-run edit matches the payload path."
   (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
                        "@@ -1,2 +1,1 @@\n-a\n-b\n+c\n"))
-         (change (car (sprig-review-parse-diff diff))))
-    (should (equal (sprig-review-format-change change) "x\n-a\n-b\n+c"))))
+         (change (car (sprig-session-parse-diff diff))))
+    (should (equal (sprig-session-format-change change) "x\n-a\n-b\n+c"))))
 
-(ert-deftest sprig-review-test-build-coalesces-text ()
-  (let* ((model (sprig-review-build
+(ert-deftest sprig-session-test-build-coalesces-text ()
+  (let* ((model (sprig-session-build
                  '((session "s1") (text "Hello, ") (text "world")
                    (done 0.01 nil))))
          (blocks (plist-get model :blocks)))
@@ -1981,14 +1981,14 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
     (should (= (length blocks) 1))
     (should (equal (plist-get (car blocks) :text) "Hello, world"))))
 
-(ert-deftest sprig-review-test-build-context-latest-wins ()
+(ert-deftest sprig-session-test-build-context-latest-wins ()
   ;; The model tracks the freshest turn's context size, so the header shows
   ;; what the window holds now, not what it held at the first turn.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 '((context 1000) (text "a") (context 5000) (done 0.01 nil)))))
     (should (equal (plist-get model :context) 5000))))
 
-(ert-deftest sprig-review-test-record-usage-becomes-context ()
+(ert-deftest sprig-session-test-record-usage-becomes-context ()
   ;; A replayed assistant record carries its token usage; the whole prompt
   ;; (input + cache read + cache creation) is the context in use.
   (let* ((line (json-serialize
@@ -1999,33 +1999,33 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                                          :cache_read_input_tokens 199000
                                          :cache_creation_input_tokens 1000
                                          :output_tokens 50)))))
-         (model (sprig-review-build (sprig-review-parse-session-line line))))
+         (model (sprig-session-build (sprig-session-parse-session-line line))))
     (should (equal (plist-get model :context) (+ 3 199000 1000)))))
 
-(ert-deftest sprig-review-test-compact-boundary-becomes-context ()
+(ert-deftest sprig-session-test-compact-boundary-becomes-context ()
   ;; A replayed compaction boundary reports its post-compact size, so a
   ;; refreshed log shows the shrunk context without waiting for a new turn.
   (let* ((line (json-serialize
                 (list :type "system" :subtype "compact_boundary"
                       :compactMetadata (list :preTokens 398861
                                              :postTokens 5457))))
-         (model (sprig-review-build (sprig-review-parse-session-line line))))
+         (model (sprig-session-build (sprig-session-parse-session-line line))))
     (should (equal (plist-get model :context) 5457))))
 
-(ert-deftest sprig-review-test-build-text-block-splits ()
+(ert-deftest sprig-session-test-build-text-block-splits ()
   (let ((blocks (plist-get
-                 (sprig-review-build
+                 (sprig-session-build
                   '((text "one") (text-block) (text "two")))
                  :blocks)))
     (should (= (length blocks) 2))
     (should (equal (plist-get (nth 0 blocks) :text) "one"))
     (should (equal (plist-get (nth 1 blocks) :text) "two"))))
 
-(ert-deftest sprig-review-test-build-pairs-tool-result ()
+(ert-deftest sprig-session-test-build-pairs-tool-result ()
   (let* ((input (json-serialize (list :file_path "x" :old_string "a"
                                       :new_string "b")))
          (blocks (plist-get
-                  (sprig-review-build
+                  (sprig-session-build
                    `((tool-call "t1" "Edit" ,input)
                      (tool-result "t1" nil "done")))
                   :blocks))
@@ -2039,25 +2039,25 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
     (should (equal (plist-get (plist-get tool :result) :text) "done"))
     (should (null (plist-get (plist-get tool :result) :error)))))
 
-(ert-deftest sprig-review-test-build-orphan-result ()
+(ert-deftest sprig-session-test-build-orphan-result ()
   ;; A result with no matching call is kept, not dropped.
   (let ((blocks (plist-get
-                 (sprig-review-build '((tool-result "t9" t "boom")))
+                 (sprig-session-build '((tool-result "t9" t "boom")))
                  :blocks)))
     (should (= (length blocks) 1))
     (should (equal (plist-get (plist-get (car blocks) :result) :text) "boom"))
     (should (eq (plist-get (plist-get (car blocks) :result) :error) t))))
 
-;;;; Stored-session log parser (sprig-review.el)
+;;;; Stored-session log parser (sprig-session.el)
 
-(ert-deftest sprig-review-test-session-path ()
-  (should (equal (sprig-review-session-file "/home/dalum/Projects/sprig" "abc")
+(ert-deftest sprig-session-test-session-path ()
+  (should (equal (sprig-session-session-file "/home/dalum/Projects/sprig" "abc")
                  "~/.claude/projects/-home-dalum-Projects-sprig/abc.jsonl"))
   ;; Dots become dashes too, matching the CLI's project-dir naming.
-  (should (equal (sprig-review-session-file "/home/x/.cache/p" "id")
+  (should (equal (sprig-session-session-file "/home/x/.cache/p" "id")
                  "~/.claude/projects/-home-x--cache-p/id.jsonl")))
 
-(ert-deftest sprig-review-test-session-parse-assistant ()
+(ert-deftest sprig-session-test-session-parse-assistant ()
   (let* ((line (json-serialize
                 (list :type "assistant"
                       :message
@@ -2067,7 +2067,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                                     (list :type "text" :text "hello")
                                     (list :type "tool_use" :id "t1" :name "Bash"
                                           :input (list :command "ls")))))))
-         (events (sprig-review-parse-session-line line)))
+         (events (sprig-session-parse-session-line line)))
     (should (equal (nth 0 events) '(thinking "hmm")))
     (should (equal (nth 1 events) '(text "hello")))
     (let ((tc (nth 2 events)))
@@ -2075,9 +2075,9 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
       (should (equal (nth 2 tc) "Bash"))
       ;; The input passes through as the parsed object; the diff engine
       ;; reads it the same as a wire-path JSON string.
-      (should (null (sprig-review-tool-changes "Bash" (nth 3 tc)))))))
+      (should (null (sprig-session-tool-changes "Bash" (nth 3 tc)))))))
 
-(ert-deftest sprig-review-test-session-edit-changes ()
+(ert-deftest sprig-session-test-session-edit-changes ()
   (let* ((line (json-serialize
                 (list :type "assistant"
                       :message
@@ -2086,11 +2086,11 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                                           :input (list :file_path "a.el"
                                                        :old_string "x"
                                                        :new_string "y")))))))
-         (tc (car (sprig-review-parse-session-line line)))
-         (changes (sprig-review-tool-changes (nth 2 tc) (nth 3 tc))))
+         (tc (car (sprig-session-parse-session-line line)))
+         (changes (sprig-session-tool-changes (nth 2 tc) (nth 3 tc))))
     (should (equal (plist-get (car changes) :file) "a.el"))))
 
-(ert-deftest sprig-review-test-session-parse-user ()
+(ert-deftest sprig-session-test-session-parse-user ()
   (let ((prose (json-serialize
                 (list :type "user" :message (list :role "user" :content "do it"))))
         (result (json-serialize
@@ -2100,11 +2100,11 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                                                     :tool_use_id "t1"
                                                     :is_error :false
                                                     :content "ok")))))))
-    (should (equal (sprig-review-parse-session-line prose) '((user "do it"))))
-    (should (equal (sprig-review-parse-session-line result)
+    (should (equal (sprig-session-parse-session-line prose) '((user "do it"))))
+    (should (equal (sprig-session-parse-session-line result)
                    '((tool-result "t1" nil "ok"))))))
 
-(ert-deftest sprig-review-test-session-parse-user-text-blocks ()
+(ert-deftest sprig-session-test-session-parse-user-text-blocks ()
   ;; The CLI spells a user turn's prose either as a bare string or as a list
   ;; of `text' blocks, and picks per record.  Reading only the string form
   ;; drops the block-form turns, so a replayed session shows no user input.
@@ -2121,11 +2121,11 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                             (vector (list :type "tool_result" :tool_use_id "t1"
                                           :is_error :false :content "ok")
                                     (list :type "text" :text "now this")))))))
-    (should (equal (sprig-review-parse-session-line blocks) '((user "do it"))))
-    (should (equal (sprig-review-parse-session-line mixed)
+    (should (equal (sprig-session-parse-session-line blocks) '((user "do it"))))
+    (should (equal (sprig-session-parse-session-line mixed)
                    '((tool-result "t1" nil "ok") (user "now this"))))))
 
-(ert-deftest sprig-review-test-session-stamps-records ()
+(ert-deftest sprig-session-test-session-stamps-records ()
   ;; Every conversation record in the log carries its own timestamp, so a
   ;; replayed turn is dated from the log rather than from whenever it is read.
   (let ((prose (json-serialize
@@ -2134,23 +2134,23 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
         (reply (json-serialize
                 '(:type "assistant" :timestamp "2026-07-15T09:17:01.000Z"
                   :message (:content [(:type "text" :text "on it")])))))
-    (should (equal (sprig-review-parse-session-line prose)
+    (should (equal (sprig-session-parse-session-line prose)
                    '((time "2026-07-15T09:16:56.955Z") (user "do it"))))
-    (should (equal (sprig-review-parse-session-line reply)
+    (should (equal (sprig-session-parse-session-line reply)
                    '((time "2026-07-15T09:17:01.000Z") (text "on it")))))
   ;; A record carrying no conversation content leaves no stray `time' event
   ;; behind to misdate the next block.
   (let ((empty (json-serialize
                 '(:type "user" :timestamp "2026-07-15T09:16:56.955Z"
                   :message (:content [])))))
-    (should (null (sprig-review-parse-session-line empty))))
+    (should (null (sprig-session-parse-session-line empty))))
   ;; An unstamped record still parses.
   (let ((bare (json-serialize
                '(:type "user" :message (:role "user" :content "do it")))))
-    (should (equal (sprig-review-parse-session-line bare) '((user "do it"))))))
+    (should (equal (sprig-session-parse-session-line bare) '((user "do it"))))))
 
-(ert-deftest sprig-review-test-build-stamps-blocks ()
-  (let* ((model (sprig-review-build
+(ert-deftest sprig-session-test-build-stamps-blocks ()
+  (let* ((model (sprig-session-build
                  '((time "2026-07-15T09:00:00.000Z")
                    (user "q")
                    (time "2026-07-15T09:01:00.000Z")
@@ -2165,28 +2165,28 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
     (should (equal (plist-get (nth 1 blocks) :time) "2026-07-15T09:01:00.000Z"))
     (should (equal (plist-get (nth 2 blocks) :time) "2026-07-15T09:02:00.000Z")))
   ;; A `time' event opens no block of its own.
-  (should (null (plist-get (sprig-review-build '((time "2026-07-15T09:00:00.000Z")))
+  (should (null (plist-get (sprig-session-build '((time "2026-07-15T09:00:00.000Z")))
                            :blocks))))
 
-(ert-deftest sprig-review-test-session-parse-user-skips-empty-text ()
+(ert-deftest sprig-session-test-session-parse-user-skips-empty-text ()
   ;; An empty or whitespace-only text block is not a turn.
   (let ((blank (json-serialize
                 (list :type "user"
                       :message (list :content (vector (list :type "text"
                                                             :text "  \n")))))))
-    (should (null (sprig-review-parse-session-line blank)))))
+    (should (null (sprig-session-parse-session-line blank)))))
 
-(ert-deftest sprig-review-test-session-title-and-sidechain ()
+(ert-deftest sprig-session-test-session-title-and-sidechain ()
   (let ((title (json-serialize (list :type "ai-title" :aiTitle "My title")))
         (side (json-serialize
                (list :type "assistant" :isSidechain t
                      :message (list :content
                                     (vector (list :type "text" :text "sub")))))))
-    (should (equal (sprig-review-parse-session-line title) '((title "My title"))))
+    (should (equal (sprig-session-parse-session-line title) '((title "My title"))))
     ;; Subagent (sidechain) records are skipped.
-    (should (null (sprig-review-parse-session-line side)))))
+    (should (null (sprig-session-parse-session-line side)))))
 
-(ert-deftest sprig-review-test-session-model ()
+(ert-deftest sprig-session-test-session-model ()
   (let* ((lines (list
                  (json-serialize (list :type "ai-title" :aiTitle "T"))
                  (json-serialize (list :type "attachment" :foo 1)) ; bookkeeping, ignored
@@ -2195,7 +2195,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                   (list :type "assistant"
                         :message (list :content
                                        (vector (list :type "text" :text "yo")))))))
-         (model (sprig-review-session-model lines))
+         (model (sprig-session-session-model lines))
          (blocks (plist-get model :blocks)))
     (should (equal (plist-get model :title) "T"))
     (should (eq (plist-get (nth 0 blocks) :type) 'user))
@@ -2203,8 +2203,8 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
     (should (eq (plist-get (nth 1 blocks) :type) 'text))
     (should (equal (plist-get (nth 1 blocks) :text) "yo"))))
 
-(ert-deftest sprig-review-test-build-user-and-thinking ()
-  (let* ((model (sprig-review-build
+(ert-deftest sprig-session-test-build-user-and-thinking ()
+  (let* ((model (sprig-session-build
                  '((user "q") (thinking "t1") (thinking "t2")
                    (text "a") (title "X"))))
          (blocks (plist-get model :blocks)))
@@ -2217,26 +2217,26 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
 
 ;;;; Permission mode
 
-(ert-deftest sprig-review-test-parse-status-mode ()
+(ert-deftest sprig-session-test-parse-status-mode ()
   (with-temp-buffer
     (should (equal (sprig--claude-parse-line
                     (json-serialize (list :type "system" :subtype "status"
                                           :permissionMode "plan")))
                    '((mode "plan"))))))
 
-(ert-deftest sprig-review-test-session-user-mode ()
+(ert-deftest sprig-session-test-session-user-mode ()
   ;; A stored user record's permissionMode replays as a `mode' event.
-  (should (equal (sprig-review-parse-session-line
+  (should (equal (sprig-session-parse-session-line
                   (json-serialize (list :type "user" :permissionMode "plan"
                                         :message (list :content "go"))))
                  '((mode "plan") (user "go")))))
 
-(ert-deftest sprig-review-test-build-mode ()
-  (should (equal (plist-get (sprig-review-build '((mode "plan") (user "x")))
+(ert-deftest sprig-session-test-build-mode ()
+  (should (equal (plist-get (sprig-session-build '((mode "plan") (user "x")))
                             :mode)
                  "plan")))
 
-(ert-deftest sprig-review-test-control-request-wire-format ()
+(ert-deftest sprig-session-test-control-request-wire-format ()
   ;; Pin the exact set_permission_mode control_request shape verified
   ;; against the real CLI (it replies control_response success).
   (with-temp-buffer
@@ -2303,7 +2303,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
             (should sprig--process)       ; process not torn down
             ;; The turn ends normally; done clears busy and the timer.
             (cl-letf (((symbol-function 'sprig--status-render) #'ignore)
-                      ((symbol-function 'sprig-review-consume) #'ignore))
+                      ((symbol-function 'sprig-session-consume) #'ignore))
               (sprig--review-sink '(done nil nil)))
             (should-not sprig--busy)
             (should-not sprig--interrupt-timer))
@@ -2416,7 +2416,7 @@ dialog, and answered from there.  Returns the reply string."
         dialog sent)
     (cl-letf (((symbol-function 'process-send-string)
                (lambda (_proc s) (setq sent s)))
-              ((symbol-function 'sprig-review-consume)
+              ((symbol-function 'sprig-session-consume)
                (lambda (event) (when (eq (car event) 'dialog) (setq dialog event)))))
       (setq sprig--process 'dummy)
       (pcase event
@@ -2469,7 +2469,7 @@ whole of what the filter should do with it."
                                            :input (list :plan "# Do the thing\n\nSteps"
                                                         :planFilePath "/tmp/p.md")))))))
         dialog)
-    (cl-letf (((symbol-function 'sprig-review-consume)
+    (cl-letf (((symbol-function 'sprig-session-consume)
                (lambda (e) (when (eq (car e) 'dialog) (setq dialog e))))
               ;; Any prompt from the filter is the bug this replaced.
               ((symbol-function 'y-or-n-p)
@@ -2484,7 +2484,7 @@ whole of what the filter should do with it."
   "Approve or reject the offered plan; return the reply string."
   (let ((dialog (sprig-tests--offer-plan)) sent)
     (cl-letf (((symbol-function 'process-send-string) (lambda (_proc s) (setq sent s)))
-              ((symbol-function 'sprig-review-consume) #'ignore))
+              ((symbol-function 'sprig-session-consume) #'ignore))
       (setq sprig--process 'dummy)
       (if approve
           (sprig--review-approve-plan (nth 1 dialog))
@@ -2544,7 +2544,7 @@ whole of what the filter should do with it."
   (with-temp-buffer
     (let ((sprig-permission-function nil)
           consumed responded)
-      (cl-letf (((symbol-function 'sprig-review-consume)
+      (cl-letf (((symbol-function 'sprig-session-consume)
                  (lambda (event) (push event consumed)))
                 ((symbol-function 'sprig--send-control-response)
                  (lambda (&rest _) (setq responded t)))
@@ -2571,7 +2571,7 @@ whole of what the filter should do with it."
     (let ((sprig-permission-function #'always)
           sent dialog)
       (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
-                ((symbol-function 'sprig-review-consume)
+                ((symbol-function 'sprig-session-consume)
                  (lambda (e) (when (eq (car e) 'dialog) (setq dialog e)))))
         (setq sprig--process 'dummy)
         (pcase (sprig-tests--permission-request)
@@ -2583,7 +2583,7 @@ whole of what the filter should do with it."
     (let ((sprig-permission-function #'ignore)
           sent)
       (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
-                ((symbol-function 'sprig-review-consume) #'ignore))
+                ((symbol-function 'sprig-session-consume) #'ignore))
         (setq sprig--process 'dummy)
         (pcase (sprig-tests--permission-request)
           (`(control-request ,id ,req) (sprig--answer-control-request id req))))
@@ -2593,7 +2593,7 @@ whole of what the filter should do with it."
   (with-temp-buffer
     (let (sent consumed)
       (cl-letf (((symbol-function 'process-send-string) (lambda (_p s) (setq sent s)))
-                ((symbol-function 'sprig-review-consume)
+                ((symbol-function 'sprig-session-consume)
                  (lambda (e) (setq consumed e))))
         (setq sprig--process 'dummy)
         (sprig--review-allow-tool "req-b")
@@ -3006,7 +3006,7 @@ without a real SSH process."
     (setq-local sprig--sink #'sprig--review-sink
                 sprig--process 'dummy
                 sprig--busy t
-                sprig-review--events '((dialog "d1" "ask_user_question" nil)))
+                sprig-session--events '((dialog "d1" "ask_user_question" nil)))
     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
       (should (eq (sprig--session-status (current-buffer)) 'waiting)))))
 
@@ -3016,7 +3016,7 @@ without a real SSH process."
     (setq-local sprig--sink #'sprig--review-sink
                 sprig--process 'dummy
                 sprig--busy t
-                sprig-review--events '((dialog-answer "d1" "yes")
+                sprig-session--events '((dialog-answer "d1" "yes")
                                        (dialog "d1" "ask_user_question" nil)))
     (cl-letf (((symbol-function 'process-live-p) (lambda (_) t)))
       (should (eq (sprig--session-status (current-buffer)) 'streaming)))))
@@ -3028,7 +3028,7 @@ without a real SSH process."
     (setq-local sprig--sink #'sprig--review-sink
                 sprig--process nil
                 sprig--busy nil
-                sprig-review--events '((dialog "d1" "ask_user_question" nil)))
+                sprig-session--events '((dialog "d1" "ask_user_question" nil)))
     (should (eq (sprig--session-status (current-buffer)) 'disconnected))))
 
 (ert-deftest sprig-test-session-status-agent-outlives-the-turn ()
@@ -3038,8 +3038,8 @@ without a real SSH process."
     (setq-local sprig--sink #'sprig--review-sink
                 sprig--process 'dummy
                 sprig--busy nil
-                ;; Stored newest-first, as `sprig-review-consume' pushes them.
-                sprig-review--events
+                ;; Stored newest-first, as `sprig-session-consume' pushes them.
+                sprig-session--events
                 '((done nil nil)
                   (subagent "toolu_A" (:status "running" :agent-type "Explore"))
                   (tool-call "toolu_A" "Agent" "{\"description\":\"dig\"}")))
@@ -3052,7 +3052,7 @@ without a real SSH process."
     (setq-local sprig--sink #'sprig--review-sink
                 sprig--process 'dummy
                 sprig--busy nil
-                sprig-review--events
+                sprig-session--events
                 '((done nil nil)
                   (subagent "toolu_A" (:status "completed"))
                   (subagent "toolu_A" (:status "running" :agent-type "Explore"))
@@ -3073,7 +3073,7 @@ without a real SSH process."
             (setq-local sprig--sink #'sprig--review-sink
                         sprig--session-id "live-1"
                         sprig--working-dir "/tmp/proj"
-                        sprig-review--meta '(:title "Live one"))
+                        sprig-session--meta '(:title "Live one"))
             (let* ((rows (sprig--status-collect))
                    (e (seq-find (lambda (r) (equal (plist-get r :session) "live-1"))
                                 rows)))
@@ -3113,8 +3113,8 @@ without a real SSH process."
             (setq-local sprig--sink #'sprig--review-sink
                         sprig--session-id "live-2"
                         sprig--working-dir "/tmp/proj"
-                        sprig-review--meta nil
-                        sprig-review--events '((title "From events")))
+                        sprig-session--meta nil
+                        sprig-session--events '((title "From events")))
             (let* ((rows (sprig--status-collect))
                    (e (seq-find (lambda (r) (equal (plist-get r :session) "live-2"))
                                 rows)))
@@ -3136,8 +3136,8 @@ without a real SSH process."
             (setq-local sprig--sink #'sprig--review-sink
                         sprig--session-id "live-3"
                         sprig--working-dir "/tmp/proj"
-                        sprig-review--meta nil
-                        sprig-review--events nil)
+                        sprig-session--meta nil
+                        sprig-session--events nil)
             (let* ((rows (sprig--status-collect))
                    (e (seq-find (lambda (r) (equal (plist-get r :session) "live-3"))
                                 rows)))
@@ -3164,8 +3164,8 @@ without a real SSH process."
                         sprig--session-id "parent-id"
                         sprig--fork-session t
                         sprig--working-dir "/tmp/proj"
-                        sprig-review--meta nil
-                        sprig-review--events '((title "The fork")))
+                        sprig-session--meta nil
+                        sprig-session--events '((title "The fork")))
             (let* ((rows (sprig--status-collect))
                    ;; The fork owns a buffer; the original comes from its
                    ;; stored log, so it has none.
@@ -3293,7 +3293,7 @@ without a real SSH process."
                     sprig--session-id "stray-1"
                     sprig--remote-override "old@host"
                     sprig--working-dir "/home/me/p"
-                    sprig-review--meta '(:title "Stray one"))
+                    sprig-session--meta '(:title "Stray one"))
         (let* ((rows (sprig--status-collect))
                (e (seq-find (lambda (r) (equal (plist-get r :session) "stray-1"))
                             rows)))
@@ -3386,7 +3386,7 @@ without a real SSH process."
   ;; must not come back on the primary remote nor a remote row run locally.
   (let ((sprig-remotes '("me@host"))
         calls)
-    (cl-letf (((symbol-function 'sprig-review-session)
+    (cl-letf (((symbol-function 'sprig-session-session)
                (lambda (&rest args) (push args calls) (current-buffer))))
       (sprig--status-review-buffer '(:host "me@host" :dir "/p" :session "s1"))
       (sprig--status-review-buffer '(:host nil :dir "/p" :session "s2"))
@@ -3795,15 +3795,15 @@ without a real SSH process."
   ;; The one table the review buffer and the navigator both read, so their
   ;; state lines cannot drift.  An unknown state falls back to idle.
   (should (equal (sprig--state-parts 'streaming)
-                 '("▶" "working…" sprig-review-working)))
+                 '("▶" "working…" sprig-session-working)))
   (should (equal (sprig--state-parts 'agent)
-                 '("▶" "agent working…" sprig-review-working)))
+                 '("▶" "agent working…" sprig-session-working)))
   (should (equal (sprig--state-parts 'done)
-                 '("✓" "turn over" sprig-review-done)))
+                 '("✓" "turn over" sprig-session-done)))
   (should (equal (sprig--state-parts 'waiting)
-                 '("?" "waiting on you" sprig-review-waiting)))
+                 '("?" "waiting on you" sprig-session-waiting)))
   (should (equal (sprig--state-parts 'anything-else)
-                 '("●" "idle" sprig-review-idle))))
+                 '("●" "idle" sprig-session-idle))))
 
 (ert-deftest sprig-test-notable-mode ()
   ;; Only the modes worth flagging come back; the everyday ones are dropped.
@@ -3819,12 +3819,12 @@ without a real SSH process."
   ;; large mark, red past the very-large one, mirroring the review buffer.
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))
-    (should (eq (sprig--status-context-face 50000) 'sprig-review-context))
-    (should (eq (sprig--status-context-face 158400) 'sprig-review-context-large))
-    (should (eq (sprig--status-context-face 250000) 'sprig-review-context-huge)))
+    (should (eq (sprig--status-context-face 50000) 'sprig-session-context))
+    (should (eq (sprig--status-context-face 158400) 'sprig-session-context-large))
+    (should (eq (sprig--status-context-face 250000) 'sprig-session-context-huge)))
   ;; With the thresholds unbound (the review mode not loaded) there is nothing
   ;; to escalate to, so even a big count stays in the plain face.
-  (should (eq (sprig--status-context-face 999999) 'sprig-review-context)))
+  (should (eq (sprig--status-context-face 999999) 'sprig-session-context)))
 
 (ert-deftest sprig-test-events-preview-carries-state ()
   ;; The preview surfaces the model's outcome, context, and mode for the line.
@@ -4231,35 +4231,35 @@ without a real SSH process."
             (should (equal (plist-get (car rows) :session) "keep-1"))))
       (delete-directory root t))))
 
-(ert-deftest sprig-review-test-build-dialog-blocks ()
+(ert-deftest sprig-session-test-build-dialog-blocks ()
   ;; A question stands pending until an answer of the same id settles it, so
   ;; a rebuild (which every render does) still knows it was settled.
   (let* ((input '((questions . [((question . "Which?")
                                  (options . [((label . "A")) ((label . "B"))]))])))
-         (model (sprig-review-build
+         (model (sprig-session-build
                  `((dialog "req-1" "ask_user_question" ,input))))
          (block (car (plist-get model :blocks))))
     (should (eq (plist-get block :type) 'dialog))
     (should (equal (plist-get block :id) "req-1"))
     (should-not (plist-get block :answered))
-    (should (eq block (sprig-review-pending-dialog model))))
+    (should (eq block (sprig-session-pending-dialog model))))
   ;; Answered: settled, and no longer pending.
   (let* ((input '((questions . [((question . "Which?")
                                  (options . [((label . "A"))]))])))
-         (model (sprig-review-build
+         (model (sprig-session-build
                  `((dialog "req-1" "ask_user_question" ,input)
                    (dialog-answer "req-1" ((Which? . "A"))))))
          (block (car (plist-get model :blocks))))
     (should (plist-get block :answered))
     (should (equal (plist-get block :answers) '((Which? . "A"))))
-    (should-not (sprig-review-pending-dialog model)))
+    (should-not (sprig-session-pending-dialog model)))
   ;; Waved through: settled with nothing, and still not pending.
   (let* ((input '((questions . [((question . "Which?") (options . []))])))
-         (model (sprig-review-build
+         (model (sprig-session-build
                  `((dialog "req-1" "ask_user_question" ,input)
                    (dialog-answer "req-1" nil)))))
     (should (plist-get (car (plist-get model :blocks)) :answered))
-    (should-not (sprig-review-pending-dialog model))))
+    (should-not (sprig-session-pending-dialog model))))
 
 (ert-deftest sprig-test-user-question-does-not-block-the-filter ()
   ;; The control request is handled inside the process filter.  Prompting
@@ -4267,7 +4267,7 @@ without a real SSH process."
   ;; answered.  It must only hand the question over and return.
   (with-temp-buffer
     (let (consumed responded)
-      (cl-letf (((symbol-function 'sprig-review-consume)
+      (cl-letf (((symbol-function 'sprig-session-consume)
                  (lambda (event) (push event consumed)))
                 ((symbol-function 'sprig--send-control-response)
                  (lambda (&rest _) (setq responded t)))
@@ -4294,7 +4294,7 @@ without a real SSH process."
           sent consumed)
       (cl-letf (((symbol-function 'sprig--send-control-response)
                  (lambda (id response) (setq sent (list id response))))
-                ((symbol-function 'sprig-review-consume)
+                ((symbol-function 'sprig-session-consume)
                  (lambda (event) (setq consumed event))))
         (sprig--review-answer-dialog "req-1" input '((Which? . "A"))))
       (should (equal (car sent) "req-1"))
@@ -4309,7 +4309,7 @@ without a real SSH process."
     (let (sent)
       (cl-letf (((symbol-function 'sprig--send-control-response)
                  (lambda (_id response) (setq sent response)))
-                ((symbol-function 'sprig-review-consume) #'ignore))
+                ((symbol-function 'sprig-session-consume) #'ignore))
         (sprig--review-answer-dialog "req-1" '((questions . [])) nil))
       (should (equal sent '(:behavior "allow"))))))
 
@@ -4322,7 +4322,7 @@ without a real SSH process."
     (let (wrote staged delivered)
       (cl-letf (((symbol-function 'sprig--send-user)
                  (lambda (text) (setq wrote text)))
-                ((symbol-function 'sprig-review-stage-steer)
+                ((symbol-function 'sprig-session-stage-steer)
                  (lambda (text) (setq staged text)))
                 ((symbol-function 'sprig--review-deliver)
                  (lambda (&rest _) (setq delivered t))))

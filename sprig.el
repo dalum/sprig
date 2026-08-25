@@ -9,7 +9,7 @@
 
 ;; Sprig is an Emacs interface for reviewing and steering an LLM agent's
 ;; work.  You never edit a transcript: a conversation is a read-only,
-;; Magit-like review buffer (see sprig-review-mode.el and DESIGN.md), and
+;; Magit-like review buffer (see sprig-session-mode.el and DESIGN.md), and
 ;; the whole forest of them is driven from the `sprig-status' navigator.
 ;;
 ;; This file is the transport and the navigator; it owns no rendering.
@@ -26,8 +26,8 @@
 ;; as a JSONL log under ~/.claude/projects/<cwd>/<id>.jsonl on the host
 ;; where it runs, so sprig keeps no store of its own: history is replayed
 ;; from that log, and it survives an Emacs restart because the id names the
-;; file.  A review buffer owns its session outright (`sprig-review-session',
-;; `sprig-review-connect'); the transport routes its events to the review
+;; file.  A review buffer owns its session outright (`sprig-session-session',
+;; `sprig-session-connect'); the transport routes its events to the review
 ;; model and its verbs steer the session directly.
 ;;
 ;; Navigator: `sprig-status' lists every stored session on the host,
@@ -45,7 +45,7 @@
 (require 'tabulated-list)
 (require 'transient)                     ; the navigator's c / a dispatch menus
 (require 'iso8601)                       ; parse the log's own timestamps
-(require 'sprig-review)                  ; pure data layer; no magit-section
+(require 'sprig-session)                  ; pure data layer; no magit-section
 (eval-when-compile (require 'let-alist))
 
 (defgroup sprig nil
@@ -293,7 +293,7 @@ turn.")
   "Session id captured from the CLI, used for --resume.")
 (defvar-local sprig--fork-session nil
   "Non-nil while this buffer's session is still to be forked off its parent.
-Set by `sprig-review-session' for a fork, where `sprig--session-id' starts
+Set by `sprig-session-session' for a fork, where `sprig--session-id' starts
 out as the *parent's* id so the spawn resumes it; the added
 `--fork-session' then makes the CLI continue that history under an id of
 its own rather than writing to the parent's log.  Cleared as soon as the
@@ -337,7 +337,7 @@ nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
 (defvar-local sprig--courier nil
   "Human-authored edits waiting for the agent to courier to disk, newest first.
 Each entry is a plist (:file PATH :old STRING :new STRING) staged from a
-staging buffer (see `sprig-review-stage-dispatch').  When the agent then
+staging buffer (see `sprig-session-stage-dispatch').  When the agent then
 issues an edit on a matching file, `sprig--maybe-courier' allows it but
 replaces the tool input's strings with the staged pair via `updatedInput',
 so the human's bytes land whatever the agent proposed: a courier that
@@ -350,7 +350,7 @@ A review buffer that owns its session sets this to `sprig--review-sink' to
 fold the events into its model.  The default is a no-op, and its identity
 also marks a buffer as a session owner (see `sprig--owning-review-buffers'),
 so it must stay non-`sprig--review-sink' for a buffer that owns nothing.")
-(defvar-local sprig--connect-fn #'sprig-review-connect
+(defvar-local sprig--connect-fn #'sprig-session-connect
   "Command that (re)starts this buffer's session, called with a NO-PROMPT arg.
 Lets the transport reconnect a stale session without knowing the owner.")
 (defvar-local sprig--working-dir nil
@@ -1738,7 +1738,7 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; count, the context now in use.  Report it so the readout drops
          ;; from the pre-compact size at once, not on the next turn.
          ;; The stream names these in snake_case; the session log spells the
-         ;; same boundary in camelCase, which `sprig-review-session-record-events'
+         ;; same boundary in camelCase, which `sprig-session-session-record-events'
          ;; reads on replay.  Keep the two spellings with their own reader.
          ((and (equal .type "system") (equal .subtype "compact_boundary")
                .compact_metadata.post_tokens)
@@ -1940,7 +1940,7 @@ fresh session rather than fail.")
             ;; `done' through the sink to land it, so commit it here rather
             ;; than leave it pinned forever.  A clean turn end already
             ;; committed it on its `done'.
-            (sprig-review--commit-pending-steer)
+            (sprig-session--commit-pending-steer)
             (sprig--drop-queue "the session ended")
             (sprig--clear-interrupt)
             (sprig--status-refresh)
@@ -2293,19 +2293,19 @@ a prompt from inside the process filter holds the filter, and Emacs with
 it, so every other session's output would stall behind you deciding
 whether one call may run.  The whole REQ rides along, not just its input,
 the rendering wanting the tool's name too."
-  (sprig-review-consume (list 'dialog request-id "can_use_tool" req)))
+  (sprig-session-consume (list 'dialog request-id "can_use_tool" req)))
 
 (defun sprig--review-allow-tool (id)
   "Allow the tool call of dialog ID, this once."
   ;; Omit `updatedInput': absent means "run the call unchanged".
   (sprig--send-control-response id (list :behavior "allow"))
-  (sprig-review-consume (list 'dialog-answer id "allowed")))
+  (sprig-session-consume (list 'dialog-answer id "allowed")))
 
 (defun sprig--review-deny-tool (id)
   "Deny the tool call of dialog ID; the agent is told no and goes on."
   (sprig--send-control-response id (list :behavior "deny"
                                          :message "Denied in sprig"))
-  (sprig-review-consume (list 'dialog-answer id "denied")))
+  (sprig-session-consume (list 'dialog-answer id "denied")))
 
 (defun sprig--offer-plan (request-id input)
   "Put the ExitPlanMode plan in INPUT into the buffer, to be approved there.
@@ -2314,18 +2314,18 @@ and for one more: the plan was never on screen.  The prompt named its
 first line and the buffer showed a bare `ExitPlanMode' row, the plan text
 rendering nowhere, so approval was a yes to something unread.  As a dialog
 it renders in full, and is approved once it has been."
-  (sprig-review-consume (list 'dialog request-id "exit_plan_mode" input)))
+  (sprig-session-consume (list 'dialog request-id "exit_plan_mode" input)))
 
 (defun sprig--review-approve-plan (id)
   "Approve the plan of dialog ID: the agent leaves plan mode and starts work."
   (sprig--send-control-response id (list :behavior "allow"))
-  (sprig-review-consume (list 'dialog-answer id "approved")))
+  (sprig-session-consume (list 'dialog-answer id "approved")))
 
 (defun sprig--review-reject-plan (id feedback)
   "Reject the plan of dialog ID with FEEDBACK, which the agent re-plans against."
   (let ((message (if (string-empty-p feedback) "Plan rejected." feedback)))
     (sprig--send-control-response id (list :behavior "deny" :message message))
-    (sprig-review-consume (list 'dialog-answer id (concat "rejected: " message)))))
+    (sprig-session-consume (list 'dialog-answer id (concat "rejected: " message)))))
 
 (defun sprig--offer-user-question (request-id input)
   "Put the AskUserQuestion INPUT into the buffer, to be answered there.
@@ -2335,8 +2335,8 @@ output and Emacs itself, for as long as the question went unanswered; and
 the question deserves the buffer anyway, where the conversation it is
 about already is.  So it is handed over as a `dialog' event and stands
 pending until `sprig--review-answer-dialog' hears back (see
-`sprig-review-dialog-send')."
-  (sprig-review-consume (list 'dialog request-id "ask_user_question" input)))
+`sprig-session-dialog-send')."
+  (sprig-session-consume (list 'dialog request-id "ask_user_question" input)))
 
 (defun sprig--review-answer-dialog (id input answers)
   "Answer the pending dialog ID, whose tool INPUT gets ANSWERS.
@@ -2351,7 +2351,7 @@ which is how the CLI feeds them to the tool."
        (list :behavior "allow"
              :updatedInput (append input (list (cons 'answers answers))))
      (list :behavior "allow")))
-  (sprig-review-consume (list 'dialog-answer id answers)))
+  (sprig-session-consume (list 'dialog-answer id answers)))
 
 (defun sprig--mode-line-permission ()
   "Mode-line tag for this session's permission mode, or nil when unknown.
@@ -2370,39 +2370,39 @@ is visible without opening the header."
 ;; buffer is then attached (`sprig--review-buffer') so the in-flight turn
 ;; tees in live.
 
-(declare-function sprig-review-buffer "sprig-review-mode" (name))
-(declare-function sprig-review-seed "sprig-review-mode" (events &optional meta))
-(declare-function sprig-review-consume "sprig-review-mode" (event))
-(declare-function sprig-review-stage-steer "sprig-review-mode" (text))
-(declare-function sprig-review--commit-pending-steer "sprig-review-mode" ())
-(declare-function sprig-review-flush "sprig-review-mode" (&optional buffer))
-(declare-function sprig-review--schedule "sprig-review-mode" ())
-(declare-function sprig-review-set-remote "sprig-review-mode" (remote))
-(declare-function sprig-review-session-events "sprig-review" (lines))
-(declare-function sprig-review-interrupt "sprig-review-mode" ())
+(declare-function sprig-session-buffer "sprig-session-mode" (name))
+(declare-function sprig-session-seed "sprig-session-mode" (events &optional meta))
+(declare-function sprig-session-consume "sprig-session-mode" (event))
+(declare-function sprig-session-stage-steer "sprig-session-mode" (text))
+(declare-function sprig-session--commit-pending-steer "sprig-session-mode" ())
+(declare-function sprig-session-flush "sprig-session-mode" (&optional buffer))
+(declare-function sprig-session--schedule "sprig-session-mode" ())
+(declare-function sprig-session-set-remote "sprig-session-mode" (remote))
+(declare-function sprig-session-session-events "sprig-session" (lines))
+(declare-function sprig-session-interrupt "sprig-session-mode" ())
 ;; The review verbs the navigator's c / a dispatch runs on the row's session.
-(declare-function sprig-review-message "sprig-review-mode" (&optional plan queue))
-(declare-function sprig-review-queue "sprig-review-mode" ())
-(declare-function sprig-review-drop-queue "sprig-review-mode" ())
-(declare-function sprig-review-accept "sprig-review-mode" ())
-(declare-function sprig-review-decline "sprig-review-mode" ())
-(declare-function sprig-review-message-plan "sprig-review-mode" ())
-(declare-function sprig-review-retry "sprig-review-mode" ())
-(declare-function sprig-review-compact "sprig-review-mode" ())
-(declare-function sprig-review-btw "sprig-review-mode" (question))
-(declare-function sprig-review--fontify-markdown "sprig-review-mode" (text))
-(declare-function sprig-review--completed-prose "sprig-review-mode" (text))
-(declare-function sprig-review--paragraph-landed-p "sprig-review-mode" (delta))
-(defvar sprig-review-defer-live-prose)
-(defvar sprig-review--stream-nl)
-(declare-function sprig-review-answer "sprig-review-mode" ())
-(declare-function sprig-review-answer-recommended "sprig-review-mode" ())
-(declare-function sprig-review-answer-skip "sprig-review-mode" ())
-(declare-function sprig-review-plan-mode "sprig-review-mode" ())
-(declare-function sprig-review-auto-mode "sprig-review-mode" ())
-(declare-function sprig-review-accept-edits-mode "sprig-review-mode" ())
-(declare-function sprig-review-manual-mode "sprig-review-mode" ())
-(declare-function sprig-review-bypass-mode "sprig-review-mode" ())
+(declare-function sprig-session-message "sprig-session-mode" (&optional plan queue))
+(declare-function sprig-session-queue "sprig-session-mode" ())
+(declare-function sprig-session-drop-queue "sprig-session-mode" ())
+(declare-function sprig-session-accept "sprig-session-mode" ())
+(declare-function sprig-session-decline "sprig-session-mode" ())
+(declare-function sprig-session-message-plan "sprig-session-mode" ())
+(declare-function sprig-session-retry "sprig-session-mode" ())
+(declare-function sprig-session-compact "sprig-session-mode" ())
+(declare-function sprig-session-btw "sprig-session-mode" (question))
+(declare-function sprig-session--fontify-markdown "sprig-session-mode" (text))
+(declare-function sprig-session--completed-prose "sprig-session-mode" (text))
+(declare-function sprig-session--paragraph-landed-p "sprig-session-mode" (delta))
+(defvar sprig-session-defer-live-prose)
+(defvar sprig-session--stream-nl)
+(declare-function sprig-session-answer "sprig-session-mode" ())
+(declare-function sprig-session-answer-recommended "sprig-session-mode" ())
+(declare-function sprig-session-answer-skip "sprig-session-mode" ())
+(declare-function sprig-session-plan-mode "sprig-session-mode" ())
+(declare-function sprig-session-auto-mode "sprig-session-mode" ())
+(declare-function sprig-session-accept-edits-mode "sprig-session-mode" ())
+(declare-function sprig-session-manual-mode "sprig-session-mode" ())
+(declare-function sprig-session-bypass-mode "sprig-session-mode" ())
 
 (defun sprig--remote-sh (command &optional host)
   "Run shell COMMAND on HOST via SSH; return stdout.
@@ -2519,7 +2519,7 @@ buffer has since died.  Remote only: a local caller reads the file directly."
   "Sink for a review buffer that owns its session: track state, then consume.
 Keeps the transport bookkeeping (session id, permission mode, busy flag)
 in step without a Markdown transcript, then folds EVENT into the review
-model via `sprig-review-consume'."
+model via `sprig-session-consume'."
   (pcase event
     (`(session ,id)
      (when id
@@ -2551,12 +2551,12 @@ model via `sprig-review-consume'."
   ;; A control-request/response is transport, not conversation: it carries no
   ;; renderable content (the model never reads either), so it is handled above
   ;; and not consumed.  Consuming it would matter beyond the wasted event: it
-  ;; would push onto `sprig-review--events', so an attach's `initialize' ack
+  ;; would push onto `sprig-session--events', so an attach's `initialize' ack
   ;; alone makes the buffer non-pristine and the background history fetch
   ;; (`sprig--review-session-buffer', which seeds settled history only while the
   ;; buffer is pristine) then skips, leaving a reattached session with no history.
   (unless (memq (car-safe event) '(control-request control-response))
-    (sprig-review-consume event))
+    (sprig-session-consume event))
   ;; Keep the open navigator's live row current through the turn: its context
   ;; readout and status move with the events, not only at `done'.  Coalesced,
   ;; so a stream's burst of events makes one render, not one per event.
@@ -2590,7 +2590,7 @@ first in the shared `*sprig-btw*' buffer.")
   "Major mode for the `*sprig-btw*' side-question buffer."
   ;; Render the answer's markdown the way a review buffer does: its markup
   ;; carries `invisible markdown-markup' and its colours ride `font-lock-face'
-  ;; (see `sprig-review--fontify-markdown').  special-mode runs no font-lock,
+  ;; (see `sprig-session--fontify-markdown').  special-mode runs no font-lock,
   ;; so hide the one here and alias the other into `face' by hand.
   (add-to-invisibility-spec 'markdown-markup)
   (setq-local char-property-alias-alist '((face font-lock-face)))
@@ -2605,7 +2605,7 @@ streams; a fresh question resets it (`sprig--btw-display').")
 (defvar-local sprig--btw-answer-raw ""
   "Raw text of the answer streaming into `*sprig-btw*' so far.
 Its completed paragraphs are shown fontified and the still-typing one is
-withheld, the way `sprig-review-defer-live-prose' reveals a review reply; a
+withheld, the way `sprig-session-defer-live-prose' reveals a review reply; a
 fresh question resets it (`sprig--btw-display').")
 
 (defun sprig--btw-args (id)
@@ -2655,16 +2655,16 @@ files): %s" question)))
 Runs in that buffer (see `sprig--handle'), appending assistant text as it
 arrives and closing the entry when the turn ends."
   (let ((inhibit-read-only t)
-        (defer (and (bound-and-true-p sprig-review-defer-live-prose)
-                    (fboundp 'sprig-review--completed-prose))))
+        (defer (and (bound-and-true-p sprig-session-defer-live-prose)
+                    (fboundp 'sprig-session--completed-prose))))
     (pcase event
       (`(text ,s)
        (setq sprig--btw-answer-raw (concat sprig--btw-answer-raw s))
        (if defer
            ;; Reveal only whole paragraphs, fontified, the way a review reply
            ;; is deferred; withhold the one still being typed until it lands.
-           (when (sprig-review--paragraph-landed-p s)
-             (sprig--btw-repaint (sprig-review--completed-prose
+           (when (sprig-session--paragraph-landed-p s)
+             (sprig--btw-repaint (sprig-session--completed-prose
                                   sprig--btw-answer-raw)))
          (goto-char (point-max))
          (insert s)
@@ -2691,11 +2691,11 @@ is the completed-paragraph prefix while streaming and the whole answer once
 it settles.  A no-op when TEXT is nil (nothing has landed yet), the start
 was not recorded, or markdown is unavailable."
   (when (and text sprig--btw-answer-beg
-             (fboundp 'sprig-review--fontify-markdown))
+             (fboundp 'sprig-session--fontify-markdown))
     (let ((inhibit-read-only t))
       (delete-region sprig--btw-answer-beg (point-max))
       (goto-char sprig--btw-answer-beg)
-      (insert (sprig-review--fontify-markdown text))
+      (insert (sprig-session--fontify-markdown text))
       (dolist (win (get-buffer-window-list (current-buffer) nil t))
         (set-window-point win (point-max))))))
 
@@ -2716,8 +2716,8 @@ running `/btw' side panel."
         ;; it, and a clean slate for the deferred-paragraph accumulator.
         (setq sprig--btw-answer-beg (point)
               sprig--btw-answer-raw "")
-        (when (boundp 'sprig-review--stream-nl)
-          (setq sprig-review--stream-nl nil))))
+        (when (boundp 'sprig-session--stream-nl)
+          (setq sprig-session--stream-nl nil))))
     ;; Reuse an existing window the way `sprig-status' does, rather than
     ;; carving out a dedicated side window of its own.
     (pop-to-buffer buf)
@@ -2930,7 +2930,7 @@ One SSH round trip finds the log by id and appends the records with `>>'."
                        root name (shell-quote-argument text)))))
     (and out (string-match-p "ok" out))))
 
-(declare-function sprig-review-set-title "sprig-review-mode" (title))
+(declare-function sprig-session-set-title "sprig-session-mode" (title))
 
 (defun sprig--title-reflect (id title)
   "Show TITLE for session ID at once, ahead of the next disk scan.
@@ -2939,9 +2939,9 @@ navigator's log-scan cache stale so the row picks the new title up on its
 next render."
   (dolist (buf (buffer-list))
     (with-current-buffer buf
-      (when (and (derived-mode-p 'sprig-review-mode)
+      (when (and (derived-mode-p 'sprig-session-mode)
                  (equal sprig--session-id id))
-        (sprig-review-set-title title))))
+        (sprig-session-set-title title))))
   (sprig--status-scan-invalidate)
   (sprig--status-refresh))
 
@@ -3209,7 +3209,7 @@ returns the string as typed, where a blank means the login directory."
       (if (string-empty-p input) default-directory (expand-file-name input)))))
 
 ;;;###autoload
-(defun sprig-review-connect (&optional no-prompt)
+(defun sprig-session-connect (&optional no-prompt)
   "Start or resume the session owned by this review buffer.
 Resumes `sprig--session-id' when set (replayed history already showing),
 otherwise starts a fresh session, prompting for its working directory
@@ -3218,7 +3218,7 @@ unless NO-PROMPT."
   (when (process-live-p sprig--process)
     (user-error "This review already has a live session"))
   (setq sprig--sink #'sprig--review-sink
-        sprig--connect-fn #'sprig-review-connect)
+        sprig--connect-fn #'sprig-session-connect)
   (unless (or no-prompt sprig--session-id sprig--working-dir)
     (setq sprig--working-dir (sprig--read-review-dir (sprig--remote)))
     (sprig--sync-default-directory))
@@ -3247,17 +3247,17 @@ the message is delivered as a turn of its own rather than lost."
     ;; Float it above the state line rather than splice it into the stream:
     ;; the agent has not taken it yet, so it waits at the bottom and lands in
     ;; the transcript once the agent reaches the boundary that takes it (see
-    ;; `sprig-review-stage-steer' / `sprig-review--commit-pending-steer').
-    (sprig-review-stage-steer text)
+    ;; `sprig-session-stage-steer' / `sprig-session--commit-pending-steer').
+    (sprig-session-stage-steer text)
     (message "sprig: steering (the agent takes it at its next step)")))
 
 (defun sprig--redraw-queue-floats ()
   "Redraw the review buffer so its queued-message floats track `sprig--queued'.
 The floats are drawn straight from `sprig--queued' (see
-`sprig-review--insert-pending-queue'), so any change to the queue has to
+`sprig-session--insert-pending-queue'), so any change to the queue has to
 schedule a render for the change to show.  A no-op outside a review buffer."
-  (when (derived-mode-p 'sprig-review-mode)
-    (sprig-review--schedule)))
+  (when (derived-mode-p 'sprig-session-mode)
+    (sprig-session--schedule)))
 
 (defun sprig--review-queue (text)
   "Hold TEXT until the in-flight turn ends, then send it as a turn of its own.
@@ -3350,7 +3350,7 @@ own gesture: approving an ExitPlanMode plan, or `P' to set the mode by hand."
     (sprig--set-permission-mode mode))
   (setq sprig--busy t)
   (sprig--send-user text)
-  (sprig-review-consume (list 'user text))
+  (sprig-session-consume (list 'user text))
   (sprig--status-refresh))
 
 (defun sprig--review-interrupt-owned ()
@@ -3424,13 +3424,13 @@ back to killing the process; the session resumes on the next send."
 
 (defun sprig--review-session-buffer (dir session-id host fork)
   "Build (or reuse) the review buffer owning DIR's session, and return it.
-The buffer is left undisplayed; see `sprig-review-session' for the DIR,
+The buffer is left undisplayed; see `sprig-session-session' for the DIR,
 SESSION-ID, HOST, and FORK arguments.  Splitting the build from the
 display lets the navigator steer a stored session's buffer into being
 without popping it up: a verb run from the list acts on the session
 in the background, and only the verb's own compose or answer buffer shows."
-  (require 'sprig-review-mode)
-  (let* ((label (format "*sprig-review: %s%s*"
+  (require 'sprig-session-mode)
+  (let* ((label (format "*sprig-session: %s%s*"
                         (or session-id
                             (and dir (file-name-nondirectory
                                       (directory-file-name dir)))
@@ -3447,14 +3447,14 @@ in the background, and only the verb's own compose or answer buffer shows."
          (name (if (and session-id (not fork))
                    label
                  (generate-new-buffer-name label)))
-         (buffer (sprig-review-buffer name)))
+         (buffer (sprig-session-buffer name)))
     (with-current-buffer buffer
       (setq sprig--session-id session-id
             sprig--fork-session (and fork session-id t)
             sprig--working-dir dir
             sprig--remote-override (sprig--remote-override-value host)
             sprig--sink #'sprig--review-sink
-            sprig--connect-fn #'sprig-review-connect)
+            sprig--connect-fn #'sprig-session-connect)
       (if (and session-id (sprig--remote))
           ;; A remote session's log is fetched over SSH: seed the buffer empty
           ;; now, so opening the row returns at once, and fill in the replayed
@@ -3462,24 +3462,24 @@ in the background, and only the verb's own compose or answer buffer shows."
           ;; still pristine by then: a turn started in the meantime is the live
           ;; conversation now, and re-seeding would drop it.
           (progn
-            (sprig-review-seed nil (list :project dir))
+            (sprig-session-seed nil (list :project dir))
             (sprig--session-log-lines-async
              (lambda (lines)
                (when (and lines
-                          (null (buffer-local-value 'sprig-review--events
+                          (null (buffer-local-value 'sprig-session--events
                                                      (current-buffer)))
                           (not sprig--busy))
-                 (sprig-review-seed (sprig-review-session-events lines)
+                 (sprig-session-seed (sprig-session-session-events lines)
                                     (list :project dir))))))
         (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
-               (events (and lines (sprig-review-session-events lines))))
-          (sprig-review-seed events (list :project dir))))
-      (sprig-review-set-remote (sprig--remote))
+               (events (and lines (sprig-session-session-events lines))))
+          (sprig-session-seed events (list :project dir))))
+      (sprig-session-set-remote (sprig--remote))
       (sprig--sync-default-directory))
     buffer))
 
 ;;;###autoload
-(defun sprig-review-session (dir &optional session-id host fork)
+(defun sprig-session-session (dir &optional session-id host fork)
   "Open a review buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
@@ -3671,8 +3671,8 @@ in.  It changes the scan itself, so the toggle re-reads the logs.")
 ;; buffer that owns its session (so a just-started session with no log yet,
 ;; and live status, both show).  `/' narrows the list, `L' lifts the cap.
 
-(defvar sprig-review--events)           ; buffer-local in sprig-review-mode.el
-(defvar sprig-review--meta)             ; buffer-local in sprig-review-mode.el
+(defvar sprig-session--events)           ; buffer-local in sprig-session-mode.el
+(defvar sprig-session--meta)             ; buffer-local in sprig-session-mode.el
 
 (defun sprig--owning-review-buffers ()
   "Return the live review buffers that own their own session."
@@ -3682,9 +3682,9 @@ in.  It changes the scan itself, so the toggle re-reads the logs.")
           (eq (buffer-local-value 'sprig--sink b) #'sprig--review-sink)))
    (buffer-list)))
 
-(declare-function sprig-review-build "sprig-review" (events))
-(declare-function sprig-review-pending-dialog "sprig-review" (model))
-(declare-function sprig-review--current-model "sprig-review" ())
+(declare-function sprig-session-build "sprig-session" (events))
+(declare-function sprig-session-pending-dialog "sprig-session" (model))
+(declare-function sprig-session--current-model "sprig-session" ())
 
 (defun sprig--buffer-awaiting-answer-p (buf)
   "Non-nil when owning review BUF has a dialog still waiting on the user.
@@ -3692,22 +3692,22 @@ A pending `AskUserQuestion', plan approval, or permission prompt each
 count: the CLI is stopped until it hears back, which is what the `waiting'
 status flags in the navigator.
 
-Reads BUF's memoised model (`sprig-review--current-model'), not a fresh
-`sprig-review-build': this runs per buffer inside `sprig--session-status',
+Reads BUF's memoised model (`sprig-session--current-model'), not a fresh
+`sprig-session-build': this runs per buffer inside `sprig--session-status',
 which the navigator collect calls twice a tick, so a fresh O(all events)
 build here (and in `sprig--buffer-agent-running-p', and the inline preview)
 meant several full rebuilds a tick per active session.  Sharing the memo
 collapses them to one."
-  (sprig-review-pending-dialog
-   (with-current-buffer buf (sprig-review--current-model))))
+  (sprig-session-pending-dialog
+   (with-current-buffer buf (sprig-session--current-model))))
 
 (defun sprig--buffer-agent-running-p (buf)
   "Non-nil when a background agent BUF's session launched is still running.
 Reads the buffer's own events, the same source its render and inline
 preview use, so the row agrees with what the review buffer shows.  Via the
 memoised model (see `sprig--buffer-awaiting-answer-p'), not a fresh build."
-  (and (sprig-review-agent-running
-        (with-current-buffer buf (sprig-review--current-model)))
+  (and (sprig-session-agent-running
+        (with-current-buffer buf (sprig-session--current-model)))
        t))
 
 (defun sprig--session-status (buf)
@@ -4130,7 +4130,7 @@ input order).
 Building the model is O(all events); an owning buffer already has one, so
 `sprig--entry-preview' hands its cached model to `sprig--model-preview'
 directly rather than rebuilding it here."
-  (sprig--model-preview (ignore-errors (sprig-review-build events))))
+  (sprig--model-preview (ignore-errors (sprig-session-build events))))
 
 (defun sprig--model-preview (model)
   "Return a preview plist for a built review MODEL, or nil.
@@ -4164,8 +4164,8 @@ split out so a caller holding a model already built need not build another."
               (done (plist-get model :done))
               (err (plist-get model :error))
               (mode (plist-get model :mode))
-              (pending (and (sprig-review-pending-dialog model) t))
-              (agent-running (and (sprig-review-agent-running model) t)))
+              (pending (and (sprig-session-pending-dialog model) t))
+              (agent-running (and (sprig-session-agent-running model) t)))
           (when (or prompt* reply ctx done err pending mode agent-running)
             (list :prompt prompt* :reply reply
                   :time (plist-get (car (last blocks)) :time)
@@ -4184,7 +4184,7 @@ session log's tail, read on the host that row's session ran on rather than
 the configured default: with a group per host the two are often not the
 same, and the wrong one has no such log.
 
-An open buffer's model is taken from `sprig-review--current-model', which
+An open buffer's model is taken from `sprig-session--current-model', which
 memoises the build the buffer's own render already paid for, so the
 navigator does not rebuild the whole transcript on every refresh."
   (let ((buf (plist-get entry :buffer))
@@ -4193,11 +4193,11 @@ navigator does not rebuild the whole transcript on every refresh."
     (cond
      ((buffer-live-p buf)
       (sprig--model-preview
-       (with-current-buffer buf (sprig-review--current-model))))
+       (with-current-buffer buf (sprig-session--current-model))))
      (file
       (let ((tail (sprig--session-log-tail file)))
         (and tail (sprig--events-preview
-                   (sprig-review-session-events (split-string tail "\n" t)))))))))
+                   (sprig-session-session-events (split-string tail "\n" t)))))))))
 
 ;;; Collect open buffers and stored sessions into rows
 
@@ -4472,10 +4472,10 @@ group filtered down to nothing keeps its heading all the same."
                          ;; for a fresh live session, whose stream carries no
                          ;; title: the scan below borrows it from the log.
                          :title (or (plist-get (buffer-local-value
-                                                'sprig-review--meta buf)
+                                                'sprig-session--meta buf)
                                                :title)
-                                    (sprig-review-events-title
-                                     (buffer-local-value 'sprig-review--events buf)))
+                                    (sprig-session-events-title
+                                     (buffer-local-value 'sprig-session--events buf)))
                          :status (sprig--session-status buf)
                          ;; Live buffer-local state, like the status: a message
                          ;; held for the running turn is invisible otherwise
@@ -4664,7 +4664,7 @@ Matching is case-insensitive."
   (pcase status
     ('streaming 'warning)
     ('agent 'warning)
-    ('waiting 'sprig-review-waiting)
+    ('waiting 'sprig-session-waiting)
     ('idle 'success)
     ('held 'success)
     ('interrupted 'font-lock-comment-face)
@@ -4807,24 +4807,24 @@ reply."
 (defun sprig--state-parts (state)
   "Return (GLYPH TEXT FACE) for a canonical turn STATE symbol.
 The one source of truth for how a state reads on a state line, shared by
-the review buffer (`sprig-review--state') and the navigator
+the review buffer (`sprig-session--state') and the navigator
 \(`sprig--status-state-line') so the two never drift.  Each caller decides
 only which STATE applies, from whatever it can see, then renders these
 parts in its own medium.  STATE is one of `waiting', `compacting',
 `streaming', `pending', `failed', `agent', `done', `interrupted', or
 anything else for `idle'."
   (pcase state
-    ('waiting     (list "?" "waiting on you"       'sprig-review-waiting))
-    ('compacting  (list "▼" "compacting…"          'sprig-review-working))
-    ('streaming   (list "▶" "working…"             'sprig-review-working))
-    ('pending     (list "▷" "sent, awaiting reply" 'sprig-review-pending))
-    ('failed      (list "✗" "turn failed"          'sprig-review-failed))
+    ('waiting     (list "?" "waiting on you"       'sprig-session-waiting))
+    ('compacting  (list "▼" "compacting…"          'sprig-session-working))
+    ('streaming   (list "▶" "working…"             'sprig-session-working))
+    ('pending     (list "▷" "sent, awaiting reply" 'sprig-session-pending))
+    ('failed      (list "✗" "turn failed"          'sprig-session-failed))
     ;; A background agent outlives the turn that launched it, so this reads
     ;; ahead of `done': work is still going on though the turn is over.
-    ('agent       (list "▶" "agent working…"       'sprig-review-working))
-    ('done        (list "✓" "turn over"            'sprig-review-done))
+    ('agent       (list "▶" "agent working…"       'sprig-session-working))
+    ('done        (list "✓" "turn over"            'sprig-session-done))
     ('interrupted (list "◼" "interrupted"          'font-lock-comment-face))
-    (_            (list "●" "idle"                 'sprig-review-idle))))
+    (_            (list "●" "idle"                 'sprig-session-idle))))
 
 (defun sprig--status-state-line (entry preview)
   "Return the preview's leading state line for ENTRY, or nil.
@@ -4861,7 +4861,7 @@ and no model at all (nothing to say)."
                 (when (and queued (> queued 0))
                   (concat (propertize "  ·  " 'face face)
                           (propertize (format "%d queued" queued)
-                                      'face 'sprig-review-pending)))
+                                      'face 'sprig-session-pending)))
                 ;; The permission mode rides its own tag, coloured on its own
                 ;; terms rather than the turn's, the way the review buffer's
                 ;; mode line carries `[plan]'.  Only the notable modes show.
@@ -4891,15 +4891,15 @@ review header, so all three agree on what counts as notable."
   "Return the state-line face for TOKENS of context, escalating with size.
 Mirrors the review buffer's readout: plain while the context is small,
 amber past `sprig-context-large-tokens', red past `sprig-context-huge-tokens'.
-Those thresholds and the escalated faces belong to `sprig-review-mode'; when
+Those thresholds and the escalated faces belong to `sprig-session-mode'; when
 it is not loaded there is nothing to escalate to, so the count stays in the
-plain `sprig-review-context' face, exactly as the plain readout already does."
+plain `sprig-session-context' face, exactly as the plain readout already does."
   (let ((large (bound-and-true-p sprig-context-large-tokens))
         (huge (bound-and-true-p sprig-context-huge-tokens)))
     (cond
-     ((and huge (>= tokens huge)) 'sprig-review-context-huge)
-     ((and large (>= tokens large)) 'sprig-review-context-large)
-     (t 'sprig-review-context))))
+     ((and huge (>= tokens huge)) 'sprig-session-context-huge)
+     ((and large (>= tokens large)) 'sprig-session-context-large)
+     (t 'sprig-session-context))))
 
 (defun sprig--status-preview-lines (entry)
   "Return the propertized display lines for ENTRY's inline preview.
@@ -5357,7 +5357,7 @@ owns the session, replaying its stored log."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf)
         buf
-      (sprig-review-session (plist-get entry :dir) (plist-get entry :session)
+      (sprig-session-session (plist-get entry :dir) (plist-get entry :session)
                             (sprig--status-entry-host-arg entry)))))
 
 (defun sprig--status-session-buffer (entry)
@@ -5401,41 +5401,41 @@ command's docstring."
      (interactive)
      (sprig--status-steer #',command)))
 
-(sprig--status-define-steer sprig-status-message sprig-review-message
+(sprig--status-define-steer sprig-status-message sprig-session-message
   "Compose a message and send it to the row's session (`c c').")
-(sprig--status-define-steer sprig-status-queue sprig-review-queue
+(sprig--status-define-steer sprig-status-queue sprig-session-queue
   "Compose a message and queue it for after the running turn (`c q').")
-(sprig--status-define-steer sprig-status-drop-queue sprig-review-drop-queue
+(sprig--status-define-steer sprig-status-drop-queue sprig-session-drop-queue
   "Drop the messages queued on the row's session (`c Q').")
-(sprig--status-define-steer sprig-status-accept sprig-review-accept
+(sprig--status-define-steer sprig-status-accept sprig-session-accept
   "Answer the row's session yes / accept (`c y').")
-(sprig--status-define-steer sprig-status-decline sprig-review-decline
+(sprig--status-define-steer sprig-status-decline sprig-session-decline
   "Answer the row's session no / decline (`c n').")
-(sprig--status-define-steer sprig-status-message-plan sprig-review-message-plan
+(sprig--status-define-steer sprig-status-message-plan sprig-session-message-plan
   "Compose a message for the row's session in plan mode (`c p').")
-(sprig--status-define-steer sprig-status-retry sprig-review-retry
+(sprig--status-define-steer sprig-status-retry sprig-session-retry
   "Resend the last turn of the row's session (`c r').")
-(sprig--status-define-steer sprig-status-compact sprig-review-compact
+(sprig--status-define-steer sprig-status-compact sprig-session-compact
   "Compact the context of the row's session (`c z').")
-(sprig--status-define-steer sprig-status-btw sprig-review-btw
+(sprig--status-define-steer sprig-status-btw sprig-session-btw
   "Ask a side question about the row's session, disturbing nothing (`c b').")
-(sprig--status-define-steer sprig-status-answer sprig-review-answer
+(sprig--status-define-steer sprig-status-answer sprig-session-answer
   "Answer the row's session's waiting question, one at a time (`a a').")
 (sprig--status-define-steer sprig-status-answer-recommended
-    sprig-review-answer-recommended
+    sprig-session-answer-recommended
   "Take every recommended option on the row's session's question (`a r').")
-(sprig--status-define-steer sprig-status-answer-skip sprig-review-answer-skip
+(sprig--status-define-steer sprig-status-answer-skip sprig-session-answer-skip
   "Skip the row's session's waiting question (`a s').")
-(sprig--status-define-steer sprig-status-plan-mode sprig-review-plan-mode
+(sprig--status-define-steer sprig-status-plan-mode sprig-session-plan-mode
   "Put the row's session into plan mode (`P p').")
-(sprig--status-define-steer sprig-status-auto-mode sprig-review-auto-mode
+(sprig--status-define-steer sprig-status-auto-mode sprig-session-auto-mode
   "Put the row's session into auto mode (`P a').")
 (sprig--status-define-steer sprig-status-accept-edits-mode
-    sprig-review-accept-edits-mode
+    sprig-session-accept-edits-mode
   "Put the row's session into accept-edits mode (`P e').")
-(sprig--status-define-steer sprig-status-manual-mode sprig-review-manual-mode
+(sprig--status-define-steer sprig-status-manual-mode sprig-session-manual-mode
   "Put the row's session into manual mode (`P m').")
-(sprig--status-define-steer sprig-status-bypass-mode sprig-review-bypass-mode
+(sprig--status-define-steer sprig-status-bypass-mode sprig-session-bypass-mode
   "Put the row's session into bypass mode (`P b').")
 
 (defun sprig--status-goto-row (dir)
@@ -5492,14 +5492,14 @@ session again should this connection drop."
             (delete id sprig--status-reattach-attempted)))
     (let ((buf (sprig--status-review-buffer entry)))
       (with-current-buffer buf
-        (unless (process-live-p sprig--process) (sprig-review-connect)))
+        (unless (process-live-p sprig--process) (sprig-session-connect)))
       (sprig--status-refresh))))
 
 (defun sprig-status-interrupt ()
   "Interrupt the streaming session on the current line."
   (interactive)
   (with-current-buffer (sprig--status-owning-buffer (sprig--status-entry-at-point))
-    (sprig-review-interrupt))
+    (sprig-session-interrupt))
   (sprig--status-refresh))
 
 (defun sprig-status-disconnect ()
@@ -5726,7 +5726,7 @@ session row, its directory seeds the prompt, so `s n' on a session starts
 a fresh one alongside it in the same directory."
   (interactive "P")
   (let ((args (sprig--status-new-session-args local)))
-    (sprig-review-session (sprig--read-review-dir (car args) (cdr args))
+    (sprig-session-session (sprig--read-review-dir (car args) (cdr args))
                           nil (or (car args) t)))
   (sprig--status-refresh))
 
@@ -5743,7 +5743,7 @@ directory prompt, as with `s n'."
                (sprig--read-review-dir host (cdr args)) nil (or host t) nil)))
     (sprig--status-refresh)
     (pop-to-buffer buf)
-    (with-current-buffer buf (sprig-review-message plan))))
+    (with-current-buffer buf (sprig-session-message plan))))
 
 (defun sprig-status-new-message (&optional local)
   "Start a fresh session and open a prompt for its first message (`s c').
@@ -5774,7 +5774,7 @@ resumes the parent's id and that only exists there."
          (id (plist-get entry :session)))
     (unless id
       (user-error "That session has no id yet; open and send it first, then fork"))
-    (sprig-review-session (plist-get entry :dir) id
+    (sprig-session-session (plist-get entry :dir) id
                           (sprig--status-entry-host-arg entry) t)
     (message "sprig: forked; the branch starts at its first send"))
   (sprig--status-refresh))
@@ -5919,7 +5919,7 @@ same host the roots view was opened for (a local line pins to this machine)."
   (let ((dir (get-text-property (point) 'sprig-root-dir))
         (host (get-text-property (point) 'sprig-root-host)))
     (unless dir (user-error "No root on this line"))
-    (sprig-review-session dir nil (or host t))
+    (sprig-session-session dir nil (or host t))
     (sprig--status-refresh)))
 
 (defun sprig-status-roots ()
@@ -6270,7 +6270,7 @@ cover remote hosts too."
   "Directory sprig's own source files were loaded from, for `sprig-reload'.")
 
 (defvar sprig--source-files
-  '("sprig-review" "sprig" "sprig-review-mode")
+  '("sprig-session" "sprig" "sprig-session-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()
@@ -6285,7 +6285,7 @@ override the defface one anyway."
     (when (string-prefix-p "sprig-" (symbol-name face))
       (put face 'face-defface-spec nil))))
 
-(declare-function sprig-review--suppress-section-highlight "sprig-review-mode")
+(declare-function sprig-session--suppress-section-highlight "sprig-session-mode")
 
 (defun sprig--resettle-review-buffers ()
   "Re-apply the review mode's settings in buffers already in that mode.
@@ -6296,14 +6296,14 @@ reload alone cannot reach them, the way it cannot reach faces (see
 would take the buffer's session and section state down with it."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
-      (when (derived-mode-p 'sprig-review-mode)
-        (sprig-review--suppress-section-highlight)))))
+      (when (derived-mode-p 'sprig-session-mode)
+        (sprig-session--suppress-section-highlight)))))
 
 ;;;###autoload
 (defun sprig-reload ()
   "Reload sprig's source files from disk, in dependency order.
-A development convenience: after editing any of `sprig-review', `sprig',
-or `sprig-review-mode', re-load all three from `sprig--source-directory'
+A development convenience: after editing any of `sprig-session', `sprig',
+or `sprig-session-mode', re-load all three from `sprig--source-directory'
 so the change takes effect without restarting Emacs.  The `.el' source is
 loaded, not any stale byte code beside it.  Edited faces take effect too
 \(see `sprig--undefine-faces'), as do the review mode's settings (see

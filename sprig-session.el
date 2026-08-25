@@ -1,4 +1,4 @@
-;;; sprig-review.el --- Review model and diff engine for sprig -*- lexical-binding: t; -*-
+;;; sprig-session.el --- Session model and diff engine for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
 ;; Version: 0.32.0
@@ -16,11 +16,11 @@
 ;;    agent's actual file changes.  In v1 those changes are attributed
 ;;    per turn straight from the tool-call payloads: every `Edit',
 ;;    `MultiEdit', and `Write' already carries its before/after in the
-;;    stream-json, so `sprig-review-tool-changes' reconstructs the hunks
+;;    stream-json, so `sprig-session-tool-changes' reconstructs the hunks
 ;;    with no git.  (Git ground truth, which also catches `Bash'-driven
 ;;    edits, is a later slice.)
 ;;
-;; 2. The review model.  `sprig-review-build' folds the backend-neutral
+;; 2. The review model.  `sprig-session-build' folds the backend-neutral
 ;;    event vocabulary (see sprig.el's transport/sink seam) into an
 ;;    ordered list of blocks: assistant text, tool calls with their
 ;;    reconstructed changes and paired results, and errors.  The renderer
@@ -41,7 +41,7 @@
 ;; FLAG).  OLD and NEW are lists of lines (nil for none), so a `write' of
 ;; a new file has :old nil and a pure deletion has :new nil.
 
-(defun sprig-review--parse-input (json)
+(defun sprig-session--parse-input (json)
   "Return tool-call input JSON as an alist, or nil.
 JSON may be a string (the wire path, parsed here) or an already-parsed
 alist (the stored-session path, passed through).  Blank string is the
@@ -57,7 +57,7 @@ empty object."
    ((listp json) json)
    (t nil)))
 
-(defun sprig-review--lines (s)
+(defun sprig-session--lines (s)
   "Split S into a list of display lines, or nil when S is empty.
 A single trailing newline does not yield a spurious empty final line,
 but a blank line inside the text is kept."
@@ -67,37 +67,37 @@ but a blank line inside the text is kept."
           (butlast parts)
         parts))))
 
-(defun sprig-review--edit-hunk (edit)
+(defun sprig-session--edit-hunk (edit)
   "Build a hunk plist from an EDIT alist (old_string/new_string/replace_all)."
-  (list :old (sprig-review--lines (alist-get 'old_string edit))
-        :new (sprig-review--lines (alist-get 'new_string edit))
+  (list :old (sprig-session--lines (alist-get 'old_string edit))
+        :new (sprig-session--lines (alist-get 'new_string edit))
         :replace-all (and (alist-get 'replace_all edit) t)))
 
-(defun sprig-review-tool-changes (name input)
+(defun sprig-session-tool-changes (name input)
   "Return the file changes tool NAME made, derived from its INPUT JSON.
 Each element is a change plist (see the section commentary).  Returns nil
 for tools that touch no files, or when INPUT lacks a file path."
-  (let ((obj (sprig-review--parse-input input)))
+  (let ((obj (sprig-session--parse-input input)))
     (pcase name
       ("Edit"
        (when-let ((path (alist-get 'file_path obj)))
          (list (list :file path :kind 'edit
-                     :hunks (list (sprig-review--edit-hunk obj))))))
+                     :hunks (list (sprig-session--edit-hunk obj))))))
       ("MultiEdit"
        (when-let ((path (alist-get 'file_path obj)))
          (list (list :file path :kind 'edit
-                     :hunks (mapcar #'sprig-review--edit-hunk
+                     :hunks (mapcar #'sprig-session--edit-hunk
                                     (alist-get 'edits obj))))))
       ("Write"
        (when-let ((path (alist-get 'file_path obj)))
          (list (list :file path :kind 'write
                      :hunks (list (list :old nil
-                                        :new (sprig-review--lines
+                                        :new (sprig-session--lines
                                               (alist-get 'content obj))
                                         :replace-all nil))))))
       (_ nil))))
 
-(defun sprig-review-change-stat (change)
+(defun sprig-session-change-stat (change)
   "Return (ADDED . REMOVED) line counts across CHANGE's hunks."
   (let ((add 0) (del 0))
     (dolist (h (plist-get change :hunks))
@@ -105,7 +105,7 @@ for tools that touch no files, or when INPUT lacks a file path."
             del (+ del (length (plist-get h :old)))))
     (cons add del)))
 
-(defun sprig-review--format-hunk (hunk)
+(defun sprig-session--format-hunk (hunk)
   "Render HUNK as unified-diff-ish text: removed lines, then added lines."
   (let ((old (plist-get hunk :old))
         (new (plist-get hunk :new)))
@@ -114,10 +114,10 @@ for tools that touch no files, or when INPUT lacks a file path."
      (when (and old new) "\n")
      (mapconcat (lambda (l) (concat "+" l)) new "\n"))))
 
-(defun sprig-review-format-change (change)
+(defun sprig-session-format-change (change)
   "Render CHANGE as a file header line followed by its hunks."
   (concat (plist-get change :file) "\n"
-          (mapconcat #'sprig-review--format-hunk
+          (mapconcat #'sprig-session--format-hunk
                      (plist-get change :hunks) "\n")))
 
 ;;;; Ground-truth diff parser
@@ -129,7 +129,7 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; and it is the subject of navigator mode, where the human's own edits
 ;; have no `Edit'/`Write' payload to reconstruct from.
 ;;
-;; `sprig-review-parse-diff' folds a unified git diff into the SAME change
+;; `sprig-session-parse-diff' folds a unified git diff into the SAME change
 ;; shape the tool-payload engine emits (:file/:kind/:hunks), so the stat,
 ;; formatter, and renderer all consume it unchanged.  The model carries no
 ;; context lines, matching the payload path, so each contiguous run of
@@ -140,7 +140,7 @@ for tools that touch no files, or when INPUT lacks a file path."
 ;; reported at its new path with no hunks; a plain `diff -u' stream with no
 ;; `diff --git' headers reconstructs only its first file.
 
-(defun sprig-review--diff-strip-prefix (path)
+(defun sprig-session--diff-strip-prefix (path)
   "Strip a leading `a/' or `b/' from git diff PATH; leave others alone."
   (cond
    ((null path) nil)
@@ -148,17 +148,17 @@ for tools that touch no files, or when INPUT lacks a file path."
    ((string-prefix-p "b/" path) (substring path 2))
    (t path)))
 
-(defun sprig-review--diff-header-path (line)
+(defun sprig-session--diff-header-path (line)
   "Return the path from a `--- ' or `+++ ' diff LINE, nil for /dev/null.
 The leading marker and any trailing tab-separated timestamp are dropped."
   (let* ((body (substring line 4))              ; past "--- " / "+++ "
          (field (car (split-string body "\t"))))
     (if (equal field "/dev/null") nil
-      (sprig-review--diff-strip-prefix field))))
+      (sprig-session--diff-strip-prefix field))))
 
-(defun sprig-review-parse-diff (text)
+(defun sprig-session-parse-diff (text)
   "Parse unified git-diff TEXT into a list of change plists.
-Each element matches the shape `sprig-review-tool-changes' returns,
+Each element matches the shape `sprig-session-tool-changes' returns,
 \(:file PATH :kind edit|write :hunks HUNKS); see this section's
 commentary for the mapping and its limits."
   (let ((changes nil)
@@ -187,14 +187,14 @@ commentary for the mapping and its limits."
          ((string-prefix-p "new file mode" line) (setq kind 'write))
          ((string-prefix-p "Binary files " line) (setq binary t))
          ((string-prefix-p "rename to " line)
-          (setq path (sprig-review--diff-strip-prefix
+          (setq path (sprig-session--diff-strip-prefix
                       (string-trim (substring line (length "rename to "))))))
          ;; `--- '/`+++ ' are file headers only before the first `@@'; once
          ;; in a hunk a `-'/`+' line is content, even one reading `--- x'.
          ((and (not in-hunk) (string-prefix-p "--- " line))
-          (setq a-path (sprig-review--diff-header-path line)))
+          (setq a-path (sprig-session--diff-header-path line)))
          ((and (not in-hunk) (string-prefix-p "+++ " line))
-          (setq b-path (sprig-review--diff-header-path line))
+          (setq b-path (sprig-session--diff-header-path line))
           ;; b is the live path unless it is /dev/null (a deletion); a
           ;; /dev/null old path means a new file even absent `new file mode'.
           (setq path (or b-path a-path))
@@ -212,7 +212,7 @@ commentary for the mapping and its limits."
 
 ;;;; Review model
 ;;
-;; `sprig-review-build' folds a list of transport events into a turn
+;; `sprig-session-build' folds a list of transport events into a turn
 ;; model, a plist (:session ID :cost N :error BOOL :done BOOL :context N
 ;; :blocks BLOCKS).  Every block carries the `:time' of the most recent `time'
 ;; event before it, and is one of:
@@ -239,7 +239,7 @@ commentary for the mapping and its limits."
 ;; `Agent' call has no progress and needs none, the work being over.  The
 ;; steps outlive the turn by the other route: live they stream in tagged with
 ;; their parent, and on replay they are read back from the subagent's own
-;; file (see `sprig-review-subagent-events').
+;; file (see `sprig-session-subagent-events').
 ;;
 ;; A `tasks' block is the CLI's granular task tools folded into one running
 ;; checklist.  Where a `TodoWrite' resends its whole list each call, this
@@ -269,12 +269,12 @@ commentary for the mapping and its limits."
 ;; own; it just says when what follows happened.  The stored log stamps
 ;; every record, so replayed history keeps its real times; the wire
 ;; carries none, so the sink stamps events as they arrive (see
-;; `sprig-review-consume').  Either way the stamp lands in the event list
+;; `sprig-session-consume').  Either way the stamp lands in the event list
 ;; itself, which is what keeps it stable: the model is rebuilt from that
 ;; list on every render, so a time read off the clock here would tick
 ;; forward under a conversation that had long since finished.
 
-(defun sprig-review--merge-plist (base new)
+(defun sprig-session--merge-plist (base new)
   "Return BASE with NEW's non-nil values laid over it.
 A nil in NEW means `this record did not carry the field', never `clear it':
 the CLI's task records each carry their own subset, so an overwrite would
@@ -286,17 +286,17 @@ lose what an earlier one established."
       (setq new (cddr new)))
     out))
 
-(defun sprig-review--agent-put (block key value)
+(defun sprig-session--agent-put (block key value)
   "Set KEY to VALUE in BLOCK's `:agent' plist, creating the plist if need be.
 `plist-put' cannot grow a nil plist in place, so the result has to be put
 back on the block; this keeps that from being spelled out at each call."
   (plist-put block :agent
-             (sprig-review--merge-plist (plist-get block :agent)
+             (sprig-session--merge-plist (plist-get block :agent)
                                         (list key value))))
 
-(defun sprig-review--find-tool (blocks id)
+(defun sprig-session--find-tool (blocks id)
   "Return the tool block in BLOCKS with ID, finished or not, or nil.
-Unlike `sprig-review--find-open-tool', a result does not put the block out
+Unlike `sprig-session--find-open-tool', a result does not put the block out
 of reach.  Subagent events need that: live they arrive while the `Agent'
 call is still open, but a replayed log's are read from the subagent's own
 file and folded in after the whole transcript, result and all."
@@ -305,7 +305,7 @@ file and folded in after the whole transcript, result and all."
                    (equal (plist-get b :id) id)))
             blocks))
 
-(defun sprig-review--find-open-tool (blocks id)
+(defun sprig-session--find-open-tool (blocks id)
   "Return the tool block in BLOCKS with ID and no result yet, or nil."
   (seq-find (lambda (b)
               (and (eq (plist-get b :type) 'tool)
@@ -313,14 +313,14 @@ file and folded in after the whole transcript, result and all."
                    (null (plist-get b :result))))
             blocks))
 
-(defun sprig-review--find-dialog (blocks id)
+(defun sprig-session--find-dialog (blocks id)
   "Return the dialog block in BLOCKS with ID, or nil."
   (seq-find (lambda (b)
               (and (eq (plist-get b :type) 'dialog)
                    (equal (plist-get b :id) id)))
             blocks))
 
-(defun sprig-review-pending-dialog (model)
+(defun sprig-session-pending-dialog (model)
   "Return MODEL's dialog block still waiting on an answer, or nil.
 The turn is stopped on it: the CLI asked, and will not go on until it
 hears back."
@@ -329,7 +329,7 @@ hears back."
                    (not (plist-get b :answered))))
             (plist-get model :blocks)))
 
-(defun sprig-review-agent-running (model)
+(defun sprig-session-agent-running (model)
   "Return MODEL's `Agent' block whose subagent is still working, or nil.
 A subagent (Task, Explore, ...) runs in the background, so the turn that
 launched it can end while its work is still in flight, leaving the turn to
@@ -341,14 +341,14 @@ and only ever fires for a live subagent actually in flight."
               (equal (plist-get (plist-get b :agent) :status) "running"))
             (plist-get model :blocks)))
 
-(defun sprig-review--task-created-id (text)
+(defun sprig-session--task-created-id (text)
   "Return the id string in a TaskCreate result TEXT, or nil.
 The task tool answers a create with \"Task #N created ...\", so a new
 task's id is only in the result, never in the call's own input."
   (when (and (stringp text) (string-match "Task #\\([0-9]+\\)" text))
     (match-string 1 text)))
 
-(defun sprig-review--task-apply-update (tasks input)
+(defun sprig-session--task-apply-update (tasks input)
   "Return TASKS folded with one TaskUpdate INPUT alist.
 A `deleted' status drops the task; any other status, or a new subject, is
 written in place onto the task the INPUT's `taskId' names.  Each task is a
@@ -368,29 +368,29 @@ plist (:id ID :content SUBJECT :status STATUS)."
 ;; The event list and the model memo live in the data layer, not the UI
 ;; layer, so a headless caller (the navigator's status and preview, in
 ;; sprig.el) shares the one build a review buffer already paid for without
-;; pulling in sprig-review-mode (and magit-section) to reach it.
+;; pulling in sprig-session-mode (and magit-section) to reach it.
 
-(defvar-local sprig-review--events nil
+(defvar-local sprig-session--events nil
   "Transport events consumed by this review buffer, most recent first.")
-(defvar-local sprig-review--model nil
+(defvar-local sprig-session--model nil
   "The last-built review model for this buffer, memoised (see below).")
-(defvar-local sprig-review--model-head nil
-  "The `sprig-review--events' list head `sprig-review--model' was built at.
+(defvar-local sprig-session--model-head nil
+  "The `sprig-session--events' list head `sprig-session--model' was built at.
 Every consumed event conses a new head onto the list, so this is `eq' to the
 current head exactly when the cached model is still current.")
-(defvar-local sprig-review--builder nil
-  "Persisted `sprig-review--fold-events' state, for incremental model builds.
-Carrying it lets `sprig-review--current-model' fold only the newly-arrived
+(defvar-local sprig-session--builder nil
+  "Persisted `sprig-session--fold-events' state, for incremental model builds.
+Carrying it lets `sprig-session--current-model' fold only the newly-arrived
 events into the running fold, instead of re-folding the whole history.")
-(defvar-local sprig-review--builder-head nil
-  "The `sprig-review--events' head `sprig-review--builder' has folded up to.")
-(defvar-local sprig-review--last-fold nil
-  "What the last `sprig-review--current-model' did, for the debug log:
+(defvar-local sprig-session--builder-head nil
+  "The `sprig-session--events' head `sprig-session--builder' has folded up to.")
+(defvar-local sprig-session--last-fold nil
+  "What the last `sprig-session--current-model' did, for the debug log:
 `cached', `(incremental . N)', or a `full-...' symbol naming why it had to
 rebuild the whole history.")
 
-(defun sprig-review--initial-state ()
-  "Return a fresh, empty `sprig-review--fold-events' state.
+(defun sprig-session--initial-state ()
+  "Return a fresh, empty `sprig-session--fold-events' state.
 The state is an opaque list of the fold's accumulators, in the order the
 folder and finaliser unpack them: session, title, mode, cost, error, done,
 context, the pending block timestamp, the reversed block list, the open
@@ -398,7 +398,7 @@ text/thinking block, the task list, pending TaskCreate subjects, Task* tool
 ids, and the running task snapshot."
   (list nil nil nil nil nil nil nil nil '() nil '() '() '() nil))
 
-(defun sprig-review--events-since (events old-head)
+(defun sprig-session--events-since (events old-head)
   "Return the events in EVENTS newer than OLD-HEAD, and whether OLD-HEAD held.
 The car is those events oldest-first, ready to fold; the cdr is t when
 OLD-HEAD is still a tail of EVENTS (only events were appended since), so the
@@ -409,7 +409,7 @@ running fold can be continued rather than restarted."
       (setq cell (cdr cell)))
     (cons new (eq cell old-head))))
 
-(defun sprig-review--state-model (state)
+(defun sprig-session--state-model (state)
   "Finalise fold STATE into a model plist.
 The blocks are deep-copied out, so the running fold may keep mutating its
 own blocks in place (a result landing on a call, a delta extending the open
@@ -423,51 +423,51 @@ the next by `equal'."
           :cost cost :error error :done done :context context
           :blocks (mapcar #'copy-tree (reverse blocks)))))
 
-(defun sprig-review--current-model ()
+(defun sprig-session--current-model ()
   "Return this buffer's review model, folding only what is new since last time.
 The same model is wanted by the buffer's own refresh, its state line, and
 the navigator's inline preview and status, often several times a second
 while a turn streams.  This memoises the last build on the event-list head
-\(see `sprig-review--model-head'), so those callers share one build per
+\(see `sprig-session--model-head'), so those callers share one build per
 event.  And the build itself is incremental: a full fold is O(all events)
 and, run per structural event on a long session, is a main source of live
-lag, so the running fold state is kept (`sprig-review--builder') and only
+lag, so the running fold state is kept (`sprig-session--builder') and only
 the newly-arrived events are folded into it.  It restarts from scratch only
 when the event list was replaced rather than appended to (a reseed)."
-  (if (eq sprig-review--events sprig-review--model-head)
-      (setq sprig-review--last-fold 'cached)
-    (let ((delta (and sprig-review--builder sprig-review--builder-head
-                      (sprig-review--events-since sprig-review--events
-                                                  sprig-review--builder-head))))
-      (setq sprig-review--last-fold
-            (cond ((not sprig-review--builder) 'full-no-builder)
+  (if (eq sprig-session--events sprig-session--model-head)
+      (setq sprig-session--last-fold 'cached)
+    (let ((delta (and sprig-session--builder sprig-session--builder-head
+                      (sprig-session--events-since sprig-session--events
+                                                  sprig-session--builder-head))))
+      (setq sprig-session--last-fold
+            (cond ((not sprig-session--builder) 'full-no-builder)
                   ((not (and delta (cdr delta)))
                    (if delta 'full-not-reached 'full-no-head))
                   (t (cons 'incremental (length (car delta))))))
-      (setq sprig-review--builder
+      (setq sprig-session--builder
             (if (and delta (cdr delta))
-                (sprig-review--fold-events sprig-review--builder (car delta))
-              (sprig-review--fold-events (sprig-review--initial-state)
-                                         (reverse sprig-review--events))))
-      (setq sprig-review--builder-head sprig-review--events
-            sprig-review--model (sprig-review--state-model sprig-review--builder)
-            sprig-review--model-head sprig-review--events)))
-  sprig-review--model)
+                (sprig-session--fold-events sprig-session--builder (car delta))
+              (sprig-session--fold-events (sprig-session--initial-state)
+                                         (reverse sprig-session--events))))
+      (setq sprig-session--builder-head sprig-session--events
+            sprig-session--model (sprig-session--state-model sprig-session--builder)
+            sprig-session--model-head sprig-session--events)))
+  sprig-session--model)
 
-(defun sprig-review-build (events)
+(defun sprig-session-build (events)
   "Fold a list of transport EVENTS into a turn model plist.
 See the section commentary for the event vocabulary and block shapes.  This
 is the one-shot entry point (a stored log, a preview); the live buffer folds
-incrementally through `sprig-review--current-model'."
-  (sprig-review--state-model
-   (sprig-review--fold-events (sprig-review--initial-state) events)))
+incrementally through `sprig-session--current-model'."
+  (sprig-session--state-model
+   (sprig-session--fold-events (sprig-session--initial-state) events)))
 
-(defun sprig-review--fold-events (state events)
+(defun sprig-session--fold-events (state events)
   "Fold transport EVENTS into fold STATE, returning the advanced state.
-STATE is the opaque accumulator list built by `sprig-review--initial-state';
+STATE is the opaque accumulator list built by `sprig-session--initial-state';
 EVENTS are in order (oldest first).  Blocks accumulate in place, so a state
 may be carried across calls to continue a fold (see
-`sprig-review--current-model')."
+`sprig-session--current-model')."
   (pcase-let ((`(,session ,title ,mode ,cost ,error ,done ,context ,time
                  ,blocks ,open ,tasks ,pending-creates ,task-ids ,tasks-block)
                state))
@@ -515,16 +515,16 @@ may be carried across calls to continue a fold (see
            (push id task-ids)
            (pcase name
              ("TaskCreate"
-              (let ((obj (sprig-review--parse-input input)))
+              (let ((obj (sprig-session--parse-input input)))
                 (push (cons id (or (alist-get 'subject obj) "task"))
                       pending-creates)))
              ("TaskUpdate"
-              (setq tasks (sprig-review--task-apply-update
-                           tasks (sprig-review--parse-input input)))
+              (setq tasks (sprig-session--task-apply-update
+                           tasks (sprig-session--parse-input input)))
               (funcall snapshot))))
           (t
            (push (list :type 'tool :id id :name name :input input
-                       :changes (sprig-review-tool-changes name input)
+                       :changes (sprig-session-tool-changes name input)
                        :result nil :time time)
                  blocks))))
         (`(tool-result ,id ,is-error ,rtext)
@@ -536,13 +536,13 @@ may be carried across calls to continue a fold (see
           ((member id task-ids)
            (when-let ((subject (cdr (assoc id pending-creates))))
              (setq pending-creates (assoc-delete-all id pending-creates))
-             (let ((tid (or (sprig-review--task-created-id rtext)
+             (let ((tid (or (sprig-session--task-created-id rtext)
                             (number-to-string (1+ (length tasks))))))
                (setq tasks (append tasks (list (list :id tid :content subject
                                                      :status "pending"))))
                (funcall snapshot))))
           (t
-           (let ((blk (sprig-review--find-open-tool blocks id)))
+           (let ((blk (sprig-session--find-open-tool blocks id)))
              (if blk
                  (plist-put blk :result (list :error is-error :text rtext))
                ;; A result with no matching call: keep it as a loose block
@@ -557,27 +557,27 @@ may be carried across calls to continue a fold (see
         ;; main agent speaking, so it must not split the main agent's prose in
         ;; two, the way a real block of its own would.
         (`(subagent ,id ,state)
-         (when-let ((blk (sprig-review--find-tool blocks id)))
+         (when-let ((blk (sprig-session--find-tool blocks id)))
            (plist-put blk :agent
                       ;; Merged, not replaced: `task_progress' repeats and
                       ;; carries only what changed, so a plain overwrite would
                       ;; drop the agent type `task_started' named once.
-                      (sprig-review--merge-plist (plist-get blk :agent) state))))
+                      (sprig-session--merge-plist (plist-get blk :agent) state))))
         ;; A subagent's step becomes an ordinary tool block, nested under the
         ;; `Agent' row rather than pushed on the transcript.  Being the same
         ;; shape, it renders through the same code and gets a real diff when
         ;; the subagent edits a file.
         (`(subagent-call ,parent ,id ,name ,input)
-         (when-let ((blk (sprig-review--find-tool blocks parent)))
-           (sprig-review--agent-put
+         (when-let ((blk (sprig-session--find-tool blocks parent)))
+           (sprig-session--agent-put
             blk :steps
             (append (plist-get (plist-get blk :agent) :steps)
                     (list (list :type 'tool :id id :name name :input input
-                                :changes (sprig-review-tool-changes name input)
+                                :changes (sprig-session-tool-changes name input)
                                 :result nil :time time))))))
         (`(subagent-result ,parent ,id ,is-error ,rtext)
-         (when-let* ((blk (sprig-review--find-tool blocks parent))
-                     (step (sprig-review--find-tool
+         (when-let* ((blk (sprig-session--find-tool blocks parent))
+                     (step (sprig-session--find-tool
                             (plist-get (plist-get blk :agent) :steps) id)))
            (plist-put step :result (list :error is-error :text rtext))))
         (`(dialog ,id ,kind ,input)
@@ -587,7 +587,7 @@ may be carried across calls to continue a fold (see
                blocks))
         (`(dialog-answer ,id ,answers)
          (setq open nil)
-         (when-let ((blk (sprig-review--find-dialog blocks id)))
+         (when-let ((blk (sprig-session--find-dialog blocks id)))
            (plist-put blk :answered t)
            (plist-put blk :answers answers)))
         (`(done ,c ,e) (setq done t cost c error e))
@@ -600,15 +600,15 @@ may be carried across calls to continue a fold (see
       ;; a fresh checklist rather than reopening the stale one.
       (when (and tasks-block (not (eq (car blocks) tasks-block)))
         (setq tasks-block nil))))
-    ;; Repack the advanced accumulators, in the order `sprig-review--initial-state'
+    ;; Repack the advanced accumulators, in the order `sprig-session--initial-state'
     ;; lays them out, so a later fold can pick this state up.
     (list session title mode cost error done context time
           blocks open tasks pending-creates task-ids tasks-block)))
 
-(defun sprig-review-events-title (events)
+(defun sprig-session-events-title (events)
   "Return the freshest title carried by EVENTS, or nil.
 EVENTS is a buffer's stored event list, newest first (as pushed by
-`sprig-review-consume'), so the first `title' event is the freshest.  The
+`sprig-session-consume'), so the first `title' event is the freshest.  The
 navigator titles a live session's row with this, recovering the replayed
 `ai-title' that the live stream itself never carries."
   (let ((hit (seq-find (lambda (ev) (eq (car-safe ev) 'title)) events)))
@@ -623,7 +623,7 @@ navigator titles a live session's row with this, recovering the replayed
 ;; That file is a durable event log, so a review buffer can replay full
 ;; history without sprig keeping any store of its own.  This is the store
 ;; counterpart of the wire parser in sprig.el: both map their own schema
-;; onto the shared event vocabulary that `sprig-review-build' consumes.
+;; onto the shared event vocabulary that `sprig-session-build' consumes.
 ;;
 ;; The log is really a tree: records link by uuid/parentUuid.
 ;;
@@ -634,7 +634,7 @@ navigator titles a live session's row with this, recovering the replayed
 ;; (the flag is set in those separate files, on records this never reads) and
 ;; is kept as a guard, not as the thing that hides subagent work.
 
-(defun sprig-review-session-file (cwd session-id)
+(defun sprig-session-session-file (cwd session-id)
   "Return the session-log path (with a leading ~) for CWD and SESSION-ID.
 The path is relative to the session host, so a caller reads it locally or
 over SSH.  CWD is encoded the way the CLI names its project directory."
@@ -642,7 +642,7 @@ over SSH.  CWD is encoded the way the CLI names its project directory."
           (replace-regexp-in-string "[/.]" "-" cwd)
           session-id))
 
-(defun sprig-review--flatten-content (content)
+(defun sprig-session--flatten-content (content)
   "Flatten a tool_result CONTENT (string or block list) into text."
   (cond
    ((stringp content) content)
@@ -651,7 +651,7 @@ over SSH.  CWD is encoded the way the CLI names its project directory."
                content ""))
    (t (format "%S" content))))
 
-(defun sprig-review--assistant-events (content)
+(defun sprig-session--assistant-events (content)
   "Map an assistant message CONTENT block list to events."
   (when (listp content)
     (delq nil
@@ -668,7 +668,7 @@ over SSH.  CWD is encoded the way the CLI names its project directory."
                (_ nil)))
            content))))
 
-(defun sprig-review--usage-context-event (usage)
+(defun sprig-session--usage-context-event (usage)
   "Return a one-element ((context N)) list for a message's USAGE, or nil.
 N is the whole prompt the model was given for the turn: new input plus
 cache-read plus cache-creation tokens, which is the context-window size in
@@ -679,7 +679,7 @@ use.  Output tokens are the reply, not context, so they are left out."
                 (or (alist-get 'cache_creation_input_tokens usage) 0))))
       (when (> n 0) (list (list 'context n))))))
 
-(defun sprig-review--user-block-event (b)
+(defun sprig-session--user-block-event (b)
   "Map one block B of a user message to an event, or nil.
 A `tool_result' block carries a tool call's output back; a `text' block is
 the turn's own prose, which the CLI spells this way as often as it spells
@@ -690,12 +690,12 @@ it a bare string."
        (list 'tool-result
              (or (alist-get 'tool_use_id b) "t")
              (alist-get 'is_error b)
-             (string-trim (sprig-review--flatten-content (alist-get 'content b)))))
+             (string-trim (sprig-session--flatten-content (alist-get 'content b)))))
       ("text"
        (let ((text (string-trim (or (alist-get 'text b) ""))))
          (unless (string-empty-p text) (list 'user text)))))))
 
-(defun sprig-review--user-events (content)
+(defun sprig-session--user-events (content)
   "Map a user message CONTENT to events.
 CONTENT is either the turn's prose as a bare string, or a list of blocks
 holding that prose, a tool call's result, or both.  Both spellings of the
@@ -706,9 +706,9 @@ only the string one drops half a session's user turns from the replay."
     (unless (string-empty-p (string-trim content))
       (list (list 'user (string-trim content)))))
    ((listp content)
-    (delq nil (mapcar #'sprig-review--user-block-event content)))))
+    (delq nil (mapcar #'sprig-session--user-block-event content)))))
 
-(defun sprig-review--stamp-events (record events)
+(defun sprig-session--stamp-events (record events)
   "Prefix EVENTS with a `time' event carrying RECORD's timestamp.
 Returns EVENTS unchanged when it is empty or the record is unstamped, so
 no stray `time' event outlives the blocks it was meant to date."
@@ -717,7 +717,7 @@ no stray `time' event outlives the blocks it was meant to date."
         (cons (list 'time ts) events)
       events)))
 
-(defun sprig-review-session-record-events (record)
+(defun sprig-session-session-record-events (record)
   "Map one parsed session-log RECORD (an alist) to a list of events.
 Skips sidechain (subagent) records and bookkeeping records that carry no
 conversation content.  A conversation record is stamped with its own
@@ -738,38 +738,38 @@ conversation content.  A conversation record is stamped with its own
      ;; subagent's own file is ever fed through here.
      ((eq (alist-get 'isSidechain record) t) nil)
      ((equal type "assistant")
-      (sprig-review--stamp-events
+      (sprig-session--stamp-events
        record
        (append
-        (sprig-review--assistant-events
+        (sprig-session--assistant-events
          (alist-get 'content (alist-get 'message record)))
-        (sprig-review--usage-context-event
+        (sprig-session--usage-context-event
          (alist-get 'usage (alist-get 'message record))))))
      ((equal type "user")
       (let ((mode (alist-get 'permissionMode record))
-            (events (sprig-review--user-events
+            (events (sprig-session--user-events
                      (alist-get 'content (alist-get 'message record)))))
-        (sprig-review--stamp-events
+        (sprig-session--stamp-events
          record
          (if mode (cons (list 'mode mode) events) events)))))))
 
-(defun sprig-review--parse-session-json (line)
+(defun sprig-session--parse-session-json (line)
   "Parse one JSONL LINE into a record alist, or nil if it is not one."
   (let ((record (ignore-errors
                   (json-parse-string line :object-type 'alist :array-type 'list
                                      :null-object nil :false-object nil))))
     (and (consp record) record)))
 
-(defun sprig-review-parse-session-line (line)
+(defun sprig-session-parse-session-line (line)
   "Parse one JSONL session-log LINE into a list of events, or nil."
-  (when-let ((record (sprig-review--parse-session-json line)))
-    (sprig-review-session-record-events record)))
+  (when-let ((record (sprig-session--parse-session-json line)))
+    (sprig-session-session-record-events record)))
 
-(defun sprig-review-session-events (lines)
+(defun sprig-session-session-events (lines)
   "Return the ordered event list parsed from LINES of the session log."
-  (apply #'append (mapcar #'sprig-review-parse-session-line lines)))
+  (apply #'append (mapcar #'sprig-session-parse-session-line lines)))
 
-(defun sprig-review--subagent-block-event (parent block)
+(defun sprig-session--subagent-block-event (parent block)
   "Map one subagent message BLOCK under PARENT to a step event, or nil."
   (when (consp block)
     (let ((type (alist-get 'type block)))
@@ -778,16 +778,16 @@ conversation content.  A conversation record is stamped with its own
         (list 'subagent-call parent (or (alist-get 'id block) "t")
               (alist-get 'name block)
               ;; The log stores input as an object; the model takes either
-              ;; spelling through `sprig-review--parse-input', so it is
+              ;; spelling through `sprig-session--parse-input', so it is
               ;; passed on as it lies rather than round-tripped through JSON.
               (alist-get 'input block)))
        ((equal type "tool_result")
         (list 'subagent-result parent (or (alist-get 'tool_use_id block) "t")
               (alist-get 'is_error block)
-              (string-trim (sprig-review--flatten-content
+              (string-trim (sprig-session--flatten-content
                             (alist-get 'content block)))))))))
 
-(defun sprig-review-subagent-events (parent lines)
+(defun sprig-session-subagent-events (parent lines)
   "Return the step events for the subagent under PARENT, from LINES.
 PARENT is the `Agent' tool call the subagent ran under, taken from the
 `toolUseId' of the transcript's `.meta.json' sidecar.
@@ -803,16 +803,16 @@ for a remote session), so nothing here needs to know where it lives."
   (apply #'append
          (mapcar
           (lambda (line)
-            (when-let* ((record (sprig-review--parse-session-json line))
+            (when-let* ((record (sprig-session--parse-session-json line))
                         (content (alist-get 'content (alist-get 'message record))))
               (delq nil (mapcar (lambda (b)
-                                  (sprig-review--subagent-block-event parent b))
+                                  (sprig-session--subagent-block-event parent b))
                                 (and (listp content) content)))))
           lines)))
 
-(defun sprig-review-session-model (lines)
+(defun sprig-session-session-model (lines)
   "Build a review model from LINES of the stored session log."
-  (sprig-review-build (sprig-review-session-events lines)))
+  (sprig-session-build (sprig-session-session-events lines)))
 
-(provide 'sprig-review)
-;;; sprig-review.el ends here
+(provide 'sprig-session)
+;;; sprig-session.el ends here

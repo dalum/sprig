@@ -1,14 +1,14 @@
-;;; sprig-review-mode-tests.el --- ERT tests for the review renderer -*- lexical-binding: t; -*-
+;;; sprig-session-mode-tests.el --- ERT tests for the session renderer -*- lexical-binding: t; -*-
 
 ;;; Commentary:
 
-;; Tests for the magit-section renderer (sprig-review-mode.el).  Unlike
+;; Tests for the magit-section renderer (sprig-session-mode.el).  Unlike
 ;; the process-free suite in sprig-tests.el, these load magit-section, so
 ;; run them with its load path:
 ;;
 ;;   emacs -Q --batch -L . -L .deps/compat -L .deps/cond-let \
 ;;         -L .deps/llama -L .deps/magit-section \
-;;         -l sprig-review-mode.el -l sprig-review-mode-tests.el \
+;;         -l sprig-session-mode.el -l sprig-session-mode-tests.el \
 ;;         -f ert-run-tests-batch-and-exit
 
 ;;; Code:
@@ -16,33 +16,33 @@
 (require 'ert)
 (require 'cl-lib)
 (require 'magit-section)
-(require 'sprig-review-mode)
+(require 'sprig-session-mode)
 
-(defmacro sprig-review-tests--rendered (model meta &rest body)
-  "Render MODEL (with META) into a `sprig-review-mode' buffer, run BODY there."
+(defmacro sprig-session-tests--rendered (model meta &rest body)
+  "Render MODEL (with META) into a `sprig-session-mode' buffer, run BODY there."
   (declare (indent 2) (debug (form form body)))
   `(with-temp-buffer
-     (sprig-review-mode)
-     (sprig-review-render ,model ,meta)
+     (sprig-session-mode)
+     (sprig-session-render ,model ,meta)
      (goto-char (point-min))
      ,@body))
 
-(defmacro sprig-review-tests--rendered-expanded (model meta &rest body)
-  "Like `sprig-review-tests--rendered', with diff-bearing tools expanded.
+(defmacro sprig-session-tests--rendered-expanded (model meta &rest body)
+  "Like `sprig-session-tests--rendered', with diff-bearing tools expanded.
 Tools fold by default, which keeps their hunks out of the buffer entirely;
 the tests that reach into a hunk section need them drawn."
   (declare (indent 2) (debug (form form body)))
-  `(let ((sprig-review-expand-diffs t))
-     (sprig-review-tests--rendered ,model ,meta ,@body)))
+  `(let ((sprig-session-expand-diffs t))
+     (sprig-session-tests--rendered ,model ,meta ,@body)))
 
-(defun sprig-review-tests--margins ()
+(defun sprig-session-tests--margins ()
   "Return the current buffer's left-margin strings, in buffer order.
 They ride an overlay's `before-string' display property, not the buffer
 text, so they have to be read back off the overlays.  Each is the block's
 timestamp, or the state line's rule."
   (let (margins)
     (dolist (ov (overlays-in (point-min) (point-max)))
-      (when (overlay-get ov 'sprig-review-margin)
+      (when (overlay-get ov 'sprig-session-margin)
         (let ((display (get-text-property 0 'display
                                           (overlay-get ov 'before-string))))
           (should (equal (car display) '(margin left-margin)))
@@ -51,19 +51,19 @@ timestamp, or the state line's rule."
                 margins))))
     (mapcar #'cdr (sort margins (lambda (a b) (< (car a) (car b)))))))
 
-(defun sprig-review-tests--edit-model ()
+(defun sprig-session-tests--edit-model ()
   "A model with one Edit call and its result, plus a text block."
   (let ((input (json-serialize
                 (list :file_path "/tmp/x.el"
                       :old_string "old\ngone" :new_string "new"))))
-    (sprig-review-build
+    (sprig-session-build
      `((session "s1")
        (text "Editing the file.")
        (tool-call "t1" "Edit" ,input)
        (tool-result "t1" nil "applied")
        (done 0.0123 nil)))))
 
-(defun sprig-review-tests--todo-model ()
+(defun sprig-session-tests--todo-model ()
   "A model with one TodoWrite call carrying a three-item checklist."
   (let ((input (json-serialize
                 (list :todos
@@ -74,12 +74,12 @@ timestamp, or the state line's rule."
                              :activeForm "Doing second")
                        (list :content "Third" :status "pending"
                              :activeForm "Doing third"))))))
-    (sprig-review-build
+    (sprig-session-build
      `((tool-call "t1" "TodoWrite" ,input)
        (tool-result "t1" nil "Todos have been modified successfully")))))
 
-(ert-deftest sprig-review-mode-test-renders-text-and-diff ()
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-renders-text-and-diff ()
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (let ((s (buffer-string)))
       (should (string-match-p "Editing the file\\." s))
       (should (string-match-p "^Edit  " s))
@@ -99,10 +99,10 @@ timestamp, or the state line's rule."
     (magit-section-show (magit-current-section))
     (should (string-match-p "applied" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-tools-fold-by-default ()
+(ert-deftest sprig-session-mode-test-tools-fold-by-default ()
   ;; Every tool folds to its one-line heading, diff-bearing or not, so a long
   ;; turn reads as a list of what the agent did.  The diff is one TAB away.
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (let ((s (buffer-string)))
       ;; The heading still names the file and its line counts.
       (should (string-match-p "^Edit  " s))
@@ -115,27 +115,27 @@ timestamp, or the state line's rule."
     (magit-section-show (magit-current-section))
     (should (string-match-p "^\\+new$" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-expand-diffs-option ()
-  ;; `sprig-review-expand-diffs' opts back into a diff-bearing tool rendering
+(ert-deftest sprig-session-mode-test-expand-diffs-option ()
+  ;; `sprig-session-expand-diffs' opts back into a diff-bearing tool rendering
   ;; open; a tool with no diff folds regardless.
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^Edit  ")
     (should-not (oref (magit-current-section) hidden)))
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((tool-call "b1" "Bash" ,(json-serialize (list :command "ls")))
                   (tool-result "b1" nil "out")))))
-    (sprig-review-tests--rendered-expanded model nil
+    (sprig-session-tests--rendered-expanded model nil
       (goto-char (point-min))
       (re-search-forward "^Bash  ")
       (should (oref (magit-current-section) hidden)))))
 
-(ert-deftest sprig-review-mode-test-faces-survive-font-lock ()
+(ert-deftest sprig-session-mode-test-faces-survive-font-lock ()
   ;; `magit-section-mode' turns font-lock on, and font-lock's unfontify pass
   ;; strips the plain `face' property off every region it redisplays.  So
   ;; everything rendered must carry `font-lock-face' instead, or it silently
   ;; loses its colours as soon as the window scrolls over it.
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model)
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model)
       '(:title "T")
     (font-lock-mode 1)
     (font-lock-fontify-region (point-min) (point-max))
@@ -143,112 +143,112 @@ timestamp, or the state line's rule."
                 (goto-char (point-min))
                 (re-search-forward re)
                 (get-text-property (match-beginning 0) 'font-lock-face)))
-      (should (eq (face-at "^Edit  ") 'sprig-review-tool))
-      (should (eq (face-at "^\\+new$") 'sprig-review-added))
-      (should (eq (face-at "^-old$") 'sprig-review-removed))
-      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-review-file))
-      (should (eq (face-at "Title:") 'sprig-review-meta-key)))))
+      (should (eq (face-at "^Edit  ") 'sprig-session-tool))
+      (should (eq (face-at "^\\+new$") 'sprig-session-added))
+      (should (eq (face-at "^-old$") 'sprig-session-removed))
+      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-session-file))
+      (should (eq (face-at "Title:") 'sprig-session-meta-key)))))
 
-(ert-deftest sprig-review-mode-test-fontify-is-memoised ()
+(ert-deftest sprig-session-mode-test-fontify-is-memoised ()
   ;; A settled block's text never changes, so a re-render must not fontify it
   ;; afresh: the second call for the same text returns the cached object.
   (skip-unless (require 'markdown-mode nil t))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset))
-    (let ((first (sprig-review--fontify-markdown "## H\n\n**bold** here"))
-          (again (sprig-review--fontify-markdown "## H\n\n**bold** here")))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset))
+    (let ((first (sprig-session--fontify-markdown "## H\n\n**bold** here"))
+          (again (sprig-session--fontify-markdown "## H\n\n**bold** here")))
       (should (eq first again))
-      (should (= 1 (hash-table-count sprig-review--fontify-cache))))
+      (should (= 1 (hash-table-count sprig-session--fontify-cache))))
     ;; Toggling the flag stales the cache: the entry is dropped and rebuilt.
-    (let ((sprig-review-fontify-markdown nil))
+    (let ((sprig-session-fontify-markdown nil))
       (should (equal "## H\n\n**bold** here"
-                     (sprig-review--fontify-markdown "## H\n\n**bold** here"))))))
+                     (sprig-session--fontify-markdown "## H\n\n**bold** here"))))))
 
-(ert-deftest sprig-review-mode-test-async-fontify-defers-then-caches ()
+(ert-deftest sprig-session-mode-test-async-fontify-defers-then-caches ()
   ;; With async on, an uncached block returns raw and queues; the idle drain
   ;; fontifies it into the cache, after which the same block returns fontified.
   (skip-unless (require 'markdown-mode nil t))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review-fontify-async t)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset)
-        (sprig-review--fontify-queue nil)
-        (sprig-review--fontify-queued (make-hash-table :test 'equal))
-        (sprig-review--fontify-buffers nil)
-        (sprig-review--fontify-timer nil))
-    (let ((raw (sprig-review--prose "**bold** here")))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-fontify-async t)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset)
+        (sprig-session--fontify-queue nil)
+        (sprig-session--fontify-queued (make-hash-table :test 'equal))
+        (sprig-session--fontify-buffers nil)
+        (sprig-session--fontify-timer nil))
+    (let ((raw (sprig-session--prose "**bold** here")))
       ;; Deferred: the markup is still literal and nothing is cached yet.
       (should (equal-including-properties raw "**bold** here"))
-      (should (member "**bold** here" sprig-review--fontify-queue))
-      (should (= 0 (hash-table-count sprig-review--fontify-cache))))
+      (should (member "**bold** here" sprig-session--fontify-queue))
+      (should (= 0 (hash-table-count sprig-session--fontify-cache))))
     ;; A second render before the drain must not queue the block twice.
-    (sprig-review--prose "**bold** here")
-    (should (= 1 (length sprig-review--fontify-queue)))
+    (sprig-session--prose "**bold** here")
+    (should (= 1 (length sprig-session--fontify-queue)))
     ;; The idle worker fontifies the backlog into the cache.
-    (sprig-review--fontify-drain)
-    (should (= 1 (hash-table-count sprig-review--fontify-cache)))
-    (should (null sprig-review--fontify-queue))
+    (sprig-session--fontify-drain)
+    (should (= 1 (hash-table-count sprig-session--fontify-cache)))
+    (should (null sprig-session--fontify-queue))
     ;; Now the same block returns the fontified object (markup carries faces or
     ;; an invisibility property, so it is no longer the bare string).
-    (let ((done (sprig-review--prose "**bold** here")))
+    (let ((done (sprig-session--prose "**bold** here")))
       (should-not (equal-including-properties done "**bold** here")))))
 
-(ert-deftest sprig-review-mode-test-refresh-delay-adapts-to-cost ()
+(ert-deftest sprig-session-mode-test-refresh-delay-adapts-to-cost ()
   ;; The coalescing wait is the floor on a cheap buffer, tracks the last
   ;; render's cost between floor and ceiling, and is capped by the ceiling.
-  (let ((sprig-review-refresh-delay 0.1)
-        (sprig-review-refresh-delay-max 0.5))
+  (let ((sprig-session-refresh-delay 0.1)
+        (sprig-session-refresh-delay-max 0.5))
     (with-temp-buffer
-      (setq sprig-review--last-render-cost 0.0)
-      (should (= 0.1 (sprig-review--refresh-delay)))
-      (setq sprig-review--last-render-cost 0.25)
-      (should (= 0.25 (sprig-review--refresh-delay)))
-      (setq sprig-review--last-render-cost 2.0)
-      (should (= 0.5 (sprig-review--refresh-delay))))))
+      (setq sprig-session--last-render-cost 0.0)
+      (should (= 0.1 (sprig-session--refresh-delay)))
+      (setq sprig-session--last-render-cost 0.25)
+      (should (= 0.25 (sprig-session--refresh-delay)))
+      (setq sprig-session--last-render-cost 2.0)
+      (should (= 0.5 (sprig-session--refresh-delay))))))
 
-(ert-deftest sprig-review-mode-test-refresh-records-render-cost ()
+(ert-deftest sprig-session-mode-test-refresh-records-render-cost ()
   ;; A refresh times its own draw, so the next coalescing wait can widen.
   (with-temp-buffer
-    (sprig-review-mode)
-    (setq sprig-review--events (reverse '((user "hi") (text "there") (done 0.1 nil)))
-          sprig-review--last-render-cost 0.0)
-    (sprig-review--refresh)
-    (should (> sprig-review--last-render-cost 0.0))))
+    (sprig-session-mode)
+    (setq sprig-session--events (reverse '((user "hi") (text "there") (done 0.1 nil)))
+          sprig-session--last-render-cost 0.0)
+    (sprig-session--refresh)
+    (should (> sprig-session--last-render-cost 0.0))))
 
-(ert-deftest sprig-review-mode-test-user-block-is-set-off ()
-  (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
-    (sprig-review-tests--rendered model nil
+(ert-deftest sprig-session-mode-test-user-block-is-set-off ()
+  (let ((model (sprig-session-build '((user "the question") (text "the answer")))))
+    (sprig-session-tests--rendered model nil
       ;; No role labels: the tint alone tells the turns apart, and a blank
       ;; line separates them.
       (should (equal (buffer-string)
                      "\nthe question\n\nthe answer\n\n●  idle\n"))
       (goto-char (point-min))
       (re-search-forward "the question")
-      (should (memq 'sprig-review-user
+      (should (memq 'sprig-session-user
                     (ensure-list (get-text-property (match-beginning 0)
                                                     'font-lock-face))))
       ;; The agent's output is the untinted one.
       (re-search-forward "the answer")
-      (should-not (memq 'sprig-review-user
+      (should-not (memq 'sprig-session-user
                         (ensure-list (get-text-property (match-beginning 0)
                                                         'font-lock-face)))))))
 
-(ert-deftest sprig-review-mode-test-user-highlight-is-its-own ()
+(ert-deftest sprig-session-mode-test-user-highlight-is-its-own ()
   ;; magit paints the section under point with the shared
   ;; `magit-section-highlight', which would drop a user turn's tint just as
   ;; you move onto it.  Naming our own `heading-highlight-face' keeps it
   ;; reading as yours while it is current.
-  (let ((model (sprig-review-build '((user "the question") (text "the answer")))))
-    (sprig-review-tests--rendered model nil
+  (let ((model (sprig-session-build '((user "the question") (text "the answer")))))
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (re-search-forward "the question")
       (let ((sec (magit-current-section)))
         (should (eq (oref sec type) 'sprig-user))
-        (should (eq (oref sec heading-highlight-face) 'sprig-review-user-highlight))
+        (should (eq (oref sec heading-highlight-face) 'sprig-session-user-highlight))
         ;; With no heading to confine it to, magit paints it over the turn.
         (magit-section-highlight sec)
-        (should (memq 'sprig-review-user-highlight
+        (should (memq 'sprig-session-user-highlight
                       (mapcar (lambda (o) (overlay-get o 'font-lock-face))
                               (overlays-at (oref sec start))))))
       ;; The agent's prose claims no face of its own, so it gets magit's.
@@ -258,17 +258,17 @@ timestamp, or the state line's rule."
         (should (eq (oref sec type) 'sprig-text))
         (should-not (oref sec heading-highlight-face))))))
 
-(ert-deftest sprig-review-mode-test-tool-rows-pack-into-a-block ()
+(ert-deftest sprig-session-mode-test-tool-rows-pack-into-a-block ()
   ;; A run of tool calls reads as one block: a blank line above the run, and
   ;; none between its rows.  Prose keeps its blank line on either side.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((user "do it")
                   (text "on it")
                   (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))
                   (tool-call "t2" "Read" ,(json-serialize (list :file_path "b")))
                   (tool-call "t3" "Bash" ,(json-serialize (list :command "make")))
                   (text "done")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (should (equal (buffer-string)
                      (concat "\n"
                              "do it\n"
@@ -283,31 +283,31 @@ timestamp, or the state line's rule."
                              "\n"
                              "●  idle\n"))))))
 
-(ert-deftest sprig-review-mode-test-thinking-packs-with-the-tool-rows ()
+(ert-deftest sprig-session-mode-test-thinking-packs-with-the-tool-rows ()
   ;; A thinking block folds to a one-line row too, so it joins the run
   ;; rather than breaking it in two.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((text "on it")
                   (thinking "pondering")
                   (tool-call "t1" "Read" ,(json-serialize (list :file_path "a")))))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (should (equal (buffer-string)
                      "\non it\n\nthinking\nRead  a\n\n●  idle\n")))))
 
-(ert-deftest sprig-review-mode-test-todo-heading-shows-progress ()
+(ert-deftest sprig-session-mode-test-todo-heading-shows-progress ()
   ;; A folded TodoWrite still tells you how far along the plan is, the way a
   ;; folded edit shows its line counts; the checklist itself is one TAB away.
-  (sprig-review-tests--rendered (sprig-review-tests--todo-model) nil
+  (sprig-session-tests--rendered (sprig-session-tests--todo-model) nil
     (let ((s (buffer-string)))
       (should (string-match-p "^TodoWrite  1/3 done" s))
       ;; The checklist stays folded: no item is rendered.  Asserted on the
       ;; item, not on a bare `☑', since the state line now carries one too.
       (should-not (string-match-p "☑ First" s)))))
 
-(ert-deftest sprig-review-mode-test-todo-checklist-expands ()
+(ert-deftest sprig-session-mode-test-todo-checklist-expands ()
   ;; Opening the TodoWrite shows the checklist, each item with a status
   ;; marker, and no bookkeeping result line.
-  (sprig-review-tests--rendered (sprig-review-tests--todo-model) nil
+  (sprig-session-tests--rendered (sprig-session-tests--todo-model) nil
     (goto-char (point-min))
     (re-search-forward "^TodoWrite")
     (magit-section-show (magit-current-section))
@@ -318,19 +318,19 @@ timestamp, or the state line's rule."
       ;; The result is a reminder, not content; the checklist stands in for it.
       (should-not (string-match-p "↳ result" s)))))
 
-(ert-deftest sprig-review-mode-test-todo-line-glyphs ()
+(ert-deftest sprig-session-mode-test-todo-line-glyphs ()
   ;; Each status maps to its own marker, so the checklist reads at a glance.
   (should (string-prefix-p
            "☑ " (substring-no-properties
-                 (sprig-review--todo-line '((content . "a") (status . "completed"))))))
+                 (sprig-session--todo-line '((content . "a") (status . "completed"))))))
   (should (string-prefix-p
            "▶ " (substring-no-properties
-                 (sprig-review--todo-line '((content . "b") (status . "in_progress"))))))
+                 (sprig-session--todo-line '((content . "b") (status . "in_progress"))))))
   (should (string-prefix-p
            "☐ " (substring-no-properties
-                 (sprig-review--todo-line '((content . "c") (status . "pending")))))))
+                 (sprig-session--todo-line '((content . "c") (status . "pending")))))))
 
-(defun sprig-review-tests--task-events (&rest tail)
+(defun sprig-session-tests--task-events (&rest tail)
   "Build events for a run of task ops: two creates and a start, then TAIL.
 Each create's result carries its assigned id, the way the CLI answers, so
 the fold learns the id from the result rather than from the call."
@@ -343,11 +343,11 @@ the fold learns the id from the result rather than from the call."
      (tool-result "u1" nil "Updated task #1 status"))
    tail))
 
-(ert-deftest sprig-review-mode-test-task-fold-into-checklist ()
+(ert-deftest sprig-session-mode-test-task-fold-into-checklist ()
   ;; The granular Task tools fold into one running checklist with heading
   ;; progress, the same shape a TodoWrite renders; no raw TaskCreate rows.
-  (let ((model (sprig-review-build (sprig-review-tests--task-events))))
-    (sprig-review-tests--rendered model nil
+  (let ((model (sprig-session-build (sprig-session-tests--task-events))))
+    (sprig-session-tests--rendered model nil
       (let ((s (buffer-string)))
         (should (string-match-p "^Tasks  0/2 done" s))
         (should-not (string-match-p "TaskCreate" s))
@@ -359,11 +359,11 @@ the fold learns the id from the result rather than from the call."
         (should (string-match-p "▶ First" s))
         (should (string-match-p "☐ Second" s))))))
 
-(ert-deftest sprig-review-mode-test-task-run-coalesces-then-splits ()
+(ert-deftest sprig-session-mode-test-task-run-coalesces-then-splits ()
   ;; A run of task ops is one snapshot; a non-task block between runs opens a
   ;; fresh one, so the second checklist shows the moved-on state.
-  (let* ((model (sprig-review-build
-                 (sprig-review-tests--task-events
+  (let* ((model (sprig-session-build
+                 (sprig-session-tests--task-events
                   '(text "Working on it.")
                   `(tool-call "u2" "TaskUpdate"
                               ,(json-serialize '(:taskId "1" :status "completed")))
@@ -377,10 +377,10 @@ the fold learns the id from the result rather than from the call."
     (should (equal (alist-get 'status (car (plist-get (cadr tasks) :items)))
                    "completed"))))
 
-(ert-deftest sprig-review-mode-test-task-delete-drops-it ()
+(ert-deftest sprig-session-mode-test-task-delete-drops-it ()
   ;; A deleted task leaves the checklist; the survivors keep their order.
-  (let* ((model (sprig-review-build
-                 (sprig-review-tests--task-events
+  (let* ((model (sprig-session-build
+                 (sprig-session-tests--task-events
                   `(tool-call "u3" "TaskUpdate"
                               ,(json-serialize '(:taskId "1" :status "deleted")))
                   '(tool-result "u3" nil "Updated task #1 deleted"))))
@@ -391,62 +391,62 @@ the fold learns the id from the result rather than from the call."
     (should (= (length items) 1))
     (should (equal (alist-get 'content (car items)) "Second"))))
 
-(defmacro sprig-review-tests--with-tz (tz &rest body)
+(defmacro sprig-session-tests--with-tz (tz &rest body)
   "Run BODY with the local timezone set to TZ, restoring it after."
   (declare (indent 1) (debug (form body)))
   `(let ((old (getenv "TZ")))
      (unwind-protect (progn (setenv "TZ" ,tz) ,@body)
        (setenv "TZ" old))))
 
-(ert-deftest sprig-review-mode-test-time-string ()
+(ert-deftest sprig-session-mode-test-time-string ()
   ;; The log stamps in UTC; the margin shows local time.
-  (sprig-review-tests--with-tz "UTC0"
-    (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z") "09:16"))
-    (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
-      (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z")
+  (sprig-session-tests--with-tz "UTC0"
+    (should (equal (sprig-session--time-string "2026-07-15T09:16:56.955Z") "09:16"))
+    (let ((sprig-session-timestamp-format "%m-%d %H:%M"))
+      (should (equal (sprig-session--time-string "2026-07-15T09:16:56.955Z")
                      "07-15 09:16"))))
   ;; POSIX TZ signs are inverted: UTC-2 is two hours east of Greenwich.
-  (sprig-review-tests--with-tz "UTC-2"
-    (should (equal (sprig-review--time-string "2026-07-15T09:16:56.955Z") "11:16")))
+  (sprig-session-tests--with-tz "UTC-2"
+    (should (equal (sprig-session--time-string "2026-07-15T09:16:56.955Z") "11:16")))
   ;; A block with no usable time is worth more than a render that dies on one.
-  (should-not (sprig-review--time-string "not a time"))
-  (should-not (sprig-review--time-string nil))
-  (let ((sprig-review-timestamp-format nil))
-    (should-not (sprig-review--time-string "2026-07-15T09:16:56.955Z"))))
+  (should-not (sprig-session--time-string "not a time"))
+  (should-not (sprig-session--time-string nil))
+  (let ((sprig-session-timestamp-format nil))
+    (should-not (sprig-session--time-string "2026-07-15T09:16:56.955Z"))))
 
-(ert-deftest sprig-review-mode-test-margin-width ()
+(ert-deftest sprig-session-mode-test-margin-width ()
   ;; The margin is the stamp plus one column for the running bar, so the bar
   ;; costs nothing next to a timestamp and the margin narrows to just the bar
   ;; when timestamps are off.
-  (let ((sprig-review-timestamp-format "%H:%M"))
-    (should (= (sprig-review--margin-width) 6)))
-  (let ((sprig-review-timestamp-format "%m-%d %H:%M"))
-    (should (= (sprig-review--margin-width) 12)))
-  (let ((sprig-review-timestamp-format nil))
-    (should (= (sprig-review--margin-width) 0))))
+  (let ((sprig-session-timestamp-format "%H:%M"))
+    (should (= (sprig-session--margin-width) 6)))
+  (let ((sprig-session-timestamp-format "%m-%d %H:%M"))
+    (should (= (sprig-session--margin-width) 12)))
+  (let ((sprig-session-timestamp-format nil))
+    (should (= (sprig-session--margin-width) 0))))
 
-(ert-deftest sprig-review-mode-test-timestamp-rides-the-margin ()
+(ert-deftest sprig-session-mode-test-timestamp-rides-the-margin ()
   ;; The stamp hangs off an overlay, so it dates the block without putting a
   ;; character into the buffer text the verbs read.
-  (sprig-review-tests--with-tz "UTC0"
-    (let ((model (sprig-review-build
+  (sprig-session-tests--with-tz "UTC0"
+    (let ((model (sprig-session-build
                   `((time "2026-07-15T09:16:56.955Z")
                     (user "q")
                     (time "2026-07-15T09:17:30.000Z")
                     (tool-call "t1" "Bash" ,(json-serialize (list :command "ls")))))))
-      (sprig-review-tests--rendered model nil
+      (sprig-session-tests--rendered model nil
         (should (equal (buffer-string) "\nq\n\nBash  ls\n\n●  idle\n"))
         ;; One per block, each against its own first line.  Nothing is
         ;; running, so the bar column is blank.
-        (should (equal (sprig-review-tests--margins)
+        (should (equal (sprig-session-tests--margins)
                        (list "09:16" "09:17" (make-string 6 ?━)))))
       ;; With the format off, only the bar column is left.
-      (let ((sprig-review-timestamp-format nil))
-        (sprig-review-tests--rendered model nil
-          (should (equal (sprig-review-tests--margins) nil))
+      (let ((sprig-session-timestamp-format nil))
+        (sprig-session-tests--rendered model nil
+          (should (equal (sprig-session-tests--margins) nil))
           (should (= left-margin-width 0)))))))
 
-(defun sprig-review-tests--state-line ()
+(defun sprig-session-tests--state-line ()
   "Return the buffer's last line, which is the state line, and its face."
   (save-excursion
     (goto-char (point-max))
@@ -455,80 +455,80 @@ the fold learns the id from the result rather than from the call."
                                           (line-end-position))
           (get-text-property (line-beginning-position) 'font-lock-face))))
 
-(ert-deftest sprig-review-mode-test-state-line-says-the-turn-is-over ()
+(ert-deftest sprig-session-mode-test-state-line-says-the-turn-is-over ()
   ;; The buffer has to say a turn landed, below the last message, rather than
   ;; leave it to be inferred from nothing having moved for a while.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(user "do it"))
-    (sprig-review-consume '(text "on it"))
-    (sprig-review-consume (list 'tool-call "t1" "Bash"
+    (sprig-session-mode)
+    (sprig-session-consume '(user "do it"))
+    (sprig-session-consume '(text "on it"))
+    (sprig-session-consume (list 'tool-call "t1" "Bash"
                                 (json-serialize (list :command "ls"))))
-    (sprig-review-flush)
-    (should sprig-review--streaming)
-    (should (equal (sprig-review-tests--state-line)
-                   '("▶  working…" . sprig-review-working)))
+    (sprig-session-flush)
+    (should sprig-session--streaming)
+    (should (equal (sprig-session-tests--state-line)
+                   '("▶  working…" . sprig-session-working)))
     ;; The turn lands: said outright, with what it cost.
-    (sprig-review-consume '(done 0.0312 nil))
-    (sprig-review-flush)
-    (should-not sprig-review--streaming)
-    (should (equal (sprig-review-tests--state-line)
-                   '("✓  turn over" . sprig-review-done)))
+    (sprig-session-consume '(done 0.0312 nil))
+    (sprig-session-flush)
+    (should-not sprig-session--streaming)
+    (should (equal (sprig-session-tests--state-line)
+                   '("✓  turn over" . sprig-session-done)))
     ;; A new turn takes the line back.
-    (sprig-review-consume '(text "more"))
-    (sprig-review-flush)
-    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
+    (sprig-session-consume '(text "more"))
+    (sprig-session-flush)
+    (should (equal (car (sprig-session-tests--state-line)) "▶  working…"))))
 
-(ert-deftest sprig-review-mode-test-state-line-reports-a-failed-turn ()
+(ert-deftest sprig-session-mode-test-state-line-reports-a-failed-turn ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "trying"))
-    (sprig-review-consume '(done nil t))
-    (sprig-review-flush)
-    (should (equal (sprig-review-tests--state-line)
-                   '("✗  turn failed" . sprig-review-failed)))))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "trying"))
+    (sprig-session-consume '(done nil t))
+    (sprig-session-flush)
+    (should (equal (sprig-session-tests--state-line)
+                   '("✗  turn failed" . sprig-session-failed)))))
 
-(ert-deftest sprig-review-mode-test-state-line-awaiting-after-send ()
+(ert-deftest sprig-session-mode-test-state-line-awaiting-after-send ()
   ;; After a turn lands and a new message is sent, the transport is busy while
   ;; it waits on the agent's first token; the line must say so, not fall back
   ;; to the previous turn's stale `✓ turn over'.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "done that"))
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
-    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "done that"))
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
+    (should (equal (car (sprig-session-tests--state-line)) "✓  turn over"))
     ;; Send: the transport sets busy before the user event is consumed, and
     ;; nothing has streamed back yet.
     (setq-local sprig--busy t)
-    (sprig-review-consume '(user "and now this"))
-    (sprig-review-flush)
-    (should-not sprig-review--streaming)
-    (should (equal (sprig-review-tests--state-line)
-                   '("▷  sent, awaiting reply" . sprig-review-pending)))
+    (sprig-session-consume '(user "and now this"))
+    (sprig-session-flush)
+    (should-not sprig-session--streaming)
+    (should (equal (sprig-session-tests--state-line)
+                   '("▷  sent, awaiting reply" . sprig-session-pending)))
     ;; The agent's first token flips it to working.
-    (sprig-review-consume '(text "starting"))
-    (sprig-review-flush)
-    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
+    (sprig-session-consume '(text "starting"))
+    (sprig-session-flush)
+    (should (equal (car (sprig-session-tests--state-line)) "▶  working…"))))
 
-(ert-deftest sprig-review-mode-test-steer-floats-then-commits-at-boundary ()
+(ert-deftest sprig-session-mode-test-steer-floats-then-commits-at-boundary ()
   ;; A steer sent mid-turn must not split the streaming message: it floats
   ;; pinned above the state line until the agent reaches its next tool-call
   ;; boundary, and only then folds into the transcript, so the running prose
   ;; stays whole while it waits.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(user "q"))
-    (sprig-review-consume '(text "looking into it"))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(user "q"))
+    (sprig-session-consume '(text "looking into it"))
+    (sprig-session-flush)
     ;; Float a steer: it shows, but is not a transcript turn yet.
-    (sprig-review-stage-steer "actually, use B")
-    (sprig-review-flush)
-    (should (equal sprig-review--pending-steer '("actually, use B")))
-    (should-not (member '(user "actually, use B") sprig-review--events))
+    (sprig-session-stage-steer "actually, use B")
+    (sprig-session-flush)
+    (should (equal sprig-session--pending-steer '("actually, use B")))
+    (should-not (member '(user "actually, use B") sprig-session--events))
     ;; It sits just above the state line, marked as not yet taken; the state
     ;; line is still the buffer's last line and still says the turn is running.
-    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))
+    (should (equal (car (sprig-session-tests--state-line)) "▶  working…"))
     (should (string-match-p "^⤷ actually, use B$"
                             (save-excursion
                               (goto-char (point-max))
@@ -537,46 +537,46 @@ the fold learns the id from the result rather than from the call."
                                (line-beginning-position) (line-end-position)))))
     ;; The next tool-call is the boundary that takes it: it commits, in order,
     ;; just before that call, and the float clears.
-    (sprig-review-consume (list 'tool-call "t1" "Bash"
+    (sprig-session-consume (list 'tool-call "t1" "Bash"
                                 (json-serialize (list :command "ls"))))
-    (sprig-review-flush)
-    (should-not sprig-review--pending-steer)
-    (should (member '(user "actually, use B") sprig-review--events))
+    (sprig-session-flush)
+    (should-not sprig-session--pending-steer)
+    (should (member '(user "actually, use B") sprig-session--events))
     (should-not (string-match-p "⤷" (buffer-string)))
     ;; And it lands ahead of the tool call, not after it.
     (let ((s (buffer-string)))
       (should (< (string-match "actually, use B" s)
                  (string-match "Bash\\|ls" s))))))
 
-(ert-deftest sprig-review-mode-test-steer-commits-when-the-turn-ends ()
+(ert-deftest sprig-session-mode-test-steer-commits-when-the-turn-ends ()
   ;; A steer floated late, with no further tool call, still lands: the turn's
   ;; own `done' is the boundary that commits it, so it is never lost.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "wrapping up"))
-    (sprig-review-stage-steer "one more thing")
-    (sprig-review-flush)
-    (should sprig-review--pending-steer)
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
-    (should-not sprig-review--pending-steer)
-    (should (member '(user "one more thing") sprig-review--events))
-    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "wrapping up"))
+    (sprig-session-stage-steer "one more thing")
+    (sprig-session-flush)
+    (should sprig-session--pending-steer)
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
+    (should-not sprig-session--pending-steer)
+    (should (member '(user "one more thing") sprig-session--events))
+    (should (equal (car (sprig-session-tests--state-line)) "✓  turn over"))))
 
-(ert-deftest sprig-review-mode-test-queued-message-floats ()
+(ert-deftest sprig-session-mode-test-queued-message-floats ()
   ;; A `c q' message shows floated above the state line while it waits for the
   ;; turn to end, drawn straight from `sprig--queued', so a queued follow-up is
   ;; as visible as a steer.  It carries an hourglass, not a steer's arrow, and
   ;; is not a transcript turn: it becomes one only when the queue flushes.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(user "q"))
-    (sprig-review-consume '(text "on it"))
+    (sprig-session-mode)
+    (sprig-session-consume '(user "q"))
+    (sprig-session-consume '(text "on it"))
     (setq-local sprig--queued '("then run the tests"))
-    (sprig-review-flush)
-    (should-not (member '(user "then run the tests") sprig-review--events))
+    (sprig-session-flush)
+    (should-not (member '(user "then run the tests") sprig-session--events))
     ;; The state line still says the turn is running (with its queued count).
-    (should (string-prefix-p "▶  working…" (car (sprig-review-tests--state-line))))
+    (should (string-prefix-p "▶  working…" (car (sprig-session-tests--state-line))))
     (should (string-match-p "^⧖ then run the tests$"
                             (save-excursion
                               (goto-char (point-max))
@@ -587,116 +587,116 @@ the fold learns the id from the result rather than from the call."
     ;; queue change schedules the redraw the way the real mutations do.
     (setq-local sprig--queued nil)
     (sprig--redraw-queue-floats)
-    (sprig-review-flush)
+    (sprig-session-flush)
     (should-not (string-match-p "⧖" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-steer-floats-above-a-queued-message ()
+(ert-deftest sprig-session-mode-test-steer-floats-above-a-queued-message ()
   ;; Both can wait at once: the steer (already on the wire, taken this turn)
   ;; sits above the queued message (waits for the turn to end), so the order
   ;; they will land in reads top to bottom.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "working"))
-    (sprig-review-stage-steer "use B instead")
+    (sprig-session-mode)
+    (sprig-session-consume '(text "working"))
+    (sprig-session-stage-steer "use B instead")
     (setq-local sprig--queued '("and then commit"))
-    (sprig-review-flush)
+    (sprig-session-flush)
     (let ((s (buffer-string)))
       (should (< (string-match "⤷ use B instead" s)
                  (string-match "⧖ and then commit" s))))))
 
-(ert-deftest sprig-review-mode-test-reject-unstages-the-queued-at-point ()
+(ert-deftest sprig-session-mode-test-reject-unstages-the-queued-at-point ()
   ;; `k' is the take-it-back gesture: on a floated `c q' message it drops just
   ;; that one, leaving the rest of the queue in place.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "on it"))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "on it"))
     (setq-local sprig--queued '("keep me" "drop me"))
-    (sprig-review-flush)
+    (sprig-session-flush)
     (goto-char (point-min))
     (re-search-forward "drop me")
     (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
-      (sprig-review-reject))
+      (sprig-session-reject))
     (should (equal sprig--queued '("keep me")))))
 
-(ert-deftest sprig-review-mode-test-reject-refuses-a-steer ()
+(ert-deftest sprig-session-mode-test-reject-refuses-a-steer ()
   ;; A steer is already on the wire, so `k' cannot take it back; it says so
   ;; rather than silently hiding a message the agent will get.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "on it"))
-    (sprig-review-stage-steer "already sent")
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "on it"))
+    (sprig-session-stage-steer "already sent")
+    (sprig-session-flush)
     (goto-char (point-min))
     (re-search-forward "already sent")
-    (should-error (sprig-review-reject) :type 'user-error)))
+    (should-error (sprig-session-reject) :type 'user-error)))
 
-(ert-deftest sprig-review-mode-test-state-line-of-replayed-history ()
+(ert-deftest sprig-session-mode-test-state-line-of-replayed-history ()
   ;; A conversation read from disk carries no `done', but nothing is running
   ;; in it either; it must not claim to be working, nor to have just landed.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-seed '((user "q") (text "a")))
-    (should-not sprig-review--streaming)
-    (should (equal (sprig-review-tests--state-line)
-                   '("●  idle" . sprig-review-idle)))))
+    (sprig-session-mode)
+    (sprig-session-seed '((user "q") (text "a")))
+    (should-not sprig-session--streaming)
+    (should (equal (sprig-session-tests--state-line)
+                   '("●  idle" . sprig-session-idle)))))
 
-(ert-deftest sprig-review-mode-test-state-line-rules-the-side-bar ()
+(ert-deftest sprig-session-mode-test-state-line-rules-the-side-bar ()
   ;; The side bar carries the same mark, in the same colour, so the gutter
   ;; ends the turn as plainly as the line does.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "hi"))
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
-    (let ((rule (car (last (sprig-review-tests--margins)))))
-      (should (equal rule (make-string (sprig-review--margin-width) ?━))))))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "hi"))
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
+    (let ((rule (car (last (sprig-session-tests--margins)))))
+      (should (equal rule (make-string (sprig-session--margin-width) ?━))))))
 
-(ert-deftest sprig-review-mode-test-a-tool-only-turn-is-working ()
+(ert-deftest sprig-session-mode-test-a-tool-only-turn-is-working ()
   ;; The state line follows the turn, not the prose: a turn opening with a
   ;; tool call is working just as much as one opening with text.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'tool-call "t1" "Bash"
+    (sprig-session-mode)
+    (sprig-session-consume (list 'tool-call "t1" "Bash"
                                 (json-serialize (list :command "ls"))))
-    (sprig-review-flush)
-    (should sprig-review--streaming)
-    (should (equal (car (sprig-review-tests--state-line)) "▶  working…"))))
+    (sprig-session-flush)
+    (should sprig-session--streaming)
+    (should (equal (car (sprig-session-tests--state-line)) "▶  working…"))))
 
-(ert-deftest sprig-review-mode-test-live-stamps-once-per-block ()
+(ert-deftest sprig-session-mode-test-live-stamps-once-per-block ()
   ;; The wire carries no times, so the sink stamps on arrival: once per block,
   ;; not once per streamed token.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "Hel"))
-    (sprig-review-consume '(text "lo"))
-    (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
-    (should (= 2 (seq-count (lambda (e) (eq (car e) 'time)) sprig-review--events)))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "Hel"))
+    (sprig-session-consume '(text "lo"))
+    (sprig-session-consume '(tool-call "t1" "Bash" "{}"))
+    (should (= 2 (seq-count (lambda (e) (eq (car e) 'time)) sprig-session--events)))
     ;; And the stamps reach the blocks.
-    (let ((blocks (plist-get (sprig-review-build (reverse sprig-review--events))
+    (let ((blocks (plist-get (sprig-session-build (reverse sprig-session--events))
                              :blocks)))
       (should (= 2 (length blocks)))
       (should (plist-get (nth 0 blocks) :time))
       (should (plist-get (nth 1 blocks) :time)))))
 
-(ert-deftest sprig-review-mode-test-live-stamp-survives-a-rebuild ()
+(ert-deftest sprig-session-mode-test-live-stamp-survives-a-rebuild ()
   ;; The stamp lives in the event list, not the clock, so rebuilding the model
   ;; (which every render does) redates nothing.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "hi"))
-    (let ((first (plist-get (car (plist-get (sprig-review-build
-                                             (reverse sprig-review--events))
+    (sprig-session-mode)
+    (sprig-session-consume '(text "hi"))
+    (let ((first (plist-get (car (plist-get (sprig-session-build
+                                             (reverse sprig-session--events))
                                             :blocks))
                             :time)))
       (should first)
-      (sprig-review-consume '(done 0.01 nil))
+      (sprig-session-consume '(done 0.01 nil))
       (should (equal first
-                     (plist-get (car (plist-get (sprig-review-build
-                                                 (reverse sprig-review--events))
+                     (plist-get (car (plist-get (sprig-session-build
+                                                 (reverse sprig-session--events))
                                                 :blocks))
                                 :time))))))
 
-(ert-deftest sprig-review-mode-test-refresh-re-reads-the-log ()
+(ert-deftest sprig-session-mode-test-refresh-re-reads-the-log ()
   ;; A buffer's events are seeded once at open and never re-read, so a log
   ;; that has grown (or a parser taught to read more of it) needs `g'.  This
   ;; is why a timestamp added to the parser did not reach an open buffer.
@@ -709,8 +709,8 @@ the fold learns the id from the result rather than from the call."
                        :message (:role "user" :content "first")))
                     "\n"))
           (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
-            (sprig-review-open-file file))
-          (with-current-buffer (format "*sprig-review: %s*" (file-name-base file))
+            (sprig-session-open-file file))
+          (with-current-buffer (format "*sprig-session: %s*" (file-name-base file))
             (should (string-match-p "first" (buffer-string)))
             ;; The log grows behind the buffer's back.
             (with-temp-buffer
@@ -721,27 +721,27 @@ the fold learns the id from the result rather than from the call."
               (append-to-file (point-min) (point-max) file))
             ;; A re-render alone does not notice: it rebuilds from the events
             ;; the buffer already holds.
-            (sprig-review--refresh)
+            (sprig-session--refresh)
             (should-not (string-match-p "second" (buffer-string)))
             ;; `g' re-reads the file it was opened from.
-            (sprig-review-refresh)
+            (sprig-session-refresh)
             (should (string-match-p "second" (buffer-string)))
             (kill-buffer)))
       (delete-file file))))
 
-(ert-deftest sprig-review-mode-test-refresh-is-on-g-and-waits-for-the-turn ()
+(ert-deftest sprig-session-mode-test-refresh-is-on-g-and-waits-for-the-turn ()
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     ;; `g' is bound to `revert-buffer' by the parent mode, so the refresh has
     ;; to hang off `revert-buffer-function' to be reachable there at all.
     (should (eq (key-binding (kbd "g")) 'revert-buffer))
-    (should (eq revert-buffer-function #'sprig-review-refresh))
+    (should (eq revert-buffer-function #'sprig-session-refresh))
     ;; Mid-turn it refuses: the in-flight turn is not in the log yet, so
     ;; re-seeding from the log would drop it out of the buffer.
     (setq-local sprig--busy t)
-    (should-error (sprig-review-refresh) :type 'user-error)))
+    (should-error (sprig-session-refresh) :type 'user-error)))
 
-(defun sprig-review-tests--dialog-input (&optional multi)
+(defun sprig-session-tests--dialog-input (&optional multi)
   "A two-option question, MULTI when it takes more than one answer."
   `((questions . [((question . "Which approach?")
                    (header . "Approach")
@@ -751,15 +751,15 @@ the fold learns the id from the result rather than from the call."
                                ((label . "Patch it")
                                 (description . "keep going"))]))])))
 
-(ert-deftest sprig-review-mode-test-pending-dialog-renders-and-waits ()
+(ert-deftest sprig-session-mode-test-pending-dialog-renders-and-waits ()
   ;; A question renders in the buffer, with what it offers, and the state
   ;; line says the turn is stopped on you rather than working.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "I need to know something."))
-    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                (sprig-review-tests--dialog-input)))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "I need to know something."))
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-flush)
     (let ((s (buffer-string)))
       (should (string-match-p "? Which approach?" s))
       (should (string-match-p "Rewrite it (Recommended)" s))
@@ -767,59 +767,59 @@ the fold learns the id from the result rather than from the call."
       ;; It says how to answer, rather than pretending to be pickable.
       (should (string-match-p "a a to answer" s)))
     ;; Waiting beats working: the turn is stopped, not running.
-    (should (equal (sprig-review-tests--state-line)
-                   '("?  waiting on you  ·  a a to answer" . sprig-review-waiting)))))
+    (should (equal (sprig-session-tests--state-line)
+                   '("?  waiting on you  ·  a a to answer" . sprig-session-waiting)))))
 
-(ert-deftest sprig-review-mode-test-answered-dialog-shows-the-answer ()
+(ert-deftest sprig-session-mode-test-answered-dialog-shows-the-answer ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                (sprig-review-tests--dialog-input)))
-    (sprig-review-consume (list 'dialog-answer "req-1"
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-consume (list 'dialog-answer "req-1"
                                 (list (cons (intern "Which approach?")
                                             "Patch it"))))
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
     (let ((s (buffer-string)))
       (should (string-match-p "? Which approach?" s))
       ;; Settled: what was said, and no longer how to say it.
       (should (string-match-p "Patch it" s))
       (should-not (string-match-p "a a to answer" s)))
-    (should (equal (car (sprig-review-tests--state-line)) "✓  turn over"))))
+    (should (equal (car (sprig-session-tests--state-line)) "✓  turn over"))))
 
-(ert-deftest sprig-review-mode-test-answer-recommended ()
+(ert-deftest sprig-session-mode-test-answer-recommended ()
   ;; `a r' takes the option the tool marked, without opening anything.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                (sprig-review-tests--dialog-input)))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-flush)
     (let (answered)
       (cl-letf (((symbol-function 'sprig--review-answer-dialog)
                  (lambda (id _input answers) (setq answered (list id answers)))))
-        (sprig-review-answer-recommended))
+        (sprig-session-answer-recommended))
       (should (equal (car answered) "req-1"))
       (should (equal (cdar (cadr answered)) "Rewrite it (Recommended)")))))
 
-(ert-deftest sprig-review-mode-test-answer-skip ()
+(ert-deftest sprig-session-mode-test-answer-skip ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                (sprig-review-tests--dialog-input)))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-flush)
     (let (answered)
       (cl-letf (((symbol-function 'sprig--review-answer-dialog)
                  (lambda (_id _input answers) (setq answered (list :answers answers)))))
-        (sprig-review-answer-skip))
+        (sprig-session-answer-skip))
       (should (equal answered '(:answers nil)))))
   ;; With nothing waiting, the verbs say so rather than doing something.
   (with-temp-buffer
-    (sprig-review-mode)
-    (should-error (sprig-review-answer-skip) :type 'user-error)
-    (should-error (sprig-review-answer-recommended) :type 'user-error)
-    (should-error (sprig-review-answer) :type 'user-error)))
+    (sprig-session-mode)
+    (should-error (sprig-session-answer-skip) :type 'user-error)
+    (should-error (sprig-session-answer-recommended) :type 'user-error)
+    (should-error (sprig-session-answer) :type 'user-error)))
 
-(ert-deftest sprig-review-mode-test-answer-buffer-picks-and-sends ()
+(ert-deftest sprig-session-mode-test-answer-buffer-picks-and-sends ()
   ;; `a a' opens a buffer on the question; picking an option answers it.
   (let (answered)
     (cl-letf (((symbol-function 'sprig--review-answer-dialog)
@@ -827,11 +827,11 @@ the fold learns the id from the result rather than from the call."
               ((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'quit-window) #'ignore))
       (with-temp-buffer
-        (sprig-review-mode)
-        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                    (sprig-review-tests--dialog-input)))
-        (sprig-review-flush)
-        (sprig-review-answer)
+        (sprig-session-mode)
+        (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-session-tests--dialog-input)))
+        (sprig-session-flush)
+        (sprig-session-answer)
         (with-current-buffer "*sprig-answer*"
           (should (string-match-p "? Which approach?" (buffer-string)))
           (should (string-match-p "1  Rewrite it" (buffer-string)))
@@ -843,37 +843,37 @@ the fold learns the id from the result rather than from the call."
     (should (equal (cdar (cadr answered)) "Patch it")))
   (kill-buffer "*sprig-answer*"))
 
-(ert-deftest sprig-review-mode-test-visit-on-question-answers ()
+(ert-deftest sprig-session-mode-test-visit-on-question-answers ()
   ;; RET on a question the agent is waiting on opens the answer dialog,
   ;; the way `a a' does, rather than trying to visit a file.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                (sprig-review-tests--dialog-input)))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-flush)
     (goto-char (point-min))
     (should (re-search-forward "Which approach?" nil t))
     (let (opened)
-      (cl-letf (((symbol-function 'sprig-review-answer)
+      (cl-letf (((symbol-function 'sprig-session-answer)
                  (lambda () (setq opened t))))
-        (sprig-review-visit))
+        (sprig-session-visit))
       (should opened))))
 
-(ert-deftest sprig-review-mode-test-visit-off-question-keeps-visiting ()
+(ert-deftest sprig-session-mode-test-visit-off-question-keeps-visiting ()
   ;; Away from a question, RET still routes to file-visiting: on plain prose
   ;; there is nothing to visit, so it says so and does not answer anything.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "just prose, no question"))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "just prose, no question"))
+    (sprig-session-flush)
     (goto-char (point-min))
     (let (opened)
-      (cl-letf (((symbol-function 'sprig-review-answer)
+      (cl-letf (((symbol-function 'sprig-session-answer)
                  (lambda () (setq opened t))))
-        (should-error (sprig-review-visit) :type 'user-error)
+        (should-error (sprig-session-visit) :type 'user-error)
         (should-not opened)))))
 
-(ert-deftest sprig-review-mode-test-answer-buffer-multi-select ()
+(ert-deftest sprig-session-mode-test-answer-buffer-multi-select ()
   ;; A multi-select question toggles rather than settling, and takes what is
   ;; picked on C-c C-c, joined the way the CLI joins them.
   (let (answered)
@@ -882,11 +882,11 @@ the fold learns the id from the result rather than from the call."
               ((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'quit-window) #'ignore))
       (with-temp-buffer
-        (sprig-review-mode)
-        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                    (sprig-review-tests--dialog-input t)))
-        (sprig-review-flush)
-        (sprig-review-answer)
+        (sprig-session-mode)
+        (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-session-tests--dialog-input t)))
+        (sprig-session-flush)
+        (sprig-session-answer)
         (with-current-buffer "*sprig-answer*"
           (setq last-command-event ?1)
           (sprig-answer-pick-number)
@@ -898,7 +898,7 @@ the fold learns the id from the result rather than from the call."
     (should (equal (cdar answered) "Rewrite it (Recommended), Patch it")))
   (kill-buffer "*sprig-answer*"))
 
-(ert-deftest sprig-review-mode-test-answer-buffer-other-settles ()
+(ert-deftest sprig-session-mode-test-answer-buffer-other-settles ()
   ;; `o' on a single-select question settles it on text of your own.
   (let (answered)
     (cl-letf (((symbol-function 'sprig--review-answer-dialog)
@@ -908,18 +908,18 @@ the fold learns the id from the result rather than from the call."
               ((symbol-function 'read-string)
                (lambda (&rest _) "Neither; extract a helper")))
       (with-temp-buffer
-        (sprig-review-mode)
-        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                    (sprig-review-tests--dialog-input)))
-        (sprig-review-flush)
-        (sprig-review-answer)
+        (sprig-session-mode)
+        (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-session-tests--dialog-input)))
+        (sprig-session-flush)
+        (sprig-session-answer)
         (with-current-buffer "*sprig-answer*"
           (sprig-answer-other))))
     (should (equal (car answered) "req-1"))
     (should (equal (cdar (cadr answered)) "Neither; extract a helper")))
   (kill-buffer "*sprig-answer*"))
 
-(ert-deftest sprig-review-mode-test-answer-buffer-other-joins-multi ()
+(ert-deftest sprig-session-mode-test-answer-buffer-other-joins-multi ()
   ;; `o' on a multi-select adds a typed answer beside a picked option, shown
   ;; and taken together on C-c C-c.
   (let (answered)
@@ -929,11 +929,11 @@ the fold learns the id from the result rather than from the call."
               ((symbol-function 'quit-window) #'ignore)
               ((symbol-function 'read-string) (lambda (&rest _) "Do both")))
       (with-temp-buffer
-        (sprig-review-mode)
-        (sprig-review-consume (list 'dialog "req-1" "ask_user_question"
-                                    (sprig-review-tests--dialog-input t)))
-        (sprig-review-flush)
-        (sprig-review-answer)
+        (sprig-session-mode)
+        (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                    (sprig-session-tests--dialog-input t)))
+        (sprig-session-flush)
+        (sprig-session-answer)
         (with-current-buffer "*sprig-answer*"
           (setq last-command-event ?2)
           (sprig-answer-pick-number)
@@ -944,27 +944,27 @@ the fold learns the id from the result rather than from the call."
     (should (equal (cdar answered) "Patch it, Do both")))
   (kill-buffer "*sprig-answer*"))
 
-(defun sprig-review-tests--permission-input ()
+(defun sprig-session-tests--permission-input ()
   "The request a Bash call wanting permission arrives as."
   '((subtype . "can_use_tool")
     (tool_name . "Bash")
     (input . ((command . "rm -rf /tmp/scratch")))))
 
-(ert-deftest sprig-review-mode-test-permission-renders-and-waits ()
+(ert-deftest sprig-session-mode-test-permission-renders-and-waits ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
-                                (sprig-review-tests--permission-input)))
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-b" "can_use_tool"
+                                (sprig-session-tests--permission-input)))
+    (sprig-session-flush)
     (let ((s (buffer-string)))
       (should (string-match-p "? Allow Bash?" s))
       ;; What you are being asked to allow, not just that you are.
       (should (string-match-p "rm -rf /tmp/scratch" s))
       (should (string-match-p "a a to allow or deny" s)))
-    (should (equal (car (sprig-review-tests--state-line))
+    (should (equal (car (sprig-session-tests--state-line))
                    "?  waiting on you  ·  a a to answer"))))
 
-(ert-deftest sprig-review-mode-test-permission-allow-and-deny ()
+(ert-deftest sprig-session-mode-test-permission-allow-and-deny ()
   (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
             ((symbol-function 'quit-window) #'ignore))
     ;; Allow: picked in the answer buffer.
@@ -974,11 +974,11 @@ the fold learns the id from the result rather than from the call."
                 ((symbol-function 'sprig--review-deny-tool)
                  (lambda (_id) (ert-fail "denied when allowed"))))
         (with-temp-buffer
-          (sprig-review-mode)
-          (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
-                                      (sprig-review-tests--permission-input)))
-          (sprig-review-flush)
-          (sprig-review-answer)
+          (sprig-session-mode)
+          (sprig-session-consume (list 'dialog "req-b" "can_use_tool"
+                                      (sprig-session-tests--permission-input)))
+          (sprig-session-flush)
+          (sprig-session-answer)
           (with-current-buffer "*sprig-answer*"
             (should (string-match-p "Allow this call?" (buffer-string)))
             (setq last-command-event ?1)
@@ -989,65 +989,65 @@ the fold learns the id from the result rather than from the call."
       (cl-letf (((symbol-function 'sprig--review-deny-tool)
                  (lambda (id) (setq denied id))))
         (with-temp-buffer
-          (sprig-review-mode)
-          (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
-                                      (sprig-review-tests--permission-input)))
-          (sprig-review-flush)
-          (sprig-review-answer)
+          (sprig-session-mode)
+          (sprig-session-consume (list 'dialog "req-b" "can_use_tool"
+                                      (sprig-session-tests--permission-input)))
+          (sprig-session-flush)
+          (sprig-session-answer)
           (with-current-buffer "*sprig-answer*"
             (setq last-command-event ?2)
             (sprig-answer-pick-number))))
       (should (equal denied "req-b"))))
   (kill-buffer "*sprig-answer*"))
 
-(ert-deftest sprig-review-mode-test-permission-guards-the-shortcuts ()
+(ert-deftest sprig-session-mode-test-permission-guards-the-shortcuts ()
   ;; `a r' would be one keypress allowing an unread call, so it refuses; `a s'
   ;; denies, no being the answer that cannot do damage.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-b" "can_use_tool"
-                                (sprig-review-tests--permission-input)))
-    (sprig-review-flush)
-    (should-error (sprig-review-answer-recommended) :type 'user-error)
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-b" "can_use_tool"
+                                (sprig-session-tests--permission-input)))
+    (sprig-session-flush)
+    (should-error (sprig-session-answer-recommended) :type 'user-error)
     (let (denied)
       (cl-letf (((symbol-function 'sprig--review-deny-tool)
                  (lambda (id) (setq denied id))))
-        (sprig-review-answer-skip))
+        (sprig-session-answer-skip))
       (should (equal denied "req-b")))))
 
-(ert-deftest sprig-review-mode-test-plan-skip-does-not-ask-for-feedback ()
+(ert-deftest sprig-session-mode-test-plan-skip-does-not-ask-for-feedback ()
   ;; Skipping is not rejecting-with-something-to-say: it must not stop to ask.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'dialog "req-p" "exit_plan_mode"
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-p" "exit_plan_mode"
                                 '((plan . "# A plan"))))
-    (sprig-review-flush)
+    (sprig-session-flush)
     (let (rejected)
       (cl-letf (((symbol-function 'sprig--review-reject-plan)
                  (lambda (id feedback) (setq rejected (list id feedback))))
                 ((symbol-function 'read-string)
                  (lambda (&rest _) (ert-fail "asked for feedback on a skip"))))
-        (sprig-review-answer-skip))
+        (sprig-session-answer-skip))
       (should (equal rejected '("req-p" ""))))))
 
-(ert-deftest sprig-review-mode-test-navigation-passes-a-dialog ()
+(ert-deftest sprig-session-mode-test-navigation-passes-a-dialog ()
   ;; A section starting where its first child starts traps
   ;; `magit-section-backward': `p' walks up to the parent, goes to the
   ;; parent's start, and lands on the position it came from, forever.
   (dolist (dialog (list (list 'dialog "req-p" "exit_plan_mode"
                               '((plan . "# A plan\n\nStep one.")))
                         (list 'dialog "req-b" "can_use_tool"
-                              (sprig-review-tests--permission-input))
+                              (sprig-session-tests--permission-input))
                         (list 'dialog "req-1" "ask_user_question"
-                              (sprig-review-tests--dialog-input))))
+                              (sprig-session-tests--dialog-input))))
     ;; A live tail below the dialog, so bind off the paragraph deferral.
-    (let ((sprig-review-defer-live-prose nil))
+    (let ((sprig-session-defer-live-prose nil))
      (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "before"))
-      (sprig-review-consume dialog)
-      (sprig-review-consume '(text "after"))
-      (sprig-review-flush)
+      (sprig-session-mode)
+      (sprig-session-consume '(text "before"))
+      (sprig-session-consume dialog)
+      (sprig-session-consume '(text "after"))
+      (sprig-session-flush)
       ;; Forward, from the top, reaches the text below the dialog.
       (goto-char (point-min))
       (let ((seen nil))
@@ -1063,41 +1063,41 @@ the fold learns the id from the result rather than from the call."
           (push (oref (magit-current-section) type) seen))
         (should (memq 'sprig-headers seen)))))))
 
-(ert-deftest sprig-review-mode-test-diffstat-is-coloured ()
+(ert-deftest sprig-session-mode-test-diffstat-is-coloured ()
   ;; The counts are what a folded edit tells you about its size.
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (font-lock-mode 1)
     (font-lock-fontify-region (point-min) (point-max))
     (goto-char (point-min))
     (re-search-forward "\\+1")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                'sprig-review-stat-added))
+                'sprig-session-stat-added))
     (re-search-forward "-2")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                'sprig-review-stat-removed))))
+                'sprig-session-stat-removed))))
 
-(ert-deftest sprig-review-mode-test-verbs-are-bound ()
+(ert-deftest sprig-session-mode-test-verbs-are-bound ()
   ;; Every verb the README documents as a key has to actually be on that key.
   ;; `C' was documented and unbound, reachable only through the transient.
   (with-temp-buffer
-    (sprig-review-mode)
-    (dolist (pair '(("SPC" . sprig-review-toggle-mark)
-                    ("m"   . sprig-review-toggle-mark)
-                    ("U"   . sprig-review-unmark-all)
-                    ("c"   . sprig-review-dispatch)
-                    ("k"   . sprig-review-reject)
-                    ("a"   . sprig-review-answer-dispatch)
-                    ("C"   . sprig-review-commit)
-                    ("x"   . sprig-review-run)
-                    ("RET" . sprig-review-visit)
-                    ("t"   . sprig-review-set-title)))
+    (sprig-session-mode)
+    (dolist (pair '(("SPC" . sprig-session-toggle-mark)
+                    ("m"   . sprig-session-toggle-mark)
+                    ("U"   . sprig-session-unmark-all)
+                    ("c"   . sprig-session-dispatch)
+                    ("k"   . sprig-session-reject)
+                    ("a"   . sprig-session-answer-dispatch)
+                    ("C"   . sprig-session-commit)
+                    ("x"   . sprig-session-run)
+                    ("RET" . sprig-session-visit)
+                    ("t"   . sprig-session-set-title)))
       (should (eq (key-binding (kbd (car pair))) (cdr pair))))
     ;; magit-section's own navigation still comes through the parent map.
     (should (eq (key-binding (kbd "n")) 'magit-section-forward))
     (should (eq (key-binding (kbd "p")) 'magit-section-backward))))
 
-(ert-deftest sprig-review-mode-test-header ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model)
+(ert-deftest sprig-session-mode-test-header ()
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model)
       '(:title "My branch" :project "~/p" :model "claude-opus-4-8"
         :status "idle")
     (let ((s (buffer-string)))
@@ -1109,43 +1109,43 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "Cost:" s))
       (should (string-match-p "\\$0\\.0123" s)))))
 
-(ert-deftest sprig-review-mode-test-blank-meta-lines-omitted ()
+(ert-deftest sprig-session-mode-test-blank-meta-lines-omitted ()
   ;; With no meta and no session, those header lines simply do not appear.
-  (let ((model (sprig-review-build '((text "hi") (done nil nil)))))
-    (sprig-review-tests--rendered model nil
+  (let ((model (sprig-session-build '((text "hi") (done nil nil)))))
+    (sprig-session-tests--rendered model nil
       (let ((s (buffer-string)))
         (should-not (string-match-p "Title:" s))
         (should-not (string-match-p "Session:" s))
         (should-not (string-match-p "Cost:" s))))))
 
-(ert-deftest sprig-review-mode-test-hunk-section-carries-plist ()
+(ert-deftest sprig-session-mode-test-hunk-section-carries-plist ()
   ;; The verbs will read the object under point; a hunk section must hold
   ;; its hunk plist on the `value' slot.
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (should (re-search-forward "^\\+new$" nil t))
     (let ((sec (magit-current-section)))
       (should (eq (oref sec type) 'sprig-hunk))
       (should (equal (plist-get (oref sec value) :new) '("new"))))))
 
-(ert-deftest sprig-review-mode-test-tool-section-carries-block ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-tool-section-carries-block ()
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (should (re-search-forward "^Edit  " nil t))
     (let ((sec (magit-current-section)))
       (should (eq (oref sec type) 'sprig-tool))
       (should (equal (plist-get (oref sec value) :name) "Edit")))))
 
-(ert-deftest sprig-review-mode-test-buffer-read-only ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-buffer-read-only ()
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (should buffer-read-only)))
 
-(ert-deftest sprig-review-mode-test-bash-summary ()
-  (let ((model (sprig-review-build
+(ert-deftest sprig-session-mode-test-bash-summary ()
+  (let ((model (sprig-session-build
                 `((tool-call "b1" "Bash"
                              ,(json-serialize (list :command "ls -la\nsecond")))
                   (tool-result "b1" nil "output")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (let ((s (buffer-string)))
         (should (string-match-p "^Bash  " s))
         ;; Only the first command line is summarised in the heading.
@@ -1154,25 +1154,25 @@ the fold learns the id from the result rather than from the call."
 
 ;;;; Live sink
 
-(ert-deftest sprig-review-mode-test-consume-incremental ()
+(ert-deftest sprig-session-mode-test-consume-incremental ()
   ;; The incremental append with streamed text visible mid-stream: the raw
   ;; fast path, so bind the paragraph deferral off.
-  (let ((sprig-review-defer-live-prose nil))
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(session "s1"))
-      (sprig-review-consume '(text "Hel"))
-      (sprig-review-consume '(text "lo"))
-      (sprig-review-flush)
+      (sprig-session-mode)
+      (sprig-session-consume '(session "s1"))
+      (sprig-session-consume '(text "Hel"))
+      (sprig-session-consume '(text "lo"))
+      (sprig-session-flush)
       ;; Text accumulates; no tool yet.
       (should (string-match-p "Hello" (buffer-string)))
       (should-not (string-match-p "^Edit  " (buffer-string)))
       (let ((input (json-serialize (list :file_path "x" :old_string "a"
                                          :new_string "b"))))
-        (sprig-review-consume (list 'tool-call "t1" "Edit" input))
-        (sprig-review-consume '(tool-result "t1" nil "ok")))
-      (sprig-review-consume '(done 0.02 nil))
-      (sprig-review-flush)
+        (sprig-session-consume (list 'tool-call "t1" "Edit" input))
+        (sprig-session-consume '(tool-result "t1" nil "ok")))
+      (sprig-session-consume '(done 0.02 nil))
+      (sprig-session-flush)
       (let ((s (buffer-string)))
         (should (string-match-p "Hello" s))
         (should (string-match-p "^Edit  " s))
@@ -1181,168 +1181,168 @@ the fold learns the id from the result rather than from the call."
         (should-not (string-match-p "ok" s))
         ;; Cost lands on the header, which the incremental tail draw keeps in
         ;; place, so it lags here on purpose (see
-        ;; `sprig-review--header-signature'); a full render picks it up.
+        ;; `sprig-session--header-signature'); a full render picks it up.
         (should-not (string-match-p "\\$0\\.02" s))))))
 
-(ert-deftest sprig-review-mode-test-incremental-keeps-prefix ()
+(ert-deftest sprig-session-mode-test-incremental-keeps-prefix ()
   ;; A structural event that only appends redraws the tail, not the whole
   ;; buffer: the first block's section object survives across the flush.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "first\n\n"))   ; a whole paragraph, so it shows
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "first\n\n"))   ; a whole paragraph, so it shows
+    (sprig-session-flush)
     (goto-char (point-min))
     (should (re-search-forward "first" nil t))
     (let ((before (magit-current-section)))
-      (sprig-review-consume '(user "second"))
-      (sprig-review-flush)
+      (sprig-session-consume '(user "second"))
+      (sprig-session-flush)
       (goto-char (point-min))
       (should (re-search-forward "first" nil t))
       ;; Same section object, i.e. not re-inserted by a full render.
       (should (eq (magit-current-section) before))
       (should (string-match-p "second" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-incremental-state-only ()
+(ert-deftest sprig-session-mode-test-incremental-state-only ()
   ;; A refresh that changes only the state line (no block change, no settle)
   ;; must take the tail path, not fall back to a full render: the block's
   ;; section object survives the flush.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "body\n\n"))   ; a whole paragraph, so it shows
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "body\n\n"))   ; a whole paragraph, so it shows
+    (sprig-session-flush)
     (should (string-match-p "working" (buffer-string)))
     (goto-char (point-min))
     (should (re-search-forward "body" nil t))
     (let ((before (magit-current-section)))
       ;; A context update touches the state line only: no block, still working.
-      (sprig-review-consume '(context 1000))
-      (sprig-review-flush)
+      (sprig-session-consume '(context 1000))
+      (sprig-session-flush)
       (goto-char (point-min))
       (should (re-search-forward "body" nil t))
       (should (eq (magit-current-section) before))
-      (should (null sprig-review--incremental-reason)))))
+      (should (null sprig-session--incremental-reason)))))
 
-(ert-deftest sprig-review-mode-test-incremental-settle-redraws-last ()
+(ert-deftest sprig-session-mode-test-incremental-settle-redraws-last ()
   ;; Deferring live prose, the last block shows only completed paragraphs while
   ;; it streams and its whole text once settled.  The model is equal across the
   ;; settling `done', so the splice must redraw the last block from the
   ;; streaming-state change, or its withheld final paragraph never appears.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(user "go"))
-    (sprig-review-consume '(text "one\n\ntwo"))   ; para one shows, two withheld
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(user "go"))
+    (sprig-session-consume '(text "one\n\ntwo"))   ; para one shows, two withheld
+    (sprig-session-flush)
     (should (string-match-p "one" (buffer-string)))
     (should-not (string-match-p "two" (buffer-string)))
     (goto-char (point-min))
     (should (re-search-forward "go" nil t))
     (let ((before (magit-current-section)))       ; the user block's section
-      (sprig-review-consume '(done 0.01 nil))
-      (sprig-review-flush)
-      (should (null sprig-review--incremental-reason))  ; still incremental
+      (sprig-session-consume '(done 0.01 nil))
+      (sprig-session-flush)
+      (should (null sprig-session--incremental-reason))  ; still incremental
       (should (string-match-p "two" (buffer-string)))   ; withheld tail now shows
       (goto-char (point-min))
       (should (re-search-forward "go" nil t))
       (should (eq (magit-current-section) before)))))  ; earlier block untouched
 
-(ert-deftest sprig-review-mode-test-completed-prose ()
+(ert-deftest sprig-session-mode-test-completed-prose ()
   ;; Whole paragraphs are handed over; the paragraph still being typed, and an
   ;; unclosed code fence, are withheld.
-  (should (null (sprig-review--completed-prose "")))
-  (should (null (sprig-review--completed-prose "still typing")))
-  (should (equal "done\n\n" (sprig-review--completed-prose "done\n\ntyping")))
+  (should (null (sprig-session--completed-prose "")))
+  (should (null (sprig-session--completed-prose "still typing")))
+  (should (equal "done\n\n" (sprig-session--completed-prose "done\n\ntyping")))
   (should (equal "one\n\ntwo\n\n"
-                 (sprig-review--completed-prose "one\n\ntwo\n\nthree")))
+                 (sprig-session--completed-prose "one\n\ntwo\n\nthree")))
   ;; A closed fence with a blank line after it is complete.
   (should (equal "```\ncode\n```\n\n"
-                 (sprig-review--completed-prose "```\ncode\n```\n\nnext")))
+                 (sprig-session--completed-prose "```\ncode\n```\n\nnext")))
   ;; An open fence withholds from its opening line, keeping the prose above it.
   (should (equal "intro\n\n"
-                 (sprig-review--completed-prose "intro\n\n```\ncode")))
+                 (sprig-session--completed-prose "intro\n\n```\ncode")))
   ;; A blank line inside an open fence is not a paragraph break.
-  (should (null (sprig-review--completed-prose "```\na\n\nb"))))
+  (should (null (sprig-session--completed-prose "```\na\n\nb"))))
 
-(ert-deftest sprig-review-mode-test-withheld-block-adds-no-blank ()
+(ert-deftest sprig-session-mode-test-withheld-block-adds-no-blank ()
   ;; A withheld live paragraph draws an empty section; it must not leave a
   ;; doubled blank line between the tool rows around it, nor before the state
   ;; line.  Two identical tool rows with a half-typed narration between them
   ;; is the shape that showed the doubling.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume (list 'tool-call "t1" "Bash"
+    (sprig-session-mode)
+    (sprig-session-consume (list 'tool-call "t1" "Bash"
                                 (json-serialize (list :command "ls"))))
-    (sprig-review-consume '(tool-result "t1" nil "ok"))
+    (sprig-session-consume '(tool-result "t1" nil "ok"))
     ;; A half-typed narration (no blank line yet): withheld, so it shows
     ;; nothing and is the live last block.
-    (sprig-review-consume '(text "still typing"))
-    (sprig-review-flush)
+    (sprig-session-consume '(text "still typing"))
+    (sprig-session-flush)
     (should-not (string-match-p "still typing" (buffer-string)))
     ;; No run of three or more newlines anywhere: at most one blank line.
     (should-not (string-match-p "\n\n\n" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-defer-withholds-partial-paragraph ()
+(ert-deftest sprig-session-mode-test-defer-withholds-partial-paragraph ()
   ;; A half-typed paragraph is not shown, and a delta that does not end one
   ;; schedules no redraw (so mid-paragraph tokens cost nothing).
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "half a "))   ; first text: opens, schedules
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "half a "))   ; first text: opens, schedules
+    (sprig-session-flush)
     (should-not (string-match-p "half a" (buffer-string)))
-    (sprig-review--cancel-timer)
-    (setq sprig-review--dirty nil)
+    (sprig-session--cancel-timer)
+    (setq sprig-session--dirty nil)
     ;; A further mid-paragraph delta is withheld and schedules nothing.
-    (sprig-review-consume '(text "sentence"))
-    (should-not sprig-review--dirty)
-    (should (null sprig-review--timer))))
+    (sprig-session-consume '(text "sentence"))
+    (should-not sprig-session--dirty)
+    (should (null sprig-session--timer))))
 
-(ert-deftest sprig-review-mode-test-defer-fontifies-completed-paragraph ()
+(ert-deftest sprig-session-mode-test-defer-fontifies-completed-paragraph ()
   ;; Deferring live prose, a completed paragraph is fontified synchronously
   ;; though the async worker is on, so it never flashes raw; the still-typing
   ;; paragraph after it is withheld.
   (skip-unless (require 'markdown-mode nil t))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review-fontify-async t)
-        (sprig-review-defer-live-prose t)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset)
-        (sprig-review--fontify-queue nil)
-        (sprig-review--fontify-queued (make-hash-table :test 'equal))
-        (sprig-review--fontify-buffers nil)
-        (sprig-review--fontify-timer nil))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-fontify-async t)
+        (sprig-session-defer-live-prose t)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset)
+        (sprig-session--fontify-queue nil)
+        (sprig-session--fontify-queued (make-hash-table :test 'equal))
+        (sprig-session--fontify-buffers nil)
+        (sprig-session--fontify-timer nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "**bold** here\n\nstill typing"))
-      (sprig-review-flush)
+      (sprig-session-mode)
+      (sprig-session-consume '(text "**bold** here\n\nstill typing"))
+      (sprig-session-flush)
       ;; Fontified now, not queued for the idle worker.
-      (should (null sprig-review--fontify-queue))
-      (should (> (hash-table-count sprig-review--fontify-cache) 0))
+      (should (null sprig-session--fontify-queue))
+      (should (> (hash-table-count sprig-session--fontify-cache) 0))
       (goto-char (point-min))
       (should (re-search-forward "bold" nil t))
       (should-not (string-match-p "still typing" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-incremental-multi-section-block ()
+(ert-deftest sprig-session-mode-test-incremental-multi-section-block ()
   ;; A dialog with two questions draws two top-level sections but is one
   ;; model block, so mapping blocks to sections by position is off by one.
   ;; The splice must still keep such a block's whole span in the prefix and
   ;; append cleanly after it, not fall back or drop content.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((input '((questions . [((question . "First?")
                                   (multiSelect . :false)
                                   (options . [((label . "a") (description . "x"))]))
                                  ((question . "Second?")
                                   (multiSelect . :false)
                                   (options . [((label . "b") (description . "y"))]))]))))
-      (sprig-review-consume (list 'dialog "d1" "ask_user_question" input))
-      (sprig-review-consume '(dialog-answer "d1" ("a" "b")))
-      (sprig-review-flush)
+      (sprig-session-consume (list 'dialog "d1" "ask_user_question" input))
+      (sprig-session-consume '(dialog-answer "d1" ("a" "b")))
+      (sprig-session-flush)
       (should (string-match-p "First?" (buffer-string)))
       (should (string-match-p "Second?" (buffer-string)))
       ;; A later block appends; the multi-section dialog stays put in the
       ;; prefix and the tail path handles it.
-      (sprig-review-consume '(text "afterwards\n\n"))   ; whole para, shows
-      (sprig-review-flush)
-      (should (null sprig-review--incremental-reason))
+      (sprig-session-consume '(text "afterwards\n\n"))   ; whole para, shows
+      (sprig-session-flush)
+      (should (null sprig-session--incremental-reason))
       (let ((s (buffer-string)))
         (should (string-match-p "First?" s))
         (should (string-match-p "Second?" s))
@@ -1350,79 +1350,79 @@ the fold learns the id from the result rather than from the call."
         ;; Order preserved: both questions before the new text.
         (should (< (string-match "Second?" s) (string-match "afterwards" s)))))))
 
-(ert-deftest sprig-review-mode-test-incremental-off-full-render ()
+(ert-deftest sprig-session-mode-test-incremental-off-full-render ()
   ;; With the incremental path disabled every flush is a full render, so the
   ;; cost the tail draw would leave stale shows immediately.
-  (let ((sprig-review-incremental-render nil))
+  (let ((sprig-session-incremental-render nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "hi"))
-      (sprig-review-flush)
-      (sprig-review-consume '(done 0.02 nil))
-      (sprig-review-flush)
+      (sprig-session-mode)
+      (sprig-session-consume '(text "hi"))
+      (sprig-session-flush)
+      (sprig-session-consume '(done 0.02 nil))
+      (sprig-session-flush)
       (should (string-match-p "\\$0\\.02" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-async-fontify-repaints-settled-block ()
+(ert-deftest sprig-session-mode-test-async-fontify-repaints-settled-block ()
   ;; Regression: the idle fontifier caches a settled prose block's faces
   ;; without changing the model, so the `equal' block diff keeps the block in
   ;; the untouched prefix and the tail redraw alone would leave it raw.  The
-  ;; drain names the freshly-cached block (`sprig-review--fontify-fresh'),
+  ;; drain names the freshly-cached block (`sprig-session--fontify-fresh'),
   ;; which pulls the redraw boundary back to it so it gains its faces on the
   ;; incremental path.  Before the fix the block stayed literal until a manual
   ;; full refresh (`g').
   (skip-unless (require 'markdown-mode nil t))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review-fontify-async t)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset)
-        (sprig-review--fontify-queue nil)
-        (sprig-review--fontify-queued (make-hash-table :test 'equal))
-        (sprig-review--fontify-buffers nil)
-        (sprig-review--fontify-timer nil))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-fontify-async t)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset)
+        (sprig-session--fontify-queue nil)
+        (sprig-session--fontify-queued (make-hash-table :test 'equal))
+        (sprig-session--fontify-buffers nil)
+        (sprig-session--fontify-timer nil))
     (with-temp-buffer
-      (sprig-review-mode)
+      (sprig-session-mode)
       ;; A folded tool row first, so the settled prose sits at block index 1:
       ;; the redraw can keep the tool in the prefix and splice from the prose.
       ;; An index-0 prose block would fall to a full render, which repaints
       ;; too but does not exercise this path.
       (let ((input (json-serialize (list :file_path "x" :old_string "a"
                                          :new_string "b"))))
-        (sprig-review-consume (list 'tool-call "t1" "Edit" input))
-        (sprig-review-consume '(tool-result "t1" nil "ok")))
-      (sprig-review-consume '(text "**bold** here"))
-      (sprig-review-consume '(done 0.01 nil))
-      (sprig-review-flush)
+        (sprig-session-consume (list 'tool-call "t1" "Edit" input))
+        (sprig-session-consume '(tool-result "t1" nil "ok")))
+      (sprig-session-consume '(text "**bold** here"))
+      (sprig-session-consume '(done 0.01 nil))
+      (sprig-session-flush)
       ;; Drawn raw (async, uncached) and queued for the idle worker.
-      (should (member "**bold** here\n" sprig-review--fontify-queue))
+      (should (member "**bold** here\n" sprig-session--fontify-queue))
       (let ((before (buffer-substring (point-min) (point-max))))
         ;; Stand in for the idle drain: cache the block and name it fresh, as
         ;; the drain does before repainting the buffer it settled in.
         (puthash "**bold** here\n"
-                 (sprig-review--fontify-uncached "**bold** here\n")
-                 sprig-review--fontify-cache)
+                 (sprig-session--fontify-uncached "**bold** here\n")
+                 sprig-session--fontify-cache)
         (let ((fresh (make-hash-table :test 'equal)))
           (puthash "**bold** here\n" t fresh)
-          (setq sprig-review--fontify-fresh fresh))
-        (sprig-review--refresh)
+          (setq sprig-session--fontify-fresh fresh))
+        (sprig-session--refresh)
         ;; The tail path kept the prefix tool and redrew the prose; the faces
         ;; landed, so the propertised text changed though no event arrived.
-        (should (null sprig-review--incremental-reason))
+        (should (null sprig-session--incremental-reason))
         (should-not (equal-including-properties
                      before (buffer-substring (point-min) (point-max))))
         ;; The carrier is spent, so a later ordinary refresh does not re-splice.
-        (should (null sprig-review--fontify-fresh))))))
+        (should (null sprig-session--fontify-fresh))))))
 
-(ert-deftest sprig-review-mode-test-btw-answer-fontifies ()
+(ert-deftest sprig-session-mode-test-btw-answer-fontifies ()
   ;; With the deferred stream off, the panel streams its answer raw, then
   ;; fontifies its markdown once the turn settles: the markup gains the
   ;; invisible property, so the propertised answer is no longer the bare
   ;; string.
   (skip-unless (require 'markdown-mode nil t))
   (skip-unless (fboundp 'sprig-btw-mode))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review-defer-live-prose nil)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-defer-live-prose nil)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset))
     (with-temp-buffer
       (sprig-btw-mode)
       (let ((inhibit-read-only t))
@@ -1438,16 +1438,16 @@ the fold learns the id from the result rather than from the call."
       (let ((ans (buffer-substring sprig--btw-answer-beg (point-max))))
         (should-not (equal-including-properties ans "**bold** answer\n"))))))
 
-(ert-deftest sprig-review-mode-test-btw-answer-defers ()
-  ;; With `sprig-review-defer-live-prose' the panel reveals a completed
+(ert-deftest sprig-session-mode-test-btw-answer-defers ()
+  ;; With `sprig-session-defer-live-prose' the panel reveals a completed
   ;; paragraph fontified and withholds the one still being typed, the way a
   ;; review reply is deferred, so no half-typed markup ever shows raw.
   (skip-unless (require 'markdown-mode nil t))
   (skip-unless (fboundp 'sprig-btw-mode))
-  (let ((sprig-review-fontify-markdown t)
-        (sprig-review-defer-live-prose t)
-        (sprig-review--fontify-cache (make-hash-table :test 'equal))
-        (sprig-review--fontify-cache-flag 'unset))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-defer-live-prose t)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset))
     (with-temp-buffer
       (sprig-btw-mode)
       (let ((inhibit-read-only t))
@@ -1472,34 +1472,34 @@ the fold learns the id from the result rather than from the call."
                               (buffer-substring-no-properties
                                sprig--btw-answer-beg (point-max)))))))
 
-(ert-deftest sprig-review-mode-test-consume-preserves-point ()
+(ert-deftest sprig-session-mode-test-consume-preserves-point ()
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((input (json-serialize (list :file_path "keep.el" :old_string "a"
                                        :new_string "b"))))
-      (sprig-review-consume '(text "intro"))
-      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
-      (sprig-review-consume '(tool-result "t1" nil "ok")))
-    (sprig-review-flush)
+      (sprig-session-consume '(text "intro"))
+      (sprig-session-consume (list 'tool-call "t1" "Edit" input))
+      (sprig-session-consume '(tool-result "t1" nil "ok")))
+    (sprig-session-flush)
     (goto-char (point-min))
     (should (re-search-forward "keep\\.el" nil t))
     (let ((type-before (oref (magit-current-section) type)))
       ;; A later turn streams in; point must stay in the same section, not
       ;; bounce to the top of the buffer.
-      (sprig-review-consume '(text-block))
-      (sprig-review-consume '(text "more"))
-      (sprig-review-flush)
+      (sprig-session-consume '(text-block))
+      (sprig-session-consume '(text "more"))
+      (sprig-session-flush)
       (should (eq (oref (magit-current-section) type) type-before))
       (should (> (point) (point-min))))))
 
-(ert-deftest sprig-review-mode-test-consume-preserves-folds ()
+(ert-deftest sprig-session-mode-test-consume-preserves-folds ()
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((input (json-serialize (list :file_path "x" :old_string "a"
                                        :new_string "b"))))
-      (sprig-review-consume (list 'tool-call "t1" "Edit" input))
-      (sprig-review-consume '(tool-result "t1" nil "secret")))
-    (sprig-review-flush)
+      (sprig-session-consume (list 'tool-call "t1" "Edit" input))
+      (sprig-session-consume '(tool-result "t1" nil "secret")))
+    (sprig-session-flush)
     ;; The tool folds by default; unfold it like a user would, to reach the
     ;; result section nested inside it, which folds by default too.
     (goto-char (point-min))
@@ -1514,25 +1514,25 @@ the fold learns the id from the result rather than from the call."
       (magit-section-show sec)
       (should-not (oref sec hidden)))
     ;; A later event refreshes the buffer; both unfolds must survive.
-    (sprig-review-consume '(done 0.01 nil))
-    (sprig-review-flush)
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
     (goto-char (point-min))
     (should (re-search-forward "↳ result" nil t))
     (should-not (oref (magit-current-section) hidden))))
 
-(ert-deftest sprig-review-mode-test-refresh-keeps-a-window-put ()
+(ert-deftest sprig-session-mode-test-refresh-keeps-a-window-put ()
   ;; A window has its own point and start, and `erase-buffer' collapses both.
   ;; The refresh also runs from a timer, in whatever buffer is current, so the
   ;; buffer's own point is not the one on screen.  Restoring only that threw
   ;; the window to the top of the buffer mid-turn.
-  (let ((buf (get-buffer-create "*sprig-review-scroll-test*")))
+  (let ((buf (get-buffer-create "*sprig-session-scroll-test*")))
     (unwind-protect
         (with-current-buffer buf
-          (sprig-review-mode)
+          (sprig-session-mode)
           (dotimes (i 60)
-            (sprig-review-consume (list 'text (format "line %d\n" i)))
-            (sprig-review-consume '(text-block)))
-          (sprig-review-flush)
+            (sprig-session-consume (list 'text (format "line %d\n" i)))
+            (sprig-session-consume '(text-block)))
+          (sprig-session-flush)
           (let ((win (display-buffer buf '(display-buffer-same-window))))
             (should (window-live-p win))
             (set-window-buffer win buf)
@@ -1546,8 +1546,8 @@ the fold learns the id from the result rather than from the call."
                 ;; A refresh driven from another buffer, exactly as the
                 ;; coalescing timer drives it.
                 (with-temp-buffer
-                  (sprig-review-flush buf)
-                  (with-current-buffer buf (sprig-review--refresh)))
+                  (sprig-session-flush buf)
+                  (with-current-buffer buf (sprig-session--refresh)))
                 ;; The window is still on the same section, not at the top.
                 (should (window-live-p win))
                 (should (equal (save-excursion (goto-char (window-point win))
@@ -1559,110 +1559,110 @@ the fold learns the id from the result rather than from the call."
                            start-line))))))
       (kill-buffer buf))))
 
-(ert-deftest sprig-review-mode-test-reset ()
+(ert-deftest sprig-session-mode-test-reset ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-consume '(text "gone\n\n"))   ; a whole paragraph, so it shows
-    (sprig-review-flush)
+    (sprig-session-mode)
+    (sprig-session-consume '(text "gone\n\n"))   ; a whole paragraph, so it shows
+    (sprig-session-flush)
     (should (string-match-p "gone" (buffer-string)))
     ;; reset renders synchronously, no flush needed.
-    (sprig-review-reset '(:title "Fresh"))
+    (sprig-session-reset '(:title "Fresh"))
     (should-not (string-match-p "gone" (buffer-string)))
     (should (string-match-p "Fresh" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-consume-debounces ()
+(ert-deftest sprig-session-mode-test-consume-debounces ()
   ;; The raw fast-append path (deferring live prose off): the first text of a
   ;; run holds until a flush, then appends in place.
-  (let ((sprig-review-defer-live-prose nil))
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
+      (sprig-session-mode)
       ;; The first text of a run defers (no tail yet) until a flush.
-      (sprig-review-consume '(text "a"))
-      (sprig-review-consume '(text "b"))
+      (sprig-session-consume '(text "a"))
+      (sprig-session-consume '(text "b"))
       (should-not (string-match-p "ab" (buffer-string)))
-      (sprig-review-flush)
+      (sprig-session-flush)
       (should (string-match-p "ab" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-text-fast-path ()
-  (let ((sprig-review-defer-live-prose nil))
+(ert-deftest sprig-session-mode-test-text-fast-path ()
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "Hel"))
-      (sprig-review-flush)                 ; establishes the tail
+      (sprig-session-mode)
+      (sprig-session-consume '(text "Hel"))
+      (sprig-session-flush)                 ; establishes the tail
       (should (string-match-p "Hel" (buffer-string)))
       ;; A further delta now appends in place, with no flush and no timer.
-      (should (null sprig-review--timer))
-      (sprig-review-consume '(text "lo"))
-      (should (null sprig-review--timer))
+      (should (null sprig-session--timer))
+      (sprig-session-consume '(text "lo"))
+      (should (null sprig-session--timer))
       (should (string-match-p "Hello" (buffer-string)))
       ;; A structural event rebuilds from the model to the same text.
-      (sprig-review-consume '(done 0.01 nil))
-      (sprig-review-flush)
+      (sprig-session-consume '(done 0.01 nil))
+      (sprig-session-flush)
       (should (string-match-p "Hello" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-text-fast-path-newlines ()
+(ert-deftest sprig-session-mode-test-text-fast-path-newlines ()
   ;; The in-place append and a full rebuild must agree across a newline
   ;; boundary in the streamed text.
-  (let ((sprig-review-defer-live-prose nil))
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "line1\n"))
-      (sprig-review-flush)
-      (sprig-review-consume '(text "line2"))   ; fast append after a newline
+      (sprig-session-mode)
+      (sprig-session-consume '(text "line1\n"))
+      (sprig-session-flush)
+      (sprig-session-consume '(text "line2"))   ; fast append after a newline
       (should (string-match-p "line1\nline2" (buffer-string)))
       ;; Force a rebuild from the model; it must contain the same.
-      (sprig-review-consume '(tool-call "t1" "Bash" "{}"))
-      (sprig-review-flush)
+      (sprig-session-consume '(tool-call "t1" "Bash" "{}"))
+      (sprig-session-flush)
       (should (string-match-p "line1\nline2" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-off-screen-flush-defers ()
+(ert-deftest sprig-session-mode-test-off-screen-flush-defers ()
   ;; The coalesced timer path skips the O(conversation) redraw for a buffer
   ;; shown in no window (a temp buffer never is), leaving it dirty; an explicit
   ;; flush, and being shown, still draw it.
-  (let ((sprig-review-defer-live-prose nil))
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "hi"))            ; first text: defers, dirty
-      (should sprig-review--dirty)
-      (sprig-review--flush-if-shown (current-buffer)) ; no window: draw nothing
-      (should sprig-review--dirty)
+      (sprig-session-mode)
+      (sprig-session-consume '(text "hi"))            ; first text: defers, dirty
+      (should sprig-session--dirty)
+      (sprig-session--flush-if-shown (current-buffer)) ; no window: draw nothing
+      (should sprig-session--dirty)
       (should-not (string-match-p "hi" (buffer-string)))
-      (sprig-review-flush)                            ; explicit: draws it
-      (should-not sprig-review--dirty)
+      (sprig-session-flush)                            ; explicit: draws it
+      (should-not sprig-session--dirty)
       (should (string-match-p "hi" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-replayed-text-is-not-a-live-tail ()
+(ert-deftest sprig-session-mode-test-replayed-text-is-not-a-live-tail ()
   ;; A stored session log carries no `done' event, so the last text block must
   ;; not be taken for a streaming tail on position alone: replayed history is
   ;; settled, and a live tail renders raw, costing that block its markdown.
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-seed '((user "q") (text "the answer")))
-    (should-not sprig-review--streaming)
-    (should-not sprig-review--tail)
+    (sprig-session-mode)
+    (sprig-session-seed '((user "q") (text "the answer")))
+    (should-not sprig-session--streaming)
+    (should-not sprig-session--tail)
     (should (string-match-p "the answer" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-tail-follows-streaming ()
-  (let ((sprig-review-defer-live-prose nil))
+(ert-deftest sprig-session-mode-test-tail-follows-streaming ()
+  (let ((sprig-session-defer-live-prose nil))
     (with-temp-buffer
-      (sprig-review-mode)
-      (sprig-review-consume '(text "partial"))
-      (sprig-review-flush)
+      (sprig-session-mode)
+      (sprig-session-consume '(text "partial"))
+      (sprig-session-flush)
       ;; Mid-turn: the block is live, so it takes appends in place.
-      (should sprig-review--streaming)
-      (should sprig-review--tail)
-      (sprig-review-consume '(done 0.01 nil))
-      (sprig-review-flush)
+      (should sprig-session--streaming)
+      (should sprig-session--tail)
+      (sprig-session-consume '(done 0.01 nil))
+      (sprig-session-flush)
       ;; The turn settled, so the block re-renders as prose, with no tail.
-      (should-not sprig-review--streaming)
-      (should-not sprig-review--tail)
+      (should-not sprig-session--streaming)
+      (should-not sprig-session--tail)
       (should (string-match-p "partial" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-renders-user-and-thinking ()
-  (let ((model (sprig-review-build
+(ert-deftest sprig-session-mode-test-renders-user-and-thinking ()
+  (let ((model (sprig-session-build
                 '((user "the question") (thinking "pondering")
                   (text "the answer") (title "T")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (let ((s (buffer-string)))
         (should (string-match-p "the question" s))
         ;; Thinking keeps its label, being a folded row rather than prose.
@@ -1673,14 +1673,14 @@ the fold learns the id from the result rather than from the call."
         ;; The model-carried title shows in the header.
         (should (string-match-p "T" s))))
     ;; The thinking section folds by default; expanding draws in its body.
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (should (re-search-forward "^thinking$" nil t))
       (should (oref (magit-current-section) hidden))
       (magit-section-show (magit-current-section))
       (should (string-match-p "pondering" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-open-file ()
+(ert-deftest sprig-session-mode-test-open-file ()
   (let ((file (make-temp-file "sprig-session" nil ".jsonl")))
     (unwind-protect
         (progn
@@ -1696,12 +1696,12 @@ the fold learns the id from the result rather than from the call."
                                           (vector (list :type "text"
                                                         :text "world")))))
                     "\n"))
-          (should (= (length (sprig-review-read-session-lines file)) 3))
+          (should (= (length (sprig-session-read-session-lines file)) 3))
           (save-window-excursion
-            (sprig-review-open-file file)
-            (with-current-buffer (format "*sprig-review: %s*"
+            (sprig-session-open-file file)
+            (with-current-buffer (format "*sprig-session: %s*"
                                          (file-name-base file))
-              (should (derived-mode-p 'sprig-review-mode))
+              (should (derived-mode-p 'sprig-session-mode))
               (let ((s (buffer-string)))
                 (should (string-match-p "Fixture" s))
                 (should (string-match-p "hello" s))
@@ -1710,8 +1710,8 @@ the fold learns the id from the result rather than from the call."
 
 ;;;; Marks and verbs
 
-(ert-deftest sprig-review-mode-test-reject-instruction ()
-  (let ((one (sprig-review-reject-instruction
+(ert-deftest sprig-session-mode-test-reject-instruction ()
+  (let ((one (sprig-session-reject-instruction
               (list (cons "foo.el" (list :old '("a") :new '("b")))))))
     (should (string-match-p "undo this change" one))
     (should (string-match-p "foo\\.el" one))
@@ -1719,98 +1719,98 @@ the fold learns the id from the result rather than from the call."
     (should (string-match-p "\\+b" one)))
   (should (string-match-p
            "undo these changes"
-           (sprig-review-reject-instruction
+           (sprig-session-reject-instruction
             (list (cons "a" (list :old '("x") :new nil))
                   (cons "b" (list :old '("y") :new nil)))))))
 
-(ert-deftest sprig-review-mode-test-run-instruction ()
+(ert-deftest sprig-session-mode-test-run-instruction ()
   (should (string-match-p "make test"
-                          (sprig-review-run-instruction "make test"))))
+                          (sprig-session-run-instruction "make test"))))
 
-(ert-deftest sprig-review-mode-test-marking ()
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-marking ()
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (should (re-search-forward "^\\+new$" nil t))
     (let ((ident (magit-section-ident (magit-current-section))))
-      (sprig-review-toggle-mark)
-      (should (member ident sprig-review--marks))
-      (should (memq (magit-get-section ident) (sprig-review--marked-sections)))
+      (sprig-session-toggle-mark)
+      (should (member ident sprig-session--marks))
+      (should (memq (magit-get-section ident) (sprig-session--marked-sections)))
       ;; Toggling again clears it.
       (goto-char (point-min))
       (re-search-forward "^\\+new$")
-      (sprig-review-toggle-mark)
-      (should-not (member ident sprig-review--marks)))))
+      (sprig-session-toggle-mark)
+      (should-not (member ident sprig-session--marks)))))
 
-(ert-deftest sprig-review-mode-test-reject-pairs ()
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-reject-pairs ()
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
-    (let ((pairs (sprig-review--reject-pairs (list (magit-current-section)))))
+    (let ((pairs (sprig-session--reject-pairs (list (magit-current-section)))))
       (should (= (length pairs) 1))
       (should (equal (caar pairs) "/tmp/x.el"))
       (should (equal (plist-get (cdar pairs) :new) '("new"))))))
 
-(ert-deftest sprig-review-mode-test-reject-verb ()
+(ert-deftest sprig-session-mode-test-reject-verb ()
   ;; The whole verb path: extract the hunk at point, build the instruction,
   ;; hand it to the steer (stubbed here to capture it).  It steers, since a
   ;; hunk lands mid-turn and the agent should hear about a bad one at once.
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--steer)
+      (cl-letf (((symbol-function 'sprig-session--steer)
                  (lambda (text) (setq sent text))))
-        (sprig-review-reject))
+        (sprig-session-reject))
       (should (string-match-p "undo this change" sent))
       (should (string-match-p "/tmp/x\\.el" sent))
       (should (string-match-p "\\+new" sent)))))
 
-(ert-deftest sprig-review-mode-test-state-says-compacting ()
+(ert-deftest sprig-session-mode-test-state-says-compacting ()
   ;; A compaction stops a turn for a minute or more, so it outranks the
   ;; turn's own state: `working…' or `sent, awaiting reply' would both read
   ;; as an ordinary wait and leave the buffer looking stalled.
   (with-temp-buffer
     (let ((sprig--compacting t)
           (sprig--busy t)
-          (sprig-review--streaming t))
-      (should (equal (sprig-review--state nil)
-                     '("▼" "compacting…" sprig-review-working))))
+          (sprig-session--streaming t))
+      (should (equal (sprig-session--state nil)
+                     '("▼" "compacting…" sprig-session-working))))
     ;; Once it lands, the turn speaks for itself again.
     (let ((sprig--compacting nil)
           (sprig--busy t)
-          (sprig-review--streaming t))
-      (should (equal (cadr (sprig-review--state nil)) "working…"))))
+          (sprig-session--streaming t))
+      (should (equal (cadr (sprig-session--state nil)) "working…"))))
   ;; A dialog still wins: it is stopped on you, which no wait outranks.
   (with-temp-buffer
     (let ((sprig--compacting t)
           (model (list :blocks (list (list :type 'dialog :id "d" :request nil)))))
-      (should (equal (car (sprig-review--state model)) "?")))))
+      (should (equal (car (sprig-session--state model)) "?")))))
 
-(ert-deftest sprig-review-mode-test-context-indicator ()
+(ert-deftest sprig-session-mode-test-context-indicator ()
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))
     ;; Below the first threshold: bare count, no escalation face.
     ;; Below the thresholds it still carries a face of its own, never nil:
     ;; inheriting the state face would paint a normal context yellow purely
     ;; because a turn was running.
-    (should (equal (sprig-review--context-indicator 90000)
-                   '("90.0k" . sprig-review-context)))
+    (should (equal (sprig-session--context-indicator 90000)
+                   '("90.0k" . sprig-session-context)))
     ;; Large and very large: a word and an escalating face.
-    (should (equal (sprig-review--context-indicator 160000)
-                   '("160.0k (large)" . sprig-review-context-large)))
-    (should (equal (sprig-review--context-indicator 250000)
-                   '("250.0k (very large)" . sprig-review-context-huge)))
-    (should-not (sprig-review--context-indicator 0))
-    (should-not (sprig-review--context-indicator nil))))
+    (should (equal (sprig-session--context-indicator 160000)
+                   '("160.0k (large)" . sprig-session-context-large)))
+    (should (equal (sprig-session--context-indicator 250000)
+                   '("250.0k (very large)" . sprig-session-context-huge)))
+    (should-not (sprig-session--context-indicator 0))
+    (should-not (sprig-session--context-indicator nil))))
 
-(ert-deftest sprig-review-mode-test-state-line-flags-large-context ()
+(ert-deftest sprig-session-mode-test-state-line-flags-large-context ()
   ;; The context in use rides on the state line, where the reader is watching
   ;; the turn, and its face escalates once it grows large.
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000)
-        (model (sprig-review-build
+        (model (sprig-session-build
                 '((context 160000) (text "hi") (done 0.01 nil)))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (goto-char (point-max)) (forward-line -1)
       (let ((line (buffer-substring-no-properties
                    (line-beginning-position) (line-end-position))))
@@ -1820,14 +1820,14 @@ the fold learns the id from the result rather than from the call."
       (goto-char (point-min))
       (should (re-search-forward "large" nil t))
       (should (eq (get-text-property (1- (point)) 'font-lock-face)
-                  'sprig-review-context-large)))))
+                  'sprig-session-context-large)))))
 
-(ert-deftest sprig-review-mode-test-no-section-highlight ()
+(ert-deftest sprig-session-mode-test-no-section-highlight ()
   ;; The section at point is not what the verbs act on, so magit's highlight
   ;; only washes out the faces the conversation is read through.  Both
   ;; switches are buffer-local, so a magit buffer keeps its own highlight.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (should-not magit-section-highlight-current)
     (should-not magit-section-highlight-selection)
     (should (local-variable-p 'magit-section-highlight-current))
@@ -1835,12 +1835,12 @@ the fold learns the id from the result rather than from the call."
   (with-temp-buffer
     (should magit-section-highlight-current)))
 
-(ert-deftest sprig-review-mode-test-reload-resettles-an-open-buffer ()
+(ert-deftest sprig-session-mode-test-reload-resettles-an-open-buffer ()
   ;; A mode body runs once, at buffer creation, so a reload alone leaves a
   ;; buffer opened beforehand with the old settings: the very buffer the
   ;; reload was meant to fix keeps the highlight.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     ;; Stand in for a buffer whose mode body ran before the edit.
     (setq-local magit-section-highlight-current t)
     (setq-local magit-section-highlight-selection t)
@@ -1851,41 +1851,41 @@ the fold learns the id from the result rather than from the call."
     ;; A highlight already drawn goes on the next command, not just later.
     (should magit-section-highlight-force-update)))
 
-(ert-deftest sprig-review-mode-test-context-face-is-not-the-turn-face ()
+(ert-deftest sprig-session-mode-test-context-face-is-not-the-turn-face ()
   ;; A normal context must not be painted by the turn: the busy state and
   ;; the large-context face are both yellow, so inheriting the state face
   ;; made a perfectly ordinary context read as a warning mid-turn.
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000)
-        (model (sprig-review-build '((context 90000) (text "hi")))))
-    (sprig-review-tests--rendered model nil
+        (model (sprig-session-build '((context 90000) (text "hi")))))
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (should (re-search-forward "90\\.0k" nil t))
       (should (eq (get-text-property (1- (point)) 'font-lock-face)
-                  'sprig-review-context)))))
+                  'sprig-session-context)))))
 
-(ert-deftest sprig-review-mode-test-new-sessions-same-dir-get-distinct-buffers ()
+(ert-deftest sprig-session-mode-test-new-sessions-same-dir-get-distinct-buffers ()
   ;; Two fresh sessions in one directory must not share a buffer: reusing it
   ;; would stomp the first session and stream its output into the second.
   (let ((sprig-remotes nil) buffers)
     (unwind-protect
         (progn
-          (push (sprig-review-session "/tmp/sprig-newsess-probe/") buffers)
-          (push (sprig-review-session "/tmp/sprig-newsess-probe/") buffers)
+          (push (sprig-session-session "/tmp/sprig-newsess-probe/") buffers)
+          (push (sprig-session-session "/tmp/sprig-newsess-probe/") buffers)
           (should (= 2 (length buffers)))
           (should (not (eq (nth 0 buffers) (nth 1 buffers))))
           (should (= 2 (length (seq-uniq (mapcar #'buffer-name buffers))))))
       (dolist (b buffers) (when (buffer-live-p b) (kill-buffer b))))))
 
-(ert-deftest sprig-review-mode-test-fork-gets-its-own-buffer ()
+(ert-deftest sprig-session-mode-test-fork-gets-its-own-buffer ()
   ;; A fork carries its parent's id until the CLI answers with its own, so it
   ;; must not land in the parent's buffer: that would stomp the very session
   ;; it was forked from.  It resumes the parent id with the fork flag set.
   (let ((sprig-remotes nil) parent forked)
     (unwind-protect
         (progn
-          (setq parent (sprig-review-session "/tmp/sprig-fork-probe/" "sess-1"))
-          (setq forked (sprig-review-session "/tmp/sprig-fork-probe/" "sess-1"
+          (setq parent (sprig-session-session "/tmp/sprig-fork-probe/" "sess-1"))
+          (setq forked (sprig-session-session "/tmp/sprig-fork-probe/" "sess-1"
                                              nil t))
           (should-not (eq parent forked))
           (with-current-buffer forked
@@ -1896,19 +1896,19 @@ the fold learns the id from the result rather than from the call."
           (with-current-buffer parent
             (should-not sprig--fork-session))
           ;; Opening the parent again still reuses the parent's buffer.
-          (should (eq parent (sprig-review-session "/tmp/sprig-fork-probe/"
+          (should (eq parent (sprig-session-session "/tmp/sprig-fork-probe/"
                                                    "sess-1"))))
       (dolist (b (list parent forked))
         (when (buffer-live-p b) (kill-buffer b))))))
 
-(ert-deftest sprig-review-mode-test-fork-needs-a-session ()
+(ert-deftest sprig-session-mode-test-fork-needs-a-session ()
   ;; Nothing to fork from before the session has an id of its own.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--session-id nil)
-    (should-error (sprig-review-fork) :type 'user-error)))
+    (should-error (sprig-session-fork) :type 'user-error)))
 
-(ert-deftest sprig-review-mode-test-remote-open-fetches-log-async ()
+(ert-deftest sprig-session-mode-test-remote-open-fetches-log-async ()
   ;; Opening a remote session seeds the buffer empty at once and fetches its
   ;; replay history over SSH in the background, so RET on a remote row never
   ;; blocks Emacs; a local session with an id is read synchronously as before.
@@ -1931,7 +1931,7 @@ the fold learns the id from the result rather than from the call."
             (should-not async-called))
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
-(ert-deftest sprig-review-mode-test-session-buffer-does-not-select ()
+(ert-deftest sprig-session-mode-test-session-buffer-does-not-select ()
   ;; The navigator builds a row's review buffer without displaying it, so a
   ;; verb run from the list steers the session in the background.  Building it
   ;; leaves the caller's buffer selected and pins the session to the host.
@@ -1951,7 +1951,7 @@ the fold learns the id from the result rather than from the call."
                 (should (null sprig--remote-override))))
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
-(ert-deftest sprig-review-mode-test-status-session-buffer-builds-when-closed ()
+(ert-deftest sprig-session-mode-test-status-session-buffer-builds-when-closed ()
   ;; A row whose session is not open has its review buffer built on demand,
   ;; undisplayed; a row already open reuses its live buffer instead.
   (let ((sprig-remotes nil) built live)
@@ -1971,7 +1971,7 @@ the fold learns the id from the result rather than from the call."
       (dolist (b (list built live))
         (when (buffer-live-p b) (kill-buffer b))))))
 
-(ert-deftest sprig-review-mode-test-status-steer-runs-in-the-target ()
+(ert-deftest sprig-session-mode-test-status-steer-runs-in-the-target ()
   ;; A navigator steer verb runs the review command in the row's own review
   ;; buffer: it resolves the row's session and calls the command there, so a
   ;; c c composes for that session and a c y answers it, from the list.
@@ -1984,105 +1984,105 @@ the fold learns the id from the result rather than from the call."
                      (lambda () (list :buffer target :host nil
                                       :dir "/tmp/sprig-steer-probe/" :session nil)))
                     ((symbol-function 'sprig--status-refresh) #'ignore)
-                    ((symbol-function 'sprig-review-accept)
+                    ((symbol-function 'sprig-session-accept)
                      (lambda () (interactive) (setq seen (current-buffer)))))
             (sprig-status-accept))
           (should (eq seen target)))
       (when (buffer-live-p target) (kill-buffer target)))))
 
-(ert-deftest sprig-review-mode-test-run-verb ()
+(ert-deftest sprig-session-mode-test-run-verb ()
   ;; `x' steers rather than sends, so asking for a command lands in the turn
   ;; you are watching instead of waiting it out.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((tool-call "b1" "Bash"
                              ,(json-serialize (list :command "make test")))
                   (tool-result "b1" nil "ok")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (re-search-forward "^Bash  ")
       (let (sent)
-        (cl-letf (((symbol-function 'sprig-review--steer)
+        (cl-letf (((symbol-function 'sprig-session--steer)
                    (lambda (text) (setq sent text))))
-          (sprig-review-run))
+          (sprig-session-run))
         (should (string-match-p "make test" sent))))))
 
-(ert-deftest sprig-review-mode-test-fenced-blocks-parse ()
+(ert-deftest sprig-session-mode-test-fenced-blocks-parse ()
   ;; The parser pulls each triple-backtick block with its language tag, and
   ;; the runnable filter keeps untagged/shell fences, dropping code and data.
-  (let ((bs (sprig-review--fenced-blocks
+  (let ((bs (sprig-session--fenced-blocks
              "intro\n```sh\nmake test\n```\nmid\n```diff\n- a\n+ b\n```\nend")))
     (should (equal (mapcar (lambda (b) (plist-get b :lang)) bs) '("sh" "diff")))
     (should (equal (plist-get (car bs) :body) "make test"))
     (should (equal (plist-get (cadr bs) :body) "- a\n+ b")))
   (should (equal (mapcar (lambda (b) (plist-get b :lang))
-                         (sprig-review--runnable-blocks
+                         (sprig-session--runnable-blocks
                           "```sh\na\n```\n```diff\n-x\n```\n```\nb\n```"))
                  '("sh" nil))))
 
-(ert-deftest sprig-review-mode-test-run-verb-prose-fence ()
+(ert-deftest sprig-session-mode-test-run-verb-prose-fence ()
   ;; `x' on a prose block runs the fenced command point is in, reaching a
   ;; command the agent proposed but did not execute.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 '((text "First:\n\n```sh\nmake test\n```\n\nOr:\n\n```bash\n./deploy.sh\n```\n\nWhich?")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (let (sent)
-        (cl-letf (((symbol-function 'sprig-review--steer)
+        (cl-letf (((symbol-function 'sprig-session--steer)
                    (lambda (text) (setq sent text))))
           (goto-char (point-min)) (search-forward "make test")
-          (sprig-review-run)
+          (sprig-session-run)
           (should (string-match-p "make test" sent))
           (goto-char (point-min)) (search-forward "deploy.sh")
-          (sprig-review-run)
+          (sprig-session-run)
           (should (string-match-p "deploy\\.sh" sent))
           ;; Point in prose between two blocks is ambiguous; it refuses.
           (goto-char (point-min)) (search-forward "Which?")
-          (should-error (sprig-review-run) :type 'user-error))))))
+          (should-error (sprig-session-run) :type 'user-error))))))
 
-(ert-deftest sprig-review-mode-test-run-verb-skips-non-shell-fence ()
+(ert-deftest sprig-session-mode-test-run-verb-skips-non-shell-fence ()
   ;; A diff (or other code/data) block is not a command, so `x' refuses it.
-  (let ((model (sprig-review-build '((text "Change:\n\n```diff\n- old\n+ new\n```")))))
-    (sprig-review-tests--rendered model nil
+  (let ((model (sprig-session-build '((text "Change:\n\n```diff\n- old\n+ new\n```")))))
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min)) (search-forward "old")
-      (should-error (sprig-review-run) :type 'user-error))))
+      (should-error (sprig-session-run) :type 'user-error))))
 
-(ert-deftest sprig-review-mode-test-commit-verb ()
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-commit-verb ()
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-review-commit))
+        (sprig-session-commit))
       (should (string-match-p "commit" sent)))))
 
-(ert-deftest sprig-review-mode-test-compact-verb ()
+(ert-deftest sprig-session-mode-test-compact-verb ()
   ;; Compact sends the CLI's own /compact command; a prefix arg's instructions
   ;; ride along to steer the summary.  It routes through the queue, so a turn
   ;; in flight holds it rather than refusing it.
   (let (queued)
-    (cl-letf (((symbol-function 'sprig-review--queue)
+    (cl-letf (((symbol-function 'sprig-session--queue)
                (lambda (text) (setq queued text))))
-      (sprig-review-compact)
+      (sprig-session-compact)
       (should (equal queued "/compact"))
-      (sprig-review-compact "keep the design decisions")
+      (sprig-session-compact "keep the design decisions")
       (should (equal queued "/compact keep the design decisions"))
       ;; A blank instruction falls back to the bare command.
-      (sprig-review-compact "   ")
+      (sprig-session-compact "   ")
       (should (equal queued "/compact")))))
 
-(ert-deftest sprig-review-mode-test-compact-queues-mid-turn ()
+(ert-deftest sprig-session-mode-test-compact-queues-mid-turn ()
   ;; A /compact cannot fold into a running turn, so mid-turn it queues (as
   ;; `c q' does) and compacts when the turn ends, rather than erroring; with
   ;; no turn running it just sends.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review-consume) #'ignore)
+      (cl-letf (((symbol-function 'sprig-session-consume) #'ignore)
                 ((symbol-function 'sprig--status-refresh) #'ignore)
                 ((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (push text sent))))
         ;; Mid-turn: held, nothing on the wire yet.
         (setq sprig--busy t)
-        (sprig-review-compact)
+        (sprig-session-compact)
         (should-not sent)
         (should (equal sprig--queued '("/compact")))
         ;; The turn ends: the queued /compact goes as its own turn.
@@ -2091,104 +2091,104 @@ the fold learns the id from the result rather than from the call."
         (should-not sprig--queued)
         ;; Idle: it sends outright.
         (setq sent nil sprig--busy nil)
-        (sprig-review-compact "keep decisions")
+        (sprig-session-compact "keep decisions")
         (should (equal sent '("/compact keep decisions")))))))
 
-(ert-deftest sprig-review-mode-test-yes-and-no-verbs ()
+(ert-deftest sprig-session-mode-test-yes-and-no-verbs ()
   ;; Yes/no affirm and decline the agent's last prose question: each sends its
   ;; configured instruction, and neither commits (that stays the `C' verb).
-  (sprig-review-tests--rendered (sprig-review-tests--edit-model) nil
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-review-accept)
-        (should (equal sent sprig-review-accept-instruction))
-        (sprig-review-decline)
-        (should (equal sent sprig-review-decline-instruction))))))
+        (sprig-session-accept)
+        (should (equal sent sprig-session-accept-instruction))
+        (sprig-session-decline)
+        (should (equal sent sprig-session-decline-instruction))))))
 
-(ert-deftest sprig-review-mode-test-retry-verb ()
-  (let ((model (sprig-review-build '((user "first ask") (text "reply")))))
-    (sprig-review-tests--rendered model nil
+(ert-deftest sprig-session-mode-test-retry-verb ()
+  (let ((model (sprig-session-build '((user "first ask") (text "reply")))))
+    (sprig-session-tests--rendered model nil
       ;; retry rebuilds from events; seed them so the model is discoverable.
-      (setq sprig-review--events '((text "reply") (user "first ask")))
+      (setq sprig-session--events '((text "reply") (user "first ask")))
       (let (sent)
-        (cl-letf (((symbol-function 'sprig-review--send)
+        (cl-letf (((symbol-function 'sprig-session--send)
                    (lambda (text) (setq sent text))))
-          (sprig-review-retry))
+          (sprig-session-retry))
         (should (equal sent "first ask"))))))
 
-(ert-deftest sprig-review-mode-test-review-verb ()
+(ert-deftest sprig-session-mode-test-review-verb ()
   "`c r' asks the agent to spawn a subagent to review the changes and act."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--marked-context) (lambda () nil))
-                ((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-session--marked-context) (lambda () nil))
+                ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-review-review)
+        (sprig-session-review)
         (should (string-match-p "subagent" sent))
         (should (string-match-p "Task tool" sent))
         (should (string-match-p "git diff" sent))
         (should (string-match-p "address its valid findings" sent))))))
 
-(ert-deftest sprig-review-mode-test-review-verb-scopes-to-marks ()
+(ert-deftest sprig-session-mode-test-review-verb-scopes-to-marks ()
   "Marked sections are quoted into the review brief when present."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--marked-context)
+      (cl-letf (((symbol-function 'sprig-session--marked-context)
                  (lambda () "MARKED-HUNK"))
-                ((symbol-function 'sprig-review--send)
+                ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-review-review)
+        (sprig-session-review)
         (should (string-match-p "MARKED-HUNK" sent))
         (should (string-match-p "parts quoted below" sent))))))
 
-(ert-deftest sprig-review-mode-test-file-location ()
+(ert-deftest sprig-session-mode-test-file-location ()
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     ;; Local: the path is used as-is.
-    (should (equal (sprig-review--file-location "/a/b.el") "/a/b.el"))
+    (should (equal (sprig-session--file-location "/a/b.el") "/a/b.el"))
     ;; Remote: a TRAMP name on the session host.
-    (setq sprig-review--remote "me@host")
-    (should (equal (sprig-review--file-location "/a/b.el")
+    (setq sprig-session--remote "me@host")
+    (should (equal (sprig-session--file-location "/a/b.el")
                    "/ssh:me@host:/a/b.el"))))
 
-(ert-deftest sprig-review-mode-test-section-file ()
-  (sprig-review-tests--rendered-expanded (sprig-review-tests--edit-model) nil
+(ert-deftest sprig-session-mode-test-section-file ()
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     ;; On a hunk: the owning change's file.
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
-    (should (equal (sprig-review--section-file (magit-current-section))
+    (should (equal (sprig-session--section-file (magit-current-section))
                    "/tmp/x.el"))
     ;; On the change (file) heading: the same file.
     (goto-char (point-min))
     (re-search-forward "^/tmp/x\\.el$")
-    (should (equal (sprig-review--section-file (magit-current-section))
+    (should (equal (sprig-session--section-file (magit-current-section))
                    "/tmp/x.el")))
   ;; A Bash tool refers to no file.
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((tool-call "b1" "Bash"
                              ,(json-serialize (list :command "ls")))
                   (tool-result "b1" nil "out")))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (re-search-forward "^Bash  ")
-      (should (null (sprig-review--section-file (magit-current-section)))))))
+      (should (null (sprig-session--section-file (magit-current-section)))))))
 
-(ert-deftest sprig-review-mode-test-strip-read-numbers ()
+(ert-deftest sprig-session-mode-test-strip-read-numbers ()
   "The cat -n prefix is stripped and wrapper lines dropped, bytes preserved."
-  (should (equal (sprig-review--strip-read-numbers
+  (should (equal (sprig-session--strip-read-numbers
                   "     1\thello\n     2\t\n     3\t  world")
                  "hello\n\n  world"))
   ;; A non-numbered wrapper line (a system note) is not part of the content.
-  (should (equal (sprig-review--strip-read-numbers
+  (should (equal (sprig-session--strip-read-numbers
                   "     1\tcode\n(a note without a number)")
                  "code")))
 
-(ert-deftest sprig-review-mode-test-latest-read ()
+(ert-deftest sprig-session-mode-test-latest-read ()
   "The latest non-error Read wins; a file filter matches by basename."
-  (let ((model (sprig-review-build
+  (let ((model (sprig-session-build
                 `((tool-call "r1" "Read"
                              ,(json-serialize (list :file_path "/repo/x.el")))
                   (tool-result "r1" nil "     1\told")
@@ -2196,173 +2196,173 @@ the fold learns the id from the result rather than from the call."
                              ,(json-serialize (list :file_path "/repo/y.el")))
                   (tool-result "r2" nil "     1\tnew")))))
     ;; Filtered to x.el by basename: its read, not the later y.el one.
-    (should (equal (sprig-review--latest-read model "x.el")
+    (should (equal (sprig-session--latest-read model "x.el")
                    '("/repo/x.el" . "     1\told")))
-    (should (null (sprig-review--latest-read model "other.el")))
+    (should (null (sprig-session--latest-read model "other.el")))
     ;; Unfiltered (agent-suggested): the latest read of any file, path and all.
-    (should (equal (sprig-review--latest-read model)
+    (should (equal (sprig-session--latest-read model)
                    '("/repo/y.el" . "     1\tnew")))))
 
-(ert-deftest sprig-review-mode-test-seed-from-read-opens-buffer ()
+(ert-deftest sprig-session-mode-test-seed-from-read-opens-buffer ()
   "A pending seed served on a read opens the staging buffer with its bytes."
   (unwind-protect
       (with-temp-buffer
-        (sprig-review-mode)
-        (setq sprig-review--pending-seed '(:file "x.el"))
-        (sprig-review-consume (list 'tool-call "r1" "Read"
+        (sprig-session-mode)
+        (setq sprig-session--pending-seed '(:file "x.el"))
+        (sprig-session-consume (list 'tool-call "r1" "Read"
                                     (json-serialize (list :file_path "/repo/x.el"))))
-        (sprig-review-consume '(tool-result "r1" nil "     1\thello\n     2\tworld"))
-        (sprig-review--seed-from-read)
-        (should (null sprig-review--pending-seed))
+        (sprig-session-consume '(tool-result "r1" nil "     1\thello\n     2\tworld"))
+        (sprig-session--seed-from-read)
+        (should (null sprig-session--pending-seed))
         (with-current-buffer "*sprig-stage*"
           (should (equal (buffer-substring-no-properties (point-min) (point-max))
                          "hello\nworld"))
           ;; Seeded at the path the agent actually read, not the request.
-          (should (equal sprig-review--stage-file "/repo/x.el"))))
+          (should (equal sprig-session--stage-file "/repo/x.el"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
 
-(ert-deftest sprig-review-mode-test-seed-from-read-any-learns-file ()
+(ert-deftest sprig-session-mode-test-seed-from-read-any-learns-file ()
   "An agent-suggested seed (:any) opens at whatever file the agent read."
   (unwind-protect
       (with-temp-buffer
-        (sprig-review-mode)
-        (setq sprig-review--pending-seed '(:any t))
-        (sprig-review-consume (list 'tool-call "r1" "Read"
+        (sprig-session-mode)
+        (setq sprig-session--pending-seed '(:any t))
+        (sprig-session-consume (list 'tool-call "r1" "Read"
                                     (json-serialize (list :file_path "/repo/z.el"))))
-        (sprig-review-consume '(tool-result "r1" nil "     1\tpicked"))
-        (sprig-review--seed-from-read)
+        (sprig-session-consume '(tool-result "r1" nil "     1\tpicked"))
+        (sprig-session--seed-from-read)
         (with-current-buffer "*sprig-stage*"
           (should (equal (buffer-substring-no-properties (point-min) (point-max))
                          "picked"))
-          (should (equal sprig-review--stage-file "/repo/z.el"))))
+          (should (equal sprig-session--stage-file "/repo/z.el"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
 
-(ert-deftest sprig-review-mode-test-seed-from-read-missing-clears ()
+(ert-deftest sprig-session-mode-test-seed-from-read-missing-clears ()
   "With no read back, the seed is cleared and no staging buffer opens."
   (unwind-protect
       (with-temp-buffer
-        (sprig-review-mode)
-        (setq sprig-review--pending-seed '(:file "x.el"))
-        (sprig-review--seed-from-read)
-        (should (null sprig-review--pending-seed))
+        (sprig-session-mode)
+        (setq sprig-session--pending-seed '(:file "x.el"))
+        (sprig-session--seed-from-read)
+        (should (null sprig-session--pending-seed))
         (should (null (get-buffer "*sprig-stage*"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
 
-(ert-deftest sprig-review-mode-test-stage-direct-sends-both-blocks ()
+(ert-deftest sprig-session-mode-test-stage-direct-sends-both-blocks ()
   "Direct staging sends the agent the old and new text, verbatim-marked."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-session--send)
                  (lambda (text &rest _) (setq sent text))))
-        (sprig-review--stage-direct "app/x.py" "OLD-REGION" "NEW-REGION")
+        (sprig-session--stage-direct "app/x.py" "OLD-REGION" "NEW-REGION")
         (should (string-match-p "app/x.py" sent))
         (should (string-match-p "OLD-REGION" sent))
         (should (string-match-p "NEW-REGION" sent))
         (should (string-match-p "character for character" sent))))))
 
-(ert-deftest sprig-review-mode-test-stage-courier-records-and-asks ()
+(ert-deftest sprig-session-mode-test-stage-courier-records-and-asks ()
   "Courier staging records the bytes and asks for the placeholder Edit."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--permission-mode "default")
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-review--send)
+      (cl-letf (((symbol-function 'sprig-session--send)
                  (lambda (text &rest _) (setq sent text))))
-        (sprig-review--stage-courier "app/x.py" "OLD" "NEW")
+        (sprig-session--stage-courier "app/x.py" "OLD" "NEW")
         (should (equal sprig--courier '((:file "app/x.py" :old "OLD" :new "NEW"))))
         (should (string-match-p "placeholders" sent))))))
 
-(ert-deftest sprig-review-mode-test-stage-courier-refuses-auto-approve ()
+(ert-deftest sprig-session-mode-test-stage-courier-refuses-auto-approve ()
   "Courier staging refuses a mode that would auto-run the placeholder Edit."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--permission-mode "acceptEdits")
-    (should-error (sprig-review--stage-courier "x.py" "a" "b")
+    (should-error (sprig-session--stage-courier "x.py" "a" "b")
                   :type 'user-error)))
 
-(ert-deftest sprig-review-mode-test-set-title ()
+(ert-deftest sprig-session-mode-test-set-title ()
   (with-temp-buffer
-    (sprig-review-mode)
-    (sprig-review-seed '((text "hi")) '(:title "Old"))
+    (sprig-session-mode)
+    (sprig-session-seed '((text "hi")) '(:title "Old"))
     (should (string-match-p "Old" (buffer-string)))
-    (sprig-review-set-title "New")
-    (should (equal (plist-get sprig-review--meta :title) "New"))
+    (sprig-session-set-title "New")
+    (should (equal (plist-get sprig-session--meta :title) "New"))
     (should (string-match-p "New" (buffer-string)))
     (should-not (string-match-p "Old" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-header-mode ()
+(ert-deftest sprig-session-mode-test-header-mode ()
   ;; Plan mode shows in the header; auto (the normal state) does not.
-  (sprig-review-tests--rendered (sprig-review-build '((mode "plan") (user "x"))) nil
+  (sprig-session-tests--rendered (sprig-session-build '((mode "plan") (user "x"))) nil
     (should (string-match-p "Mode:" (buffer-string)))
     (should (string-match-p "plan" (buffer-string))))
-  (sprig-review-tests--rendered (sprig-review-build '((mode "auto") (user "x"))) nil
+  (sprig-session-tests--rendered (sprig-session-build '((mode "auto") (user "x"))) nil
     (should-not (string-match-p "Mode:" (buffer-string)))))
 
-(ert-deftest sprig-review-mode-test-compose-plan-mode ()
+(ert-deftest sprig-session-mode-test-compose-plan-mode ()
   ;; Composing in plan mode sends the turn with mode "plan".
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((review (current-buffer)))
       (with-temp-buffer
-        (sprig-review-compose-mode)
+        (sprig-session-compose-mode)
         (insert "make a plan")
-        (setq sprig-review--compose-target review
-              sprig-review--compose-context nil
-              sprig-review--compose-mode "plan")
+        (setq sprig-session--compose-target review
+              sprig-session--compose-context nil
+              sprig-session--compose-mode "plan")
         (let (sent-text sent-mode)
-          (cl-letf (((symbol-function 'sprig-review--send)
+          (cl-letf (((symbol-function 'sprig-session--send)
                      (lambda (text &optional mode)
                        (setq sent-text text sent-mode mode)))
                     ((symbol-function 'quit-window) #'ignore))
-            (sprig-review-compose-send))
+            (sprig-session-compose-send))
           (should (equal sent-text "make a plan"))
           (should (equal sent-mode "plan")))))))
 
-(ert-deftest sprig-review-mode-test-compose-steer ()
+(ert-deftest sprig-session-mode-test-compose-steer ()
   ;; A plain `c c' routes to the steer path, not the ordinary send, and
   ;; carries any marked context with it just the same.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((review (current-buffer)))
       (with-temp-buffer
-        (sprig-review-compose-mode)
+        (sprig-session-compose-mode)
         (insert "actually, stop and do X")
-        (setq sprig-review--compose-target review
-              sprig-review--compose-context "Regarding this hunk"
-              sprig-review--compose-mode nil
-              sprig-review--compose-queue nil)
+        (setq sprig-session--compose-target review
+              sprig-session--compose-context "Regarding this hunk"
+              sprig-session--compose-mode nil
+              sprig-session--compose-queue nil)
         (let (steered sent)
-          (cl-letf (((symbol-function 'sprig-review--steer)
+          (cl-letf (((symbol-function 'sprig-session--steer)
                      (lambda (text) (setq steered text)))
-                    ((symbol-function 'sprig-review--send)
+                    ((symbol-function 'sprig-session--send)
                      (lambda (text &optional _mode) (setq sent text)))
                     ((symbol-function 'quit-window) #'ignore))
-            (sprig-review-compose-send))
+            (sprig-session-compose-send))
           (should-not sent)
           (should (equal steered
                          "Regarding:\n\nRegarding this hunk\n\nactually, stop and do X")))))))
 
-(ert-deftest sprig-review-mode-test-queue-composes-with-the-flag ()
-  ;; `sprig-review-queue' opens the compose buffer marked to wait, and in no
+(ert-deftest sprig-session-mode-test-queue-composes-with-the-flag ()
+  ;; `sprig-session-queue' opens the compose buffer marked to wait, and in no
   ;; permission mode of its own: the turn it queues behind has picked one.
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
-      (sprig-review-queue))
+      (sprig-session-queue))
     (with-current-buffer "*sprig-message*"
-      (should sprig-review--compose-queue)
-      (should-not sprig-review--compose-mode))
+      (should sprig-session--compose-queue)
+      (should-not sprig-session--compose-mode))
     ;; Whereas a plain `c c' compose does not wait: it speaks now.
     (with-temp-buffer
-      (sprig-review-mode)
+      (sprig-session-mode)
       (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
-        (sprig-review-message))
+        (sprig-session-message))
       (with-current-buffer "*sprig-message*"
-        (should-not sprig-review--compose-queue)))
+        (should-not sprig-session--compose-queue)))
     (kill-buffer "*sprig-message*")))
 
-(ert-deftest sprig-review-mode-test-compose-send-routes-by-flag ()
+(ert-deftest sprig-session-mode-test-compose-send-routes-by-flag ()
   "A plain `c c' steers, `c q' queues, `c p' delivers with its mode."
   (dolist (case '((nil     nil    steer)
                   (nil     t      queue)
@@ -2371,52 +2371,52 @@ the fold learns the id from the result rather than from the call."
                 (took nil))
       (with-temp-buffer
         (let ((review (current-buffer)))
-          (sprig-review-mode)
+          (sprig-session-mode)
           (with-current-buffer (get-buffer-create "*sprig-message*")
-            (sprig-review-compose-mode)
+            (sprig-session-compose-mode)
             (erase-buffer)
             (insert "do the thing")
-            (setq sprig-review--compose-target review
-                  sprig-review--compose-context nil
-                  sprig-review--compose-mode mode
-                  sprig-review--compose-queue queue)
+            (setq sprig-session--compose-target review
+                  sprig-session--compose-context nil
+                  sprig-session--compose-mode mode
+                  sprig-session--compose-queue queue)
             (cl-letf (((symbol-function 'quit-window) #'ignore)
-                      ((symbol-function 'sprig-review--steer)
+                      ((symbol-function 'sprig-session--steer)
                        (lambda (_) (setq took 'steer)))
-                      ((symbol-function 'sprig-review--queue)
+                      ((symbol-function 'sprig-session--queue)
                        (lambda (_) (setq took 'queue)))
-                      ((symbol-function 'sprig-review--send)
+                      ((symbol-function 'sprig-session--send)
                        (lambda (&rest _) (setq took 'send))))
-              (sprig-review-compose-send)))
+              (sprig-session-compose-send)))
           (should (eq took want))))))
   (kill-buffer "*sprig-message*"))
 
-(ert-deftest sprig-review-mode-test-compose-send-keeps-text-when-the-send-fails ()
+(ert-deftest sprig-session-mode-test-compose-send-keeps-text-when-the-send-fails ()
   ;; `quit-window' kills the compose buffer, so sending has to come first: a
   ;; `c p' refused mid-turn used to signal after the kill and take the prose
   ;; with it, leaving the user an error where their message had been.
   (with-temp-buffer
     (let ((review (current-buffer))
           (quit nil))
-      (sprig-review-mode)
+      (sprig-session-mode)
       (with-current-buffer (get-buffer-create "*sprig-message*")
-        (sprig-review-compose-mode)
+        (sprig-session-compose-mode)
         (erase-buffer)
         (insert "plan me something")
-        (setq sprig-review--compose-target review
-              sprig-review--compose-context nil
-              sprig-review--compose-mode "plan"
-              sprig-review--compose-queue nil)
+        (setq sprig-session--compose-target review
+              sprig-session--compose-context nil
+              sprig-session--compose-mode "plan"
+              sprig-session--compose-queue nil)
         (cl-letf (((symbol-function 'quit-window) (lambda (&rest _) (setq quit t)))
-                  ((symbol-function 'sprig-review--send)
+                  ((symbol-function 'sprig-session--send)
                    (lambda (&rest _) (user-error "A turn is already in flight"))))
-          (should-error (sprig-review-compose-send) :type 'user-error))
+          (should-error (sprig-session-compose-send) :type 'user-error))
         ;; The window never quit, so the buffer lives and still holds the text.
         (should-not quit)
         (should (equal (string-trim (buffer-string)) "plan me something"))))
     (kill-buffer "*sprig-message*")))
 
-(ert-deftest sprig-review-mode-test-agent-steps-nest-and-fold ()
+(ert-deftest sprig-session-mode-test-agent-steps-nest-and-fold ()
   "A subagent's steps render inside the `Agent' row, each folding as a tool."
   (let ((model (list :blocks
                      (list (list :type 'tool :id "toolu_P" :name "Agent"
@@ -2427,7 +2427,7 @@ the fold learns the id from the result rather than from the call."
                                                                  :input "{\"command\":\"ls -la\"}"
                                                                  :result '(:error nil :text "total 4"))))
                                  :result '(:error nil :text "It says hello."))))))
-    (sprig-review-tests--rendered model nil
+    (sprig-session-tests--rendered model nil
       (let ((s (buffer-string)))
         ;; The Agent row is folded, so its steps are not in the buffer yet.
         (should (string-match-p "Agent" s))
@@ -2445,7 +2445,7 @@ the fold learns the id from the result rather than from the call."
         (should (string-match-p "↳ result" s))
         (should (< (string-match "Bash" s) (string-match "↳ result" s)))))))
 
-(ert-deftest sprig-review-mode-test-agent-row-narrates-while-it-runs ()
+(ert-deftest sprig-session-mode-test-agent-row-narrates-while-it-runs ()
   "An `Agent' row says what its subagent is doing, then stops once it is done."
   (let ((running (list :type 'tool :id "toolu_A" :name "Agent"
                        :input "{\"description\":\"Find note.txt contents\"}"
@@ -2456,26 +2456,26 @@ the fold learns the id from the result rather than from the call."
                     :agent '(:status "completed" :agent-type "Explore"
                              :description "Reading note.txt")
                     :result '(:error nil :text "It says hello."))))
-    (let ((s (substring-no-properties (sprig-review--tool-heading running))))
+    (let ((s (substring-no-properties (sprig-session--tool-heading running))))
       ;; The job it was given, and where it has got to: both, and in that order.
       (should (string-match-p "Find note.txt contents" s))
       (should (string-match-p "▸ Explore: Reading note.txt" s)))
     ;; Done: the row carries the report, so the activity would be stale noise.
-    (let ((s (substring-no-properties (sprig-review--tool-heading done))))
+    (let ((s (substring-no-properties (sprig-session--tool-heading done))))
       (should (string-match-p "Find note.txt contents" s))
       (should-not (string-match-p "▸" s)))
     ;; An ordinary tool has no subagent and gains nothing.
-    (should-not (sprig-review--agent-activity
+    (should-not (sprig-session--agent-activity
                  (list :type 'tool :name "Read" :input "{}")))))
 
-(ert-deftest sprig-review-mode-test-plan-indicator ()
+(ert-deftest sprig-session-mode-test-plan-indicator ()
   "The freshest plan's progress, by either route into the buffer."
   ;; No plan, no count: an ordinary turn's line stays as it was.
-  (should-not (sprig-review--plan-indicator nil))
-  (should-not (sprig-review--plan-indicator
+  (should-not (sprig-session--plan-indicator nil))
+  (should-not (sprig-session--plan-indicator
                (list :blocks (list (list :type 'text :text "hi")))))
   ;; The granular task tools, folded into a `tasks' block.
-  (should (equal (sprig-review--plan-indicator
+  (should (equal (sprig-session--plan-indicator
                   (list :blocks
                         (list (list :type 'tasks
                                     :items '(((content . "a") (status . "completed"))
@@ -2483,17 +2483,17 @@ the fold learns the id from the result rather than from the call."
                                              ((content . "c") (status . "pending")))))))
                  "1/3"))
   ;; A whole-list `TodoWrite' reaches the same count down the other route.
-  (should (equal (sprig-review--plan-indicator
+  (should (equal (sprig-session--plan-indicator
                   (list :blocks
                         (list (list :type 'tool-call :name "TodoWrite"
                                     :input '((todos . (((content . "a") (status . "completed"))
                                                        ((content . "b") (status . "completed")))))))))
                  "2/2")))
 
-(ert-deftest sprig-review-mode-test-plan-indicator-takes-the-freshest ()
+(ert-deftest sprig-session-mode-test-plan-indicator-takes-the-freshest ()
   ;; Blocks are oldest-first, and a plan supersedes the one before it: the
   ;; count has to follow the plan being worked, not the first one ever seen.
-  (should (equal (sprig-review--plan-indicator
+  (should (equal (sprig-session--plan-indicator
                   (list :blocks
                         (list (list :type 'tasks
                                     :items '(((content . "old") (status . "pending"))))
@@ -2503,42 +2503,42 @@ the fold learns the id from the result rather than from the call."
                                              ((content . "new2") (status . "pending")))))))
                  "1/2")))
 
-(ert-deftest sprig-review-mode-test-state-shows-the-plan ()
+(ert-deftest sprig-session-mode-test-state-shows-the-plan ()
   "The plan count rides the state line, and stays off it when there is no plan."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((inhibit-read-only t)
           (model (list :blocks
                        (list (list :type 'tasks
                                    :items '(((content . "a") (status . "completed"))
                                             ((content . "b") (status . "pending"))))))))
-      (sprig-review--insert-state model)
+      (sprig-session--insert-state model)
       (should (string-match-p "☑ 1/2" (buffer-string)))
       (erase-buffer)
-      (sprig-review--insert-state nil)
+      (sprig-session--insert-state nil)
       (should-not (string-match-p "☑" (buffer-string))))))
 
-(ert-deftest sprig-review-mode-test-state-shows-the-queue ()
+(ert-deftest sprig-session-mode-test-state-shows-the-queue ()
   "A queued message is visible on the state line, and only while queued."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (let ((inhibit-read-only t))
       (setq-local sprig--busy t)
       (setq-local sprig--queued '("later, do X" "and then Y"))
-      (sprig-review--insert-state nil)
+      (sprig-session--insert-state nil)
       (should (string-match-p "2 queued" (buffer-string)))
       (erase-buffer)
       ;; Flushed: the line stops advertising a queue that is gone.
       (setq-local sprig--queued nil)
-      (sprig-review--insert-state nil)
+      (sprig-session--insert-state nil)
       (should-not (string-match-p "queued" (buffer-string))))))
 
 ;;;; A review buffer that owns its session
 
-(ert-deftest sprig-review-mode-test-owned-sink-tracks-and-consumes ()
+(ert-deftest sprig-session-mode-test-owned-sink-tracks-and-consumes ()
   "The owner sink books transport state and folds events into the model."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--sink #'sprig--review-sink)
     (should (eq sprig--sink #'sprig--review-sink))
     (cl-letf (((symbol-function 'sprig--status-refresh) #'ignore))
@@ -2549,13 +2549,13 @@ the fold learns the id from the result rather than from the call."
       (setq sprig--busy t)
       (sprig--review-sink '(done nil nil))
       (should-not sprig--busy))
-    (should (member '(session "abc") sprig-review--events))))
+    (should (member '(session "abc") sprig-session--events))))
 
-(ert-deftest sprig-review-mode-test-transport-routes-to-owned-sink ()
+(ert-deftest sprig-session-mode-test-transport-routes-to-owned-sink ()
   "`sprig--handle' funcalls the buffer-local sink, so a self-owned review
 buffer receives streamed transport events without a Markdown transcript."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--sink #'sprig--review-sink)
     (let ((buf (current-buffer)))
       (cl-letf (((symbol-function 'process-get)
@@ -2567,29 +2567,29 @@ buffer receives streamed transport events without a Markdown transcript."
           '(:type "stream_event"
             :event (:type "content_block_delta" :index 0
                     :delta (:type "text_delta" :text "hello")))))))
-    (should (member '(text "hello") sprig-review--events))))
+    (should (member '(text "hello") sprig-session--events))))
 
-(ert-deftest sprig-review-mode-test-owned-send-echoes-user ()
+(ert-deftest sprig-session-mode-test-owned-send-echoes-user ()
   "An owned send transmits the turn and echoes the user block locally."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--sink #'sprig--review-sink)
     (let (sent)
       (cl-letf (((symbol-function 'sprig--ensure) #'ignore)
                 ((symbol-function 'sprig--send-user)
                  (lambda (text) (setq sent text)))
                 ((symbol-function 'sprig--status-refresh) #'ignore))
-        (sprig-review--send "do it"))
+        (sprig-session--send "do it"))
       (should (equal sent "do it"))
       (should sprig--busy)
-      (should (member '(user "do it") sprig-review--events)))))
+      (should (member '(user "do it") sprig-session--events)))))
 
-(ert-deftest sprig-review-mode-test-owned-interrupt ()
+(ert-deftest sprig-session-mode-test-owned-interrupt ()
   "An owned interrupt asks the CLI to end the turn and keeps the session live.
 It sends an `interrupt' request and arms the fallback timer without
 tearing the process down; the turn's `done' does the clearing later."
   (with-temp-buffer
-    (sprig-review-mode)
+    (sprig-session-mode)
     (setq sprig--sink #'sprig--review-sink
           sprig--busy t sprig--interrupt-timer nil)
     (let (interrupted torn)
@@ -2600,14 +2600,14 @@ tearing the process down; the turn's `done' does the clearing later."
                       ((symbol-function 'sprig--teardown-process)
                        (lambda () (setq torn t)))
                       ((symbol-function 'sprig--status-refresh) #'ignore))
-              (sprig-review-interrupt))
+              (sprig-session-interrupt))
             (should interrupted)
             (should-not torn)
             (should sprig--busy)
             (should (timerp sprig--interrupt-timer)))
         (sprig--clear-interrupt)))))
 
-(defconst sprig-review-mode-tests--diff
+(defconst sprig-session-mode-tests--diff
   "diff --git a/foo.el b/foo.el
 --- a/foo.el
 +++ b/foo.el
@@ -2624,12 +2624,12 @@ new file mode 100644
 "
   "A two-file unified diff: one edit and one new file, for the diff buffer.")
 
-(ert-deftest sprig-review-mode-test-diff-buffer-renders-hunks ()
+(ert-deftest sprig-session-mode-test-diff-buffer-renders-hunks ()
   ;; The working-tree diff buffer renders `git diff' through the same hunk
   ;; sections the review buffer uses, one foldable file at a time.
   (with-temp-buffer
     (sprig-diff-mode)
-    (sprig-diff--render sprig-review-mode-tests--diff)
+    (sprig-diff--render sprig-session-mode-tests--diff)
     (let ((s (buffer-string)))
       (should (string-match-p "^foo\\.el$" s))
       (should (string-match-p "^new\\.txt$" s))
@@ -2640,9 +2640,9 @@ new file mode 100644
     (sprig-diff--render "")
     (should (string-match-p "No changes against HEAD\\."
                             (buffer-string)))
-    (should-not sprig-review--marks)))
+    (should-not sprig-session--marks)))
 
-(ert-deftest sprig-review-mode-test-diff-runs-local-and-remote ()
+(ert-deftest sprig-session-mode-test-diff-runs-local-and-remote ()
   ;; Local reads run git in the repo dir; a remote read rides the session's
   ;; SSH transport (`sprig--remote-sh'), not TRAMP, and honours the base.
   (let (local-args remote-cmd remote-host)
@@ -2663,31 +2663,31 @@ new file mode 100644
         (should (equal remote-host "me@box"))
         (should (string-match-p "cd /srv/app && git diff main" remote-cmd))))))
 
-(ert-deftest sprig-review-mode-test-diff-comment-routes-to-session ()
+(ert-deftest sprig-session-mode-test-diff-comment-routes-to-session ()
   ;; Marking a hunk and `c c' composes a comment whose send targets the
   ;; owning review buffer, with the hunk attached as context.
   (let ((review (get-buffer-create "*sprig-diff-test-review*")))
     (unwind-protect
         (progn
-          (with-current-buffer review (sprig-review-mode))
+          (with-current-buffer review (sprig-session-mode))
           (with-temp-buffer
             (sprig-diff-mode)
             (setq sprig-diff--review review)
-            (sprig-diff--render sprig-review-mode-tests--diff)
+            (sprig-diff--render sprig-session-mode-tests--diff)
             ;; Mark the first hunk (first child of the first change).
             (let* ((change (car (oref magit-root-section children)))
                    (hunk (car (oref change children))))
-              (setq sprig-review--marks (list (magit-section-ident hunk))))
-            (should (equal (sprig-review--marked-context)
+              (setq sprig-session--marks (list (magit-section-ident hunk))))
+            (should (equal (sprig-session--marked-context)
                            "-  (bar))\n+  (baz))"))
             (sprig-diff-message))
           (with-current-buffer "*sprig-message*"
-            (should (eq sprig-review--compose-target review))
-            (should (equal sprig-review--compose-context
+            (should (eq sprig-session--compose-target review))
+            (should (equal sprig-session--compose-context
                            "-  (bar))\n+  (baz))"))
-            (should-not sprig-review--compose-queue)))
+            (should-not sprig-session--compose-queue)))
       (kill-buffer review)
       (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
 
-(provide 'sprig-review-mode-tests)
-;;; sprig-review-mode-tests.el ends here
+(provide 'sprig-session-mode-tests)
+;;; sprig-session-mode-tests.el ends here
