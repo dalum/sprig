@@ -1932,7 +1932,7 @@ the fold learns the id from the result rather than from the call."
         (when (buffer-live-p buf) (kill-buffer buf))))))
 
 (ert-deftest sprig-session-mode-test-session-buffer-does-not-select ()
-  ;; The navigator builds a row's review buffer without displaying it, so a
+  ;; The navigator builds a row's session buffer without displaying it, so a
   ;; verb run from the list steers the session in the background.  Building it
   ;; leaves the caller's buffer selected and pins the session to the host.
   (let ((sprig-remotes nil) buf)
@@ -1952,7 +1952,7 @@ the fold learns the id from the result rather than from the call."
           (when (buffer-live-p buf) (kill-buffer buf)))))))
 
 (ert-deftest sprig-session-mode-test-status-session-buffer-builds-when-closed ()
-  ;; A row whose session is not open has its review buffer built on demand,
+  ;; A row whose session is not open has its session buffer built on demand,
   ;; undisplayed; a row already open reuses its live buffer instead.
   (let ((sprig-remotes nil) built live)
     (unwind-protect
@@ -2125,7 +2125,7 @@ the fold learns the id from the result rather than from the call."
       (cl-letf (((symbol-function 'sprig--marked-context) (lambda () nil))
                 ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-session-review)
+        (sprig-session-independent-review)
         (should (string-match-p "subagent" sent))
         (should (string-match-p "Task tool" sent))
         (should (string-match-p "git diff" sent))
@@ -2140,7 +2140,7 @@ the fold learns the id from the result rather than from the call."
                  (lambda () "MARKED-HUNK"))
                 ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
-        (sprig-session-review)
+        (sprig-session-independent-review)
         (should (string-match-p "MARKED-HUNK" sent))
         (should (string-match-p "parts quoted below" sent))))))
 
@@ -2533,7 +2533,7 @@ the fold learns the id from the result rather than from the call."
       (sprig-session--insert-state nil)
       (should-not (string-match-p "queued" (buffer-string))))))
 
-;;;; A review buffer that owns its session
+;;;; A session buffer that owns its session
 
 (ert-deftest sprig-session-mode-test-owned-sink-tracks-and-consumes ()
   "The owner sink books transport state and folds events into the model."
@@ -2606,88 +2606,6 @@ tearing the process down; the turn's `done' does the clearing later."
             (should sprig--busy)
             (should (timerp sprig--interrupt-timer)))
         (sprig--clear-interrupt)))))
-
-(defconst sprig-session-mode-tests--diff
-  "diff --git a/foo.el b/foo.el
---- a/foo.el
-+++ b/foo.el
-@@ -1,3 +1,3 @@
- (defun foo ()
--  (bar))
-+  (baz))
-diff --git a/new.txt b/new.txt
-new file mode 100644
---- /dev/null
-+++ b/new.txt
-@@ -0,0 +1,1 @@
-+hello
-"
-  "A two-file unified diff: one edit and one new file, for the diff buffer.")
-
-(ert-deftest sprig-session-mode-test-diff-buffer-renders-hunks ()
-  ;; The working-tree diff buffer renders `git diff' through the same hunk
-  ;; sections the review buffer uses, one foldable file at a time.
-  (with-temp-buffer
-    (sprig-diff-mode)
-    (sprig-diff--render sprig-session-mode-tests--diff)
-    (let ((s (buffer-string)))
-      (should (string-match-p "^foo\\.el$" s))
-      (should (string-match-p "^new\\.txt$" s))
-      (should (string-match-p "^-  (bar))$" s))
-      (should (string-match-p "^\\+  (baz))$" s))
-      (should (string-match-p "^\\+hello$" s)))
-    ;; Empty diff says so (naming the base), and leaves no marks behind.
-    (sprig-diff--render "")
-    (should (string-match-p "No changes against HEAD\\."
-                            (buffer-string)))
-    (should-not sprig--marks)))
-
-(ert-deftest sprig-session-mode-test-diff-runs-local-and-remote ()
-  ;; Local reads run git in the repo dir; a remote read rides the session's
-  ;; SSH transport (`sprig--remote-sh'), not TRAMP, and honours the base.
-  (let (local-args remote-cmd remote-host)
-    (cl-letf (((symbol-function 'process-file)
-               (lambda (_prog _infile _buf _display &rest args)
-                 (setq local-args args)
-                 (insert "")
-                 0))
-              ((symbol-function 'sprig--remote-sh)
-               (lambda (command &optional host)
-                 (setq remote-cmd command remote-host host)
-                 "")))
-      (let ((sprig-diff-base "HEAD"))
-        (sprig-diff--git nil "/repo")
-        (should (equal local-args '("diff" "HEAD"))))
-      (let ((sprig-diff-base "main"))
-        (sprig-diff--git "me@box" "/srv/app")
-        (should (equal remote-host "me@box"))
-        (should (string-match-p "cd /srv/app && git diff main" remote-cmd))))))
-
-(ert-deftest sprig-session-mode-test-diff-comment-routes-to-session ()
-  ;; Marking a hunk and `c c' composes a comment whose send targets the
-  ;; owning review buffer, with the hunk attached as context.
-  (let ((review (get-buffer-create "*sprig-diff-test-review*")))
-    (unwind-protect
-        (progn
-          (with-current-buffer review (sprig-session-mode))
-          (with-temp-buffer
-            (sprig-diff-mode)
-            (setq sprig-diff--review review)
-            (sprig-diff--render sprig-session-mode-tests--diff)
-            ;; Mark the first hunk (first child of the first change).
-            (let* ((change (car (oref magit-root-section children)))
-                   (hunk (car (oref change children))))
-              (setq sprig--marks (list (magit-section-ident hunk))))
-            (should (equal (sprig--marked-context)
-                           "-  (bar))\n+  (baz))"))
-            (sprig-diff-message))
-          (with-current-buffer "*sprig-message*"
-            (should (eq sprig-session--compose-target review))
-            (should (equal sprig-session--compose-context
-                           "-  (bar))\n+  (baz))"))
-            (should-not sprig-session--compose-queue)))
-      (kill-buffer review)
-      (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
 
 (provide 'sprig-session-mode-tests)
 ;;; sprig-session-mode-tests.el ends here

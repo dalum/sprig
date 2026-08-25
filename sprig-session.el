@@ -1,7 +1,7 @@
 ;;; sprig-session.el --- Session model and stored-log reader for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.32.0
+;; Version: 0.33.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -186,13 +186,13 @@ plist (:id ID :content SUBJECT :status STATUS)."
 ;;
 ;; The event list and the model memo live in the data layer, not the UI
 ;; layer, so a headless caller (the navigator's status and preview, in
-;; sprig.el) shares the one build a review buffer already paid for without
+;; sprig.el) shares the one build a session buffer already paid for without
 ;; pulling in sprig-session-mode (and magit-section) to reach it.
 
 (defvar-local sprig-session--events nil
-  "Transport events consumed by this review buffer, most recent first.")
+  "Transport events consumed by this session buffer, most recent first.")
 (defvar-local sprig-session--model nil
-  "The last-built review model for this buffer, memoised (see below).")
+  "The last-built session model for this buffer, memoised (see below).")
 (defvar-local sprig-session--model-head nil
   "The `sprig-session--events' list head `sprig-session--model' was built at.
 Every consumed event conses a new head onto the list, so this is `eq' to the
@@ -243,7 +243,7 @@ the next by `equal'."
           :blocks (mapcar #'copy-tree (reverse blocks)))))
 
 (defun sprig-session--current-model ()
-  "Return this buffer's review model, folding only what is new since last time.
+  "Return this buffer's session model, folding only what is new since last time.
 The same model is wanted by the buffer's own refresh, its state line, and
 the navigator's inline preview and status, often several times a second
 while a turn streams.  This memoises the last build on the event-list head
@@ -439,7 +439,7 @@ navigator titles a live session's row with this, recovering the replayed
 ;;   ~/.claude/projects/<CWD>/<SESSION-ID>.jsonl
 ;; on the host where it runs (the SSH host for a remote session), where
 ;; <CWD> is the working directory with every `/' and `.' turned into `-'.
-;; That file is a durable event log, so a review buffer can replay full
+;; That file is a durable event log, so a session buffer can replay full
 ;; history without sprig keeping any store of its own.  This is the store
 ;; counterpart of the wire parser in sprig.el: both map their own schema
 ;; onto the shared event vocabulary that `sprig-session-build' consumes.
@@ -630,7 +630,7 @@ for a remote session), so nothing here needs to know where it lives."
           lines)))
 
 (defun sprig-session-log-model (lines)
-  "Build a review model from LINES of the stored session log."
+  "Build a session model from LINES of the stored session log."
   (sprig-session-build (sprig-session-log-events lines)))
 
 (provide 'sprig-session)

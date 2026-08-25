@@ -6,13 +6,13 @@
 
 ## What Sprig is
 
-An Emacs interface for **reviewing and steering** an LLM agent's work, aimed at breaking out of linear chat. A conversation is a read-only, **Magit-like review buffer** (built on `magit-section`) whose one job is to review and steer the agent efficiently: the agent's file edits render inline as a foldable diff, you mark what you care about, and single-key verbs send the agent instructions. There is no chat input line and no Markdown file to edit. The whole set of conversations is driven from a `sprig-status` navigator.
+An Emacs interface for **reviewing and steering** an LLM agent's work, aimed at breaking out of linear chat. A conversation is a read-only, **Magit-like session buffer** (built on `magit-section`) whose one job is to review and steer the agent efficiently: the agent's file edits render inline as a foldable diff, you mark what you care about, and single-key verbs send the agent instructions. There is no chat input line and no Markdown file to edit. The whole set of conversations is driven from a `sprig-status` navigator.
 
 A conversation *is* a `claude` session, and Sprig keeps no store of its own. The CLI already persists each session as JSONL under `~/.claude/projects/<cwd>/<id>.jsonl` on the host where it runs, so history is replayed from that log and survives an Emacs restart because the session id names the file. The transport is a persistent Claude Code session, local or over SSH, via the `claude` CLI's stream-json protocol.
 
 **The ownership crux.** Agentic coding has a problem it does not solve: the author of record understands the code least. The agent writes, the human skims and approves, and ownership erodes along with understanding. Reviewing and steering the agent's edits is the fast path and lives with this. Authoring by hand is the deliberate counterweight: you write a piece of the change yourself and the agent puts it on disk, so for that piece you have engaged with every line because you wrote it. It is the same buffer with one extra verb (`e`), not a separate mode, so you trade speed for ownership one edit at a time, wherever it is worth it.
 
-## The review buffer
+## The session buffer
 
 ### Shape
 
@@ -29,7 +29,7 @@ The hard problem is attribution: a conversation is turn-by-turn, but a git worki
 1. **Tool-call payloads = attribution.** Every `Edit` / `Write` / `MultiEdit` is a before/after already present in the stream-json. Reconstruct per-turn hunks from these. Precise, cheap, turn-attributed, and works even when the target is not a git repo.
 2. **Git working tree = ground truth.** The real uncommitted diff. Catches what payloads cannot: a `Bash` call that runs a formatter, a `sed`, codegen. Changes git shows but no payload explains surface as an **"unattributed changes"** section, exactly where the agent did something off-book worth an eyeball.
 
-The inline review buffer uses source 1 only. It needs no git plumbing, works over SSH, and delivers most of the review value. Source 2 now ships as a **separate diff buffer** (`sprig-session-diff`, `d`): a magit-like view of the net working-tree diff that Sprig reads by running `git diff` directly, so it catches a `Bash` change with no payload and shows your own hand-authored edits. It reuses the review grammar (the same hunk sections, marks, and `c c` comment path, routed back to the session), and it works remotely too, reading the diff over the session's SSH transport rather than TRAMP. Folding it into the inline transcript as an "unattributed changes" section is still to come.
+The inline session buffer uses source 1 only. It needs no git plumbing, works over SSH, and delivers most of the review value. Source 2 now ships as the **changeset review** (`sprig-session-review`, `d`): a magit-like view of the net working-tree diff, annotated line by line (see "The changeset review" below) that Sprig reads by running `git diff` directly, so it catches a `Bash` change with no payload and shows your own hand-authored edits. It reuses the review grammar (the same hunk sections, marks, and `c c` comment path, routed back to the session), and it works remotely too, reading the diff over the session's SSH transport rather than TRAMP. Folding it into the inline transcript as an "unattributed changes" section is still to come.
 
 A possible upgrade makes the metaphor literal: mirror each completed turn as a commit on a hidden ref (`refs/sprig/<session>`), one commit per turn, so attribution and revert come free from git. Costs to weigh first: isolating the user's own uncommitted changes from the agent's, and per-turn snapshot overhead. Under the instruction invariant below, Sprig cannot run this git machinery itself, so even the shadow ref would have to be the agent's doing (a per-turn "record a snapshot" instruction) or the invariant relaxed. That tension is why it is deferred.
 
@@ -63,7 +63,7 @@ The governing invariant: **Sprig never *mutates* the repository itself.** Every 
 - **Reject a hunk** (`k`): an instruction to the agent to undo that change, not a local `git apply -R`. Batch with marks: mark the bad hunks, `c c`, "undo these", one turn.
 - **Accept changes**: keep them and clear the review state. A local acknowledgement, no side effect, no commit. Accepting never triggers a commit.
 - **Commit** is a *separate* verb: an explicit instruction to the agent to commit the changes. Kept distinct from accept so accepting can never surprise you with a commit.
-- **Ground truth diff** (source 2) is read by the diff buffer (`sprig-session-diff`, `d`) running `git diff` itself, a read the invariant permits. Locally that is `git diff` in the repo; for a remote session it rides the same SSH transport the navigator reads logs over (`sprig--remote-sh`, `cd DIR && git diff`), never TRAMP. So the read stays off the agent and off TRAMP on both paths.
+- **Ground truth diff** (source 2) is read by the changeset review (`sprig-session-review`, `d`) running `git diff` itself, a read the invariant permits. Locally that is `git diff` in the repo; for a remote session it rides the same SSH transport the navigator reads logs over (`sprig--remote-sh`, `cd DIR && git diff`), never TRAMP. So the read stays off the agent and off TRAMP on both paths.
 
 Two consequences fall out for free:
 
@@ -82,7 +82,7 @@ The payoff is that the model stays tiny. Sprig does exactly one thing, send an i
 
 ### Scope discipline
 
-The review buffer does not replicate Magit. Diff sections support **visit** (`RET`), **reject** (`k`), **accept** (keep and clear the review state), **commit** (a separate explicit instruction), **run** (`x`), and **mark**. The job is to review and steer agent work efficiently, not to be Magit and not to do git.
+The session buffer does not replicate Magit. Diff sections support **visit** (`RET`), **reject** (`k`), **accept** (keep and clear the review state), **commit** (a separate explicit instruction), **run** (`x`), and **mark**. The job is to review and steer agent work efficiently, not to be Magit and not to do git.
 
 ### Verb dispatch on mixed marks
 
@@ -136,9 +136,23 @@ The concrete thing the lens buys is that the change set may interleave **prose c
 
 The limit is worth stating so the analogy is not over-read: there is no counterpart to Knuth's *weave*, the published-documentation output, and the web is not canonical here, so this is literate programming as a workflow, not as a source format. The design should not be tempted into persisting the web.
 
+## The changeset review
+
+The session buffer reviews the agent's work *turn by turn*, which is the right unit while a turn is happening and the wrong one afterwards. Afterwards the question is not "what did that turn do" but "is this change good", and that is a pass over a changeset, not a scroll back through a conversation. `sprig-review-mode` (`d`) is that pass: every change in the working tree against `sprig-review-base`, as one navigable diff, annotated line by line, handed back in a single round.
+
+**Comments are drafts, and publishing is one turn.** Nothing reaches the agent until `c p`. This is Gerrit's model rather than a chat's, and it is the whole reason the surface earns its place: a review composed as a whole says something a stream of individual messages cannot, because the reviewer has seen all of it before saying any of it. It also costs one turn instead of *n*. Publishing rides the ordinary compose buffer, so "sending is committing" holds here too: you write the covering note over the serialised comments and see exactly what goes out.
+
+**Positions come from git, and only from git.** A tool payload is positionless: an `Edit` knows the bytes it replaced, never the line they sat on. So line-anchored review can ride source 2 (the working-tree diff) and not source 1, and the two sources' change plists differ accordingly. Both carry `:hunks`, the payload-shaped runs the transcript renders; only a parsed git diff also carries `:unified`, one entry per `@@` section with every line numbered on both sides, context included. That asymmetry is a fact about the sources, not a gap to close, so it is in the model rather than hidden behind it.
+
+**Anchors are text, not line numbers.** A draft records the file, the side, the line range, *and* the text of the lines it was written against. A refresh re-anchors every draft: unchanged text keeps its line, moved text follows, and text gone from the diff is flagged orphaned and floated to the top of its file, never dropped. Line numbers are the first thing a fresh diff invalidates, so they are a hint about where to look and the text is the identity. A review tool that silently loses a comment is worse than one that has none, and one that silently re-points a comment at a line that now means something else is worse still.
+
+**It writes nothing.** Reading the tree is a read, which the invariant permits, and Sprig does it itself (locally, or over the session's own SSH transport for a remote tree, never TRAMP). Publishing is an instruction like every other verb. Hand-authoring is reachable from a hunk (`e`), seeded with that hunk's new side, and applies through the staging path above, so even the edits you write yourself land through the agent.
+
+**What it does not do.** It shows the whole working tree, the agent's changes and your own together, because that is what "is this change good" is actually asking about; separating the agent's from yours is the same unsolved attribution problem the shadow-ref idea above would fix. There is no approve/request-changes disposition: `a` already accepts and `C` already commits, and a second path to the same place would only invite the two to disagree. Drafts do not survive killing the buffer, since Sprig owns no store; they are one plist, so persisting them later is small if it proves worth it.
+
 ## Store versus view
 
-The buffer is a pure render of an append-only event log, so store and view are separate. And that log already exists: **Sprig does not own it.** The `claude` CLI persists every session as JSONL under `~/.claude/projects/<cwd>/<session-id>.jsonl` on the host where it runs, where `<cwd>` is the working directory with each `/` and `.` turned into `-`. For a remote session that file is on the SSH host, so the store is durable and remote-side with no work from us. A review buffer replays full history by reading that file and mapping its records onto the shared event vocabulary (`sprig-session-log-model`), the store counterpart of the wire parser. The log is really a tree (records link by `uuid`/`parentUuid`) and subagent transcripts are flagged `isSidechain`; the reader follows the main thread and skips sidechains.
+The buffer is a pure render of an append-only event log, so store and view are separate. And that log already exists: **Sprig does not own it.** The `claude` CLI persists every session as JSONL under `~/.claude/projects/<cwd>/<session-id>.jsonl` on the host where it runs, where `<cwd>` is the working directory with each `/` and `.` turned into `-`. For a remote session that file is on the SSH host, so the store is durable and remote-side with no work from us. A session buffer replays full history by reading that file and mapping its records onto the shared event vocabulary (`sprig-session-log-model`), the store counterpart of the wire parser. The log is really a tree (records link by `uuid`/`parentUuid`) and subagent transcripts are flagged `isSidechain`; the reader follows the main thread and skips sidechains.
 
 So Sprig keeps essentially no local store: just a pointer (session id plus cwd) to locate the file, and even that the navigator could rediscover by scanning the projects directory. Markdown is at most an *export*, not the live truth.
 
@@ -158,8 +172,11 @@ A **permission dialog with no client attached** simply stalls the turn. Sprig ru
 
 ## Modes
 
-- **Review buffer**: `sprig-session-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
+- **Session buffer**: `sprig-session-mode`, a read-only major mode on `magit-section`, that owns its session and carries the mark-and-instruction verbs. The only conversation surface.
+- **Changeset review**: `sprig-review-mode`, a read-only major mode on `magit-section` over the working-tree diff, carrying the draft-comment verbs. Owns no session; it publishes to one.
 - **Navigator**: `sprig-status-mode`, a major mode on `tabulated-list`.
+
+Three of them share a change shape and a rendering grammar, which is why those live apart from all three: `sprig-change.el` (the change plist and the two engines that build it, pure and free of `magit-section`) and `sprig-render.el` (the change faces, the file and hunk sections, and marks).
 
 ## Status
 
@@ -167,29 +184,31 @@ Everything above the "Authoring by hand" heading is **shipped**, and its core no
 
 ### Shipped
 
-- **Transport.** Parses the `claude` stream-json into a backend-neutral event vocabulary and routes it to a session-owning review buffer through a per-buffer sink. One process per session, local or over SSH (`sprig-remotes`); several sessions can stream at once. Graceful `c i` interrupt over the same stdin channel, leaving the process live.
-- **Review buffer** (`sprig-session-mode`). Read-only `magit-section` render of the model. The tool-payload diff engine reconstructs per-file, per-hunk changes from `Edit` / `MultiEdit` / `Write`; file changes render as a foldable coloured diff with their folded result. Also renders assistant prose (markdown-fontified), thinking, a todo checklist (from `TodoWrite` and the granular `TaskCreate` / `TaskUpdate` stream), and `Agent` rows that nest a subagent's whole run and narrate it live.
+- **Transport.** Parses the `claude` stream-json into a backend-neutral event vocabulary and routes it to a session-owning session buffer through a per-buffer sink. One process per session, local or over SSH (`sprig-remotes`); several sessions can stream at once. Graceful `c i` interrupt over the same stdin channel, leaving the process live.
+- **Session buffer** (`sprig-session-mode`). Read-only `magit-section` render of the model. The tool-payload diff engine reconstructs per-file, per-hunk changes from `Edit` / `MultiEdit` / `Write`; file changes render as a foldable coloured diff with their folded result. Also renders assistant prose (markdown-fontified), thinking, a todo checklist (from `TodoWrite` and the granular `TaskCreate` / `TaskUpdate` stream), and `Agent` rows that nest a subagent's whole run and narrate it live.
 - **Store.** History is replayed from the CLI's own session JSONL (`sprig-session-log-model`), skipping subagent sidechains; Sprig keeps no store beyond the session id and cwd that locate the file.
 - **Marks and verbs.** `SPC` / `m` mark; a verb acts on the marked set or the section at point. `c` transient: `c c` steer-or-send, `c q` queue, `c Q` drop the queue, `c p` plan, `c r` independent review, `c l` resend, `c i` interrupt. `k` reject a hunk or unstage a floated message, `x` run, `C` commit, `a` accept, `RET` visit (over TRAMP when remote), `t` retitle. `s n` new conversation, `s f` fork (`--resume --fork-session`).
 - **Plan mode.** `c p` sets the CLI permission mode over stdin (`set_permission_mode`) for one turn.
 - **Navigator** (`sprig-status`). Lists the CLI's session logs per project directory across every host (local plus each of `sprig-remotes`), grouped and foldable, with live status glyphs (including `?` waiting-on-you) and a markdown-rendered preview of the last exchange with a time column and sort. Steers a session from the list without opening it (`c` / `a` act on the row's session). The working-directory prompt for a new session completes real paths (locally, or over the session's own SSH transport for a remote host, so no TRAMP) and suggests the directories the host's sessions already run in, drawn from this same cached scan rather than any new config; `S S` shows that list as a view of its own, each root a launch point.
 - **Performance.** Settled prose fontification is memoised, and the structural-render coalescing timer adapts to the last render's measured cost.
 - **Ground-truth diff parser.** `sprig-parse-diff` folds `git diff` into the tool-payload change shape, so the stat, formatter, and renderer all consume it unchanged (source 2 above).
-- **Working-tree diff buffer (`sprig-session-diff`, `d`).** A separate magit-like buffer showing the session's net `git diff` (against `sprig-diff-base`, default `HEAD`), which Sprig reads by running git directly (a read the invariant permits). It renders through the same `sprig--insert-change` hunk sections, marks the same way (`SPC` / `m`), and its `c c` composes a comment about the marked hunks routed back to the session (`sprig-session--compose`, shared with the review buffer's `c c`). It works remotely too, reading the diff over the session's SSH transport (`sprig--remote-sh`) rather than TRAMP; `g` refreshes.
+- **Changeset review (`sprig-session-review`, `d`).** The working-tree diff as a review pass: an index of the changed files, then each as foldable unified hunks with old/new line numbers, read by running `git diff` directly (a read the invariant permits) and over the session's SSH transport when remote. `c c` drafts a comment on the line at point or on the region; drafts render inline under the line they annotate, `c e` re-edits one, `k` takes one back, `c Q` discards the lot. `g` re-reads the diff and re-anchors every draft by its recorded text, orphaning rather than dropping the ones whose lines have gone. `c p` publishes the whole set as one turn through the ordinary compose buffer, grouped by file and ordered by line, each comment quoting its lines. `e` hand-authors the hunk at point instead, seeded with its new side; `c m` sends a plain message about the marked hunks. Positions come from the git diff's new `:unified` view (`sprig-parse-diff`), which a tool payload cannot supply.
 - **Independent review (`c r`).** Asks the session to spawn a subagent (the Task tool) that reviews the uncommitted changes cold, then to address its findings. A subagent has its own context, so it is not the same agent marking its own work, and Sprig already renders the run as a nested `Agent` row; marked sections narrow the review. No new plumbing: the closed review loop is a canned instruction, not a Sprig-orchestrated background session.
 - **Authoring by hand (single region).** `e` is a transient with three ways to seed a local `*sprig-stage*` buffer, opened in the file's own major mode: `e e` the hunk at point (straight from the model), `e f` a file and optional region hint you name, and `e s` the region the agent suggests from the conversation it is already in (with an optional nudge, since it already knows the task). The two agent-read routes ask for one `Read` and seed from its result when the turn ends (its bytes reconstructed from the `cat -n` output are the on-disk `old_string` anchor); `e s` learns the file from the read itself, so no file is named up front. You rewrite the buffer and `C-c C-c` applies it: by default apply sends the agent the `old_string` and `new_string` and asks for one verbatim `Edit`, which works in every mode and leaves nothing to fail at a permission gate (the agent does the write, so the resulting diff is the check). Setting `sprig-courier-edits` switches to the tamper-proof path: apply stages the human's `(file, old_string, new_string)` on `sprig--courier` and asks for one `Edit`, and `sprig--maybe-courier` overrides its bytes via `updatedInput` at the permission prompt (probe-confirmed against CLI 2.1.224), so the agent supplies no content; that path refuses the auto-approve modes, since it needs a prompt to override.
 
 ### Known gaps
 
 - **Thinking is replay-only:** the live stream parser has no thinking branch, so a turn's reasoning appears only on the next replay.
-- A change made by **`Bash` rather than `Edit` / `Write` shows no diff *inline***: the separate diff buffer (`d`) now renders the net working-tree diff (local or remote), but the inline transcript is still tool-payload only.
+- A change made by **`Bash` rather than `Edit` / `Write` shows no diff *inline***: the changeset review (`d`) renders the net working-tree diff (local or remote), but the inline transcript is still tool-payload only.
 - **`/model` and `/clear` have no live verb** (`sprig-model` feeds `--model` at spawn only).
 - A **remote** session's `Agent` rows replay without their subagents' steps: those transcripts are files beside the log, and a remote log is read by shell rather than by path, so there is no name to find them by.
 
 ### Next
 
 - **Hand-authoring, remaining:** the multi-file **change set** (staging regions from several files at once, then the interleaved prose chunks of the literate-programming lens). Single-region staging is shipped (above), applied by direct send with the override courier as an opt-in.
-- **Rendering the working-tree diff inline** as an "unattributed changes" section in the transcript (the separate diff buffer `d` ships the standalone view, local and remote; folding it into the transcript is the remaining half).
+- **Rendering the working-tree diff inline** as an "unattributed changes" section in the transcript (the changeset review `d` ships the standalone view, local and remote; folding it into the transcript is the remaining half).
+- **Persisting draft comments** across an Emacs restart, if composing a long review across sessions turns out to matter. They are one plist, deliberately, so this is small; it is not done because Sprig owns no store and a draft would be the first thing it did.
+- **Separating the agent's changes from your own** in the review, which is the same attribution problem the shadow-ref idea above would settle.
 - The richer **markable plan-tree review** from the plan-mode section.
 - Finer **`x` granularity** (a code block inside prose, not just a tool command).
 - **Incremental section append** (render only the active turn, O(turn) not O(conversation)) for large histories.

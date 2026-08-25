@@ -4,7 +4,7 @@
 
 ;; Unit tests for the process-free layers of sprig: the claude CLI
 ;; transport (raw stream-json lines -> events), command construction, the
-;; review model and diff engine, the stored-session log parser, and the
+;; session model and diff engine, the stored-session log parser, and the
 ;; navigator's session enumeration.  Nothing here starts a real session,
 ;; so the whole suite runs offline.
 ;;
@@ -1585,7 +1585,7 @@ claude"
   ;; A side question resumes and forks the session so it sees the whole
   ;; conversation, but turns persistence off, so it writes no log and leaves
   ;; the parent untouched.  It carries the model, but routes no permission
-  ;; prompts to us (there is no review buffer to answer them in).
+  ;; prompts to us (there is no session buffer to answer them in).
   (let ((sprig-model "claude-x") (sprig-system-prompt "be brief")
         (sprig-extra-args '("--foo")))
     (let ((args (sprig--btw-args "sess-1")))
@@ -1951,6 +1951,50 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
     (should (equal (plist-get change :file) "md"))
     (should (equal (plist-get hunk :old) '("--- old rule")))
     (should (equal (plist-get hunk :new) '("+++ new rule")))))
+
+(ert-deftest sprig-session-test-parse-diff-unified-carries-positions ()
+  "The `:unified' view keeps context lines and numbers every line.
+This is what a tool payload can never supply, and what anchors a review
+comment to a line."
+  (let* ((diff (concat "diff --git a/x.el b/x.el\n--- a/x.el\n+++ b/x.el\n"
+                       "@@ -10,3 +10,4 @@ defun foo ()\n"
+                       " keep1\n-old\n+new1\n+new2\n keep2\n"))
+         (u (car (plist-get (car (sprig-parse-diff diff)) :unified))))
+    (should (equal (plist-get u :old-start) 10))
+    (should (equal (plist-get u :new-start) 10))
+    (should (equal (plist-get u :heading) "defun foo ()"))
+    (should (equal (mapcar (lambda (l) (list (plist-get l :kind)
+                                             (plist-get l :old)
+                                             (plist-get l :new)
+                                             (plist-get l :text)))
+                           (plist-get u :lines))
+                   ;; A removed line has no new-side number and an added
+                   ;; one no old-side number: it exists on one side only.
+                   '((context 10 10 "keep1")
+                     (del     11 nil "old")
+                     (add     nil 11 "new1")
+                     (add     nil 12 "new2")
+                     (context 12 13 "keep2"))))))
+
+(ert-deftest sprig-session-test-parse-diff-unified-counts-default-to-one ()
+  "`@@ -30 +31 @@' omits its counts, which a unified diff reads as 1.
+The trailing newline must not become a phantom context line either."
+  (let* ((diff "diff --git a/x b/x\n--- a/x\n+++ b/x\n@@ -30 +31 @@\n-z\n+Z\n")
+         (u (car (plist-get (car (sprig-parse-diff diff)) :unified))))
+    (should (equal (plist-get u :old-count) 1))
+    (should (equal (plist-get u :new-count) 1))
+    (should (equal (mapcar (lambda (l) (plist-get l :kind))
+                           (plist-get u :lines))
+                   '(del add)))))
+
+(ert-deftest sprig-session-test-tool-changes-have-no-positions ()
+  "A tool payload knows its bytes but never their line, so `:unified' is nil.
+Line-anchored review therefore rides the git diff, not the payload."
+  (let ((change (car (sprig-tool-changes
+                      "Edit" "{\"file_path\":\"/x.el\",\
+\"old_string\":\"a\",\"new_string\":\"b\"}"))))
+    (should (equal (plist-get change :file) "/x.el"))
+    (should (null (plist-get change :unified)))))
 
 (ert-deftest sprig-session-test-parse-diff-binary-skipped ()
   "Binary files carry no hunks and are dropped."
@@ -3265,7 +3309,7 @@ without a real SSH process."
       (delete-directory root t))))
 
 (ert-deftest sprig-test-status-group-hosts-keeps-a-pinned-stray ()
-  ;; A review buffer pinned to a host no longer in `sprig-remotes' is
+  ;; A session buffer pinned to a host no longer in `sprig-remotes' is
   ;; still a live session you can steer, so it gets a group of its own
   ;; after the two standing ones rather than being filed under theirs.
   (let ((sprig-remotes '("me@host")))
@@ -3394,7 +3438,7 @@ without a real SSH process."
       (should (eq (nth 2 (nth 0 calls)) t)))))
 
 (ert-deftest sprig-test-status-steer-verbs-are-commands ()
-  ;; The navigator's c / a dispatch runs the review buffer's own verbs on the
+  ;; The navigator's c / a dispatch runs the session buffer's own verbs on the
   ;; session under point; each wrapper is a real command.
   (dolist (v '(sprig-status-message sprig-status-queue sprig-status-drop-queue
                sprig-status-accept sprig-status-decline sprig-status-message-plan
@@ -3718,7 +3762,7 @@ without a real SSH process."
   (should (equal (sprig--format-tokens 2500000) "2.5M")))
 
 (ert-deftest sprig-test-status-state-line ()
-  ;; The state line mirrors the review buffer: live states from the row's
+  ;; The state line mirrors the session buffer: live states from the row's
   ;; status, the turn's outcome and context from the model fields; nil when
   ;; there is nothing to say.
   (should (null (sprig--status-state-line '(:buffer nil) nil)))
@@ -3792,7 +3836,7 @@ without a real SSH process."
       (sprig--status-refresh-cancel))))
 
 (ert-deftest sprig-test-state-parts-shared-vocabulary ()
-  ;; The one table the review buffer and the navigator both read, so their
+  ;; The one table the session buffer and the navigator both read, so their
   ;; state lines cannot drift.  An unknown state falls back to idle.
   (should (equal (sprig--state-parts 'streaming)
                  '("▶" "working…" sprig-session-working)))
@@ -3816,7 +3860,7 @@ without a real SSH process."
 
 (ert-deftest sprig-test-status-context-face-escalates ()
   ;; The count colours on its own terms: plain when small, amber past the
-  ;; large mark, red past the very-large one, mirroring the review buffer.
+  ;; large mark, red past the very-large one, mirroring the session buffer.
   (let ((sprig-context-large-tokens 150000)
         (sprig-context-huge-tokens 200000))
     (should (eq (sprig--status-context-face 50000) 'sprig-session-context))

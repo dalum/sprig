@@ -351,7 +351,7 @@ def do_spawn(broker, req):
     config_dir = os.path.expanduser(env.get("CLAUDE_CONFIG_DIR") or "~/.claude")
     # A missing working directory is the most likely spawn failure (a session
     # resumed against a host that lacks its recorded cwd); name it plainly
-    # rather than leaking a raw errno to the review buffer.
+    # rather than leaking a raw errno to the session buffer.
     if cwd and not os.path.isdir(cwd):
         raise RuntimeError(f"working directory not found on host: {cwd}")
     key = broker.new_key()

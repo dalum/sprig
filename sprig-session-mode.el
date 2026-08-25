@@ -1,14 +1,14 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.33.0
+;; Version: 0.34.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
 ;;; Commentary:
 
-;; The read-only, Magit-like review buffer (see DESIGN.md, "Current
-;; direction: the review buffer").  It projects a review model built by
+;; The read-only, Magit-like session buffer (see DESIGN.md, "Current
+;; direction: the session buffer").  It projects a session model built by
 ;; `sprig-session-build' into `magit-section' rows: a metadata header,
 ;; assistant prose, and tool calls whose file changes render as a foldable
 ;; diff with their result.  The buffer is read-only; you move a cursor
@@ -31,6 +31,7 @@
 (require 'iso8601)                       ; for the log's own timestamps
 (require 'sprig-change)
 (require 'sprig-render)
+(require 'sprig-review)
 (require 'sprig-session)
 (require 'subr-x)
 (require 'eieio)
@@ -57,7 +58,7 @@
 (declare-function sprig--set-permission-mode "sprig" (mode))
 (declare-function sprig--notable-mode "sprig" (mode))
 (declare-function sprig--state-parts "sprig" (state))
-;; Transport state, defined in sprig.el; a session-owning review buffer
+;; Transport state, defined in sprig.el; a session-owning session buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
 (defvar sprig--sink)
@@ -109,7 +110,7 @@
 ;;;; Faces
 
 (defface sprig-session-tool '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for a tool-call heading in the review buffer."
+  "Face for a tool-call heading in the session buffer."
   :group 'sprig)
 
 
@@ -253,7 +254,7 @@ stand out as needing you rather than blending in with the running rows."
 ;; and `sprig-session--current-model' live in sprig-session.el (the data layer),
 ;; so the navigator can share the memoised model without loading this file.
 (defvar-local sprig-session--meta nil
-  "Display-metadata plist feeding this review buffer's header.")
+  "Display-metadata plist feeding this session buffer's header.")
 (defvar-local sprig-session--dirty nil
   "Non-nil when events have arrived since the last render.")
 (defvar-local sprig-session--timer nil
@@ -704,7 +705,7 @@ cached entry.  Shared by the synchronous and the deferred fontify paths."
 (defun sprig-session--fontify-markdown (text)
   "Return TEXT fontified with `markdown-mode', its markup characters hidden.
 Fontifies in a reusable hidden buffer and copies the propertized string,
-so the `*'/`#' markup carries an `invisible' property the review buffer's
+so the `*'/`#' markup carries an `invisible' property the session buffer's
 invisibility spec then hides (see `sprig-session-mode').  The copy's faces
 are adopted onto `font-lock-face', without which this buffer's font-lock
 would strip them (see `sprig--adopt-faces').  Returns TEXT
@@ -758,7 +759,7 @@ fontifying the whole conversation in one uninterruptible burst.")
 (defvar sprig-session--fontify-queued (make-hash-table :test 'equal)
   "Set of texts already on `sprig-session--fontify-queue', to skip duplicates.")
 (defvar sprig-session--fontify-buffers nil
-  "Review buffers to repaint once the current deferred-fontify batch lands.")
+  "Session buffers to repaint once the current deferred-fontify batch lands.")
 (defvar sprig-session--fontify-timer nil
   "Pending idle timer draining `sprig-session--fontify-queue', or nil.")
 (defvar-local sprig-session--fontify-fresh nil
@@ -792,7 +793,7 @@ each time, so the block that finally fontifies it repaints the right buffers."
 (defun sprig-session--fontify-drain ()
   "Fontify a batch of queued blocks into the cache, then repaint their buffers.
 Runs on the idle timer.  Fontifies up to `sprig-session-fontify-batch' blocks,
-repaints the shown review buffers that were waiting (a repaint re-queues any
+repaints the shown session buffers that were waiting (a repaint re-queues any
 block still un-fontified, and re-arms), and re-arms while the queue holds more."
   (setq sprig-session--fontify-timer nil)
   (let ((budget sprig-session-fontify-batch)
@@ -1361,7 +1362,7 @@ line, since its full text becomes a real user turn once the queue flushes."
 ;;;; Rendering entry points
 
 (defcustom sprig-session-incremental-render t
-  "When non-nil, redraw only the changed tail of a review buffer.
+  "When non-nil, redraw only the changed tail of a session buffer.
 A full re-render is O(conversation): on a long session every structural
 event repaints the whole buffer, which is the main source of navigator
 lag while a turn streams in.  Since events almost always append at the
@@ -1661,7 +1662,7 @@ or when even the first block diverged.  The reason is recorded in
 ;;;; Live sink: accumulate events, refresh the buffer
 ;;
 ;; The transport (sprig.el) emits a backend-neutral event vocabulary; a
-;; review buffer folds those events into its model and re-renders.
+;; session buffer folds those events into its model and re-renders.
 ;; `sprig-session-consume' is the buffer's sink: the transport calls it once
 ;; per event (see `sprig--review-sink', which wraps it with the owning
 ;; buffer's transport bookkeeping).
@@ -1834,7 +1835,7 @@ Called by the coalescing timer, and usable to force a render immediately."
 
 (defun sprig-session--flush-if-shown (buffer)
   "Coalesced-timer render: draw BUFFER now if it is on screen, else defer.
-The per-event redraw is O(conversation); a review buffer nobody is looking at
+The per-event redraw is O(conversation); a session buffer nobody is looking at
 should not pay it on every stream tick, and with several sessions running at
 once those off-screen redraws are what stutter the rest of Emacs (the navigator
 included).  So when BUFFER is displayed in no window this leaves it dirty and
@@ -1849,8 +1850,8 @@ nothing on screen goes stale while it waits."
         (sprig-session-flush buffer)))))
 
 (defun sprig-session--flush-when-shown (&optional frame)
-  "Draw any dirty review buffer newly shown in a window of FRAME.
-On `window-buffer-change-functions': an off-screen review buffer skips its
+  "Draw any dirty session buffer newly shown in a window of FRAME.
+On `window-buffer-change-functions': an off-screen session buffer skips its
 coalesced render (see `sprig-session--flush-if-shown'), so when it comes back on
 screen its pending events must be drawn to catch it up."
   (dolist (win (window-list frame 'no-minibuf))
@@ -1920,7 +1921,7 @@ reads the pair in order.  A no-op when nothing is floated."
     (sprig-session--schedule)))
 
 (defun sprig-session-consume (event)
-  "Fold transport EVENT into the current review buffer.
+  "Fold transport EVENT into the current session buffer.
 A streamed `text' delta extends the live text section in place, with no
 re-render, whenever a tail is established.  Every other event, and the
 first `text' of a run, clears the tail and schedules a coalesced render
@@ -1973,7 +1974,7 @@ first `text' of a run, clears the tail and schedules a coalesced render
       (sprig-session--schedule)))))
 
 (defun sprig-session-reset (&optional meta)
-  "Drop this review buffer's accumulated events and render empty.
+  "Drop this session buffer's accumulated events and render empty.
 With META, replace the header metadata plist."
   (sprig-session--cancel-timer)
   (setq sprig-session--events nil sprig-session--dirty nil
@@ -1983,7 +1984,7 @@ With META, replace the header metadata plist."
   (sprig-session--refresh))
 
 (defun sprig-session-seed (events &optional meta)
-  "Seed this review buffer with EVENTS (in order) and refresh synchronously.
+  "Seed this session buffer with EVENTS (in order) and refresh synchronously.
 Use this to replay history before the live sink appends more, so a later
 `sprig-session-consume' rebuilds from history plus the new event.  Replayed
 history is settled, so it renders with no live tail."
@@ -2074,7 +2075,7 @@ Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   (setq-local left-margin-width (sprig-session--margin-width)))
 
 (defun sprig-session-show (model &optional meta name)
-  "Show review MODEL in a review buffer named NAME and select it.
+  "Show review MODEL in a session buffer named NAME and select it.
 META is passed to `sprig-session-render'."
   (let ((buffer (get-buffer-create (or name "*sprig-session*"))))
     (with-current-buffer buffer
@@ -2450,7 +2451,7 @@ only relabels this buffer's header, as the plain `t' key does."
 
 (defun sprig-session-new ()
   "Start a fresh conversation in this session's directory (`s n').
-This session is left alone: the new one gets its own review buffer and its
+This session is left alone: the new one gets its own session buffer and its
 own session, which is what you want when the next piece of work is
 unrelated rather than a continuation of this one.  Call
 `sprig-session-open' directly to be asked for a different directory."
@@ -2505,7 +2506,7 @@ replay of this history."
     (unless last-user (user-error "No previous user turn to resend"))
     (sprig-session--send (plist-get last-user :text))))
 
-(defun sprig-session-review ()
+(defun sprig-session-independent-review ()
   "Run an independent review of the latest changes, then act on it (`c r').
 Asks the agent to spawn a subagent (the Task tool) that looks at the
 uncommitted changes with fresh eyes and critiques them, then to address the
@@ -2573,7 +2574,7 @@ line."
 ;;;; Compose buffer (the c c message)
 
 (defvar-local sprig-session--compose-target nil
-  "Review buffer a compose buffer sends to.")
+  "Session buffer a compose buffer sends to.")
 (defvar-local sprig-session--compose-context nil
   "Marked-section context prepended to the composed message, or nil.")
 (defvar-local sprig-session--compose-mode nil
@@ -2582,6 +2583,12 @@ line."
   "Non-nil when the composed message waits for the in-flight turn to end.
 Nil is the ordinary `c c', which speaks now: it steers a running turn, and
 sends outright when none is running.")
+(defvar-local sprig-session--compose-format nil
+  "Function framing the composed message, or nil for the default framing.
+Called with the composed TEXT and the attached CONTEXT, and returns the
+message actually sent.  A published changeset review frames its comments
+its own way (see `sprig-review-publish'); the default puts the context
+first under a `Regarding:' heading.")
 (defvar-local sprig-session--compose-btw nil
   "Non-nil when the composed text is a side question (`c b'), not a message.
 Sent as a throwaway one-shot that leaves the turn and the log alone, rather
@@ -2617,14 +2624,18 @@ hold it until the running turn ends (`c q')."
   (sprig-session--compose (current-buffer) (sprig--marked-context)
                          plan queue))
 
-(defun sprig-session--compose (target context &optional plan queue)
-  "Pop a compose buffer whose send targets review buffer TARGET.
+(defun sprig-session--compose (target context &optional plan queue format label)
+  "Pop a compose buffer whose send targets session buffer TARGET.
 CONTEXT is the attached-context string (or nil), PLAN sends in plan mode
 \(`c p'), and QUEUE holds the message until the running turn ends (`c q').
-Shared by `sprig-session-message' and `sprig-diff-message'; call it from the
-buffer whose marks CONTEXT was collected in, so the section count reads
-right before the compose buffer takes over."
-  (let ((n (and context (length sprig--marks)))
+FORMAT, when given, frames the sent message from the composed text and
+CONTEXT (see `sprig-session--compose-format'); LABEL names what is
+attached, for the echo-area line, and defaults to counting the marks.
+Shared by `sprig-session-message' and `sprig-review-publish'; call it from
+the buffer whose marks CONTEXT was collected in, so that count reads right
+before the compose buffer takes over."
+  (let ((what (and context
+                   (or label (format "%d section(s)" (length sprig--marks)))))
         (buf (get-buffer-create "*sprig-message*")))
     (with-current-buffer buf
       (sprig-session-compose-mode)
@@ -2633,12 +2644,13 @@ right before the compose buffer takes over."
             sprig-session--compose-context context
             sprig-session--compose-mode (and plan "plan")
             sprig-session--compose-queue queue
+            sprig-session--compose-format format
             sprig-session--compose-btw nil))
     (pop-to-buffer buf)
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
              (if queue "QUEUED: waits for the running turn to end.  " "")
-             (if context (format "%d section(s) attached.  " n) ""))))
+             (if what (format "%s attached.  " what) ""))))
 
 (defun sprig-session-message-plan ()
   "Compose a message and send it in plan mode (`c p')."
@@ -2691,7 +2703,7 @@ one-shot then forks the session (so the question sees the whole
 conversation), answers into `*sprig-btw*', and vanishes without writing a
 log or touching the running turn.  Any marked sections ride along as
 context, and a turn in flight adds its live text, so a mid-turn question
-sees what the agent is doing now.  It is the review buffer's stand-in for
+sees what the agent is doing now.  It is the session buffer's stand-in for
 the CLI's own `/btw'."
   (interactive)
   (unless sprig--session-id
@@ -2721,10 +2733,11 @@ the CLI's own `/btw'."
          (review sprig-session--compose-target)
          (context sprig-session--compose-context)
          (mode sprig-session--compose-mode)
+         (fmt sprig-session--compose-format)
          (queue sprig-session--compose-queue)
          (btw sprig-session--compose-btw))
     (when (string-empty-p text) (user-error "Empty message"))
-    (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+    (unless (buffer-live-p review) (user-error "The session buffer is gone"))
     (if btw
         ;; A side question is its own throwaway process, so it never folds
         ;; into a turn: the whole composed text is the question, marked
@@ -2742,8 +2755,9 @@ the CLI's own `/btw'."
                   tail (sprig-session--btw-tail)))
           (quit-window t)
           (sprig--btw-ask id dir remote text context tail))
-      (let ((message (if context (format "Regarding:\n\n%s\n\n%s" context text)
-                       text)))
+      (let ((message (cond (fmt (funcall fmt text context))
+                           (context (format "Regarding:\n\n%s\n\n%s" context text))
+                           (t text))))
         ;; Send before quitting, never after: `quit-window' kills this buffer,
         ;; so a send that signals (a plan turn refused because one is already in
         ;; flight) would take the composed prose down with it, leaving an error
@@ -2783,7 +2797,7 @@ needs the edit to prompt, so it refuses the auto-approve modes
   :group 'sprig)
 
 (defvar-local sprig-session--stage-target nil
-  "Review buffer a staging buffer couriers its edit to.")
+  "Session buffer a staging buffer couriers its edit to.")
 (defvar-local sprig-session--stage-file nil
   "Path of the file a staging buffer edits, as the change model records it.")
 (defvar-local sprig-session--stage-anchor nil
@@ -2961,7 +2975,7 @@ set (see that variable for the trade-off)."
         (file sprig-session--stage-file)
         (anchor sprig-session--stage-anchor)
         (new (buffer-substring-no-properties (point-min) (point-max))))
-    (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+    (unless (buffer-live-p review) (user-error "The session buffer is gone"))
     (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
     (with-current-buffer review
       (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
@@ -2977,7 +2991,7 @@ set (see that variable for the trade-off)."
 ANCHOR is the region's original text and NEW your edited version; both
 ride in the instruction so the agent writes them with one Edit, in any
 permission mode.  The agent generates the write, so it could drift from
-NEW: the resulting diff is the check.  Run in the review buffer."
+NEW: the resulting diff is the check.  Run in the session buffer."
   (sprig-session--send
    (format "I have hand-authored an edit to `%s' and want it applied exactly \
 as written.  With a single Edit on that file, replace this block verbatim:
@@ -3002,7 +3016,7 @@ Records NEW (over ANCHOR) in `sprig--courier' so the permission gate can
 substitute your exact bytes into the agent's Edit (see
 `sprig--maybe-courier'), and asks the agent to make that one write.  Needs
 the edit to prompt, so it refuses the auto-approve modes.  Run in the
-review buffer."
+session buffer."
   (when (member sprig--permission-mode '("acceptEdits" "bypassPermissions"))
     (user-error
      "This session auto-approves edits (%s); the courier needs them to \
@@ -3025,7 +3039,7 @@ authorised; make only this single Edit and nothing else." file)))
 ;;;; Answering: the verbs, and the buffer they open
 
 (defvar-local sprig-answer--review nil
-  "Review buffer whose question this answer buffer is answering.")
+  "Session buffer whose question this answer buffer is answering.")
 (defvar-local sprig-answer--dialog nil
   "The dialog block being answered.")
 (defvar-local sprig-answer--index 0
@@ -3131,7 +3145,7 @@ wrong thing to make easy."
 
 ;;;; Answering: the a transient, and its buffer
 ;;
-;; The review buffer shows the question and stays a review buffer; the
+;; The session buffer shows the question and stays a session buffer; the
 ;; answering happens in a buffer of its own, the way `c c' composes in one,
 ;; one question at a time so a four-question dialog is four small choices
 ;; rather than one wall.  `a r' skips the buffer entirely for the common
@@ -3234,7 +3248,7 @@ cancels."
     (if (buffer-live-p review)
         (with-current-buffer review
           (sprig-session--answer-dialog dialog answers))
-      (message "sprig: the review buffer is gone; the question went unanswered"))))
+      (message "sprig: the session buffer is gone; the question went unanswered"))))
 
 (defun sprig-answer-pick ()
   "Pick the option at point."
@@ -3306,7 +3320,7 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
 ;;;; The c transient
 
 (transient-define-prefix sprig-session-dispatch ()
-  "Steer the conversation from the review buffer."
+  "Steer the conversation from the session buffer."
   [["Message"
     ("c" "compose & send (steers a running turn)" sprig-session-message)
     ("q" "compose & queue (after this turn)" sprig-session-queue)
@@ -3314,7 +3328,7 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("y" "yes / accept" sprig-session-accept)
     ("n" "no / decline" sprig-session-decline)
     ("p" "compose in plan mode" sprig-session-message-plan)
-    ("r" "independent review of the changes (subagent)" sprig-session-review)
+    ("r" "independent review of the changes (subagent)" sprig-session-independent-review)
     ("l" "resend last turn" sprig-session-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-session-interrupt)
     ("z" "compact context" sprig-session-compact)
@@ -3391,7 +3405,7 @@ the hunk you are on, from a file you name, or from what the agent suggests."
     ("s" "let the agent suggest what to edit" sprig-session-stage-suggested)]])
 
 (transient-define-prefix sprig-session-start-dispatch ()
-  "Start or fork a session from the review buffer.
+  "Start or fork a session from the session buffer.
 `c' steers the conversation this buffer already owns; `s' is where a
 session of its own begins.  `s c' / `s p' start one and drop you straight
 into its first-message prompt (plan mode for `s p')."
@@ -3400,176 +3414,6 @@ into its first-message prompt (plan mode for `s p')."
     ("c" "new, then compose the first message" sprig-session-new-message)
     ("p" "new, then compose in plan mode" sprig-session-new-message-plan)
     ("f" "fork this session" sprig-session-fork)]])
-
-;;;; Working-tree diff buffer
-;;
-;; A separate magit-section buffer showing the session's net working-tree
-;; diff (`git diff', against `sprig-diff-base'): source 2 of DESIGN.md's
-;; diff-review model, the ground truth that catches a change made by `Bash'
-;; (a formatter, a `sed') with no tool payload to reconstruct from.  It
-;; reuses the review-buffer grammar wholesale: the same `sprig-change' /
-;; `sprig-hunk' sections (`sprig--insert-change'), the same marks
-;; (`SPC' / `m'), and the same compose-and-send path, with a comment routed
-;; back to the owning session (`sprig-session--compose').
-;;
-;; Sprig runs `git diff' itself here.  That is a *read*, so it keeps to the
-;; instruction invariant, which governs mutations: reject, commit, and apply
-;; still go through the agent.  A remote session's tree lives on the SSH
-;; host, so the diff is read over the same SSH transport the navigator reads
-;; logs over (`sprig--remote-sh'), not TRAMP; only an optional `RET' file
-;; visit uses TRAMP, exactly as the review buffer does.
-
-(declare-function sprig--remote-sh "sprig" (command &optional host))
-(declare-function sprig--remote-dir-arg "sprig" (dir))
-(defvar sprig-ssh-program)
-
-(defcustom sprig-diff-base "HEAD"
-  "Git revision the working-tree diff buffer diffs against (`d').
-The default `\"HEAD\"' shows the net *uncommitted* changes since the last
-commit.  Set it to a branch such as `\"main\"' to include everything the
-branch has changed on top of it, or to a range like `\"main...HEAD\"' for
-the committed changes alone.  It is passed to `git diff' verbatim."
-  :type 'string
-  :group 'sprig)
-
-(defvar-local sprig-diff--review nil
-  "The `sprig-session-mode' buffer whose session this diff belongs to.")
-
-(defvar-local sprig-diff--remote nil
-  "SSH host the diff's session runs on, or nil when it is local.")
-
-(defvar-local sprig-diff--root nil
-  "Top-level directory of the diff's repository, on the session host.")
-
-(defvar sprig-diff-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map magit-section-mode-map)
-    (define-key map (kbd "SPC") #'sprig-toggle-mark)
-    (define-key map (kbd "m")   #'sprig-toggle-mark)
-    (define-key map (kbd "U")   #'sprig-unmark-all)
-    (define-key map (kbd "c")   #'sprig-diff-dispatch)
-    (define-key map (kbd "g")   #'sprig-diff-refresh)
-    (define-key map (kbd "RET") #'sprig-session-visit)
-    (define-key map (kbd "q")   #'quit-window)
-    map)
-  "Keymap for `sprig-diff-mode'.")
-
-(define-derived-mode sprig-diff-mode magit-section-mode "Sprig-Diff"
-  "Major mode for reviewing a session's working-tree diff as read-only sections.
-Mark a hunk with \\`SPC' and `c c' sends a comment about it to the session
-\(see `sprig-session-diff').  Move with \\`n' / \\`p', fold with TAB."
-  :group 'sprig
-  (setq-local revert-buffer-function #'sprig-diff-refresh)
-  (setq-local truncate-lines nil)
-  (setq-local word-wrap t)
-  (sprig--suppress-section-highlight))
-
-(defun sprig-diff--run-git (remote dir args)
-  "Run git ARGS in DIR and return stdout, on REMOTE over SSH or locally.
-REMOTE nil runs git in DIR through `process-file'; a host runs `cd DIR &&
-git ARGS' over the session's own SSH transport (`sprig--remote-sh'), a read
-that stays off TRAMP.  Signals on a non-zero git exit."
-  (if remote
-      (sprig--remote-sh
-       (concat "cd " (sprig--remote-dir-arg dir) " && "
-               (mapconcat #'shell-quote-argument (cons "git" args) " "))
-       remote)
-    (let ((default-directory (file-name-as-directory dir)))
-      (with-temp-buffer
-        (if (zerop (apply #'process-file "git" nil t nil args))
-            (buffer-string)
-          (error "git %s failed: %s" (string-join args " ")
-                 (string-trim (buffer-string))))))))
-
-(defun sprig-diff--toplevel (remote dir)
-  "Return the git top-level directory containing DIR on REMOTE, or nil."
-  (let ((out (ignore-errors
-               (sprig-diff--run-git remote dir '("rev-parse" "--show-toplevel")))))
-    (when out
-      (let ((root (string-trim out)))
-        (unless (string-empty-p root) root)))))
-
-(defun sprig-diff--git (remote root)
-  "Return `git diff' output for the repo at ROOT on REMOTE.
-The diff is against `sprig-diff-base' (default `HEAD', the net uncommitted
-changes); untracked files are not shown, since `git diff' omits them and
-staging them would touch the index."
-  (sprig-diff--run-git remote root (list "diff" sprig-diff-base)))
-
-(defun sprig-diff--render (text)
-  "Render git-diff TEXT as change sections in the current diff buffer.
-Marks anchor to sections about to be rebuilt, so they are cleared first."
-  (let ((inhibit-read-only t)
-        (changes (sprig-parse-diff text)))
-    (remove-overlays (point-min) (point-max) 'sprig-mark t)
-    (setq sprig--marks nil)
-    (erase-buffer)
-    (magit-insert-section (sprig-diff-root)
-      (if (null changes)
-          (insert (format "No changes against %s.\n" sprig-diff-base))
-        (dolist (change changes)
-          (sprig--insert-change change))))
-    (goto-char (point-min))))
-
-(defun sprig-session-diff ()
-  "Open this session's net working-tree diff in a separate buffer (`d').
-A magit-like view of `git diff' against `sprig-diff-base' (default `HEAD'):
-mark a hunk with \\`SPC' and `c c' sends a comment about it back to the
-session.  Works for a remote session too: the diff is read over the same
-SSH transport the navigator uses, not TRAMP (see DESIGN.md's invariant)."
-  (interactive)
-  (unless (derived-mode-p 'sprig-session-mode)
-    (user-error "Not in a sprig review buffer"))
-  (let* ((remote (sprig--remote))
-         (dir (or (sprig--directory)
-                  (and (not remote) default-directory)
-                  (user-error "This session has no working directory")))
-         (root (or (sprig-diff--toplevel remote dir)
-                   (user-error "Not inside a git repository: %s" dir)))
-         (review (current-buffer))
-         (buf (get-buffer-create
-               (format "*sprig-diff: %s*" (buffer-name review)))))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'sprig-diff-mode) (sprig-diff-mode))
-      (setq sprig-diff--review review
-            sprig-diff--remote remote
-            sprig-diff--root root
-            ;; `default-directory' anchors a `RET' file visit: a TRAMP name
-            ;; on the host for a remote session (as the review buffer visits),
-            ;; the plain root locally.  The bulk diff read does not use it.
-            default-directory (file-name-as-directory
-                               (if remote (format "/ssh:%s:%s" remote root) root)))
-      (sprig-diff--render (sprig-diff--git remote root)))
-    (pop-to-buffer buf)))
-
-(defun sprig-diff-refresh (&rest _)
-  "Re-run `git diff' and redraw the diff buffer (`g'); marks are cleared."
-  (interactive)
-  (unless (derived-mode-p 'sprig-diff-mode)
-    (user-error "Not in a sprig diff buffer"))
-  (sprig-diff--render (sprig-diff--git sprig-diff--remote sprig-diff--root))
-  (message "sprig: diff refreshed"))
-
-(defun sprig-diff-message (&optional queue)
-  "Comment on the marked diff hunks, sent to the owning session (`c c').
-Any marked hunks ride as context, the way `c c' attaches marks in the
-review buffer.  With QUEUE non-nil, hold it until the running turn ends."
-  (interactive)
-  (unless (buffer-live-p sprig-diff--review)
-    (user-error "The review buffer for this diff is gone"))
-  (sprig-session--compose sprig-diff--review (sprig--marked-context)
-                         nil queue))
-
-(defun sprig-diff-message-queue ()
-  "Comment on the marked diff hunks, queued for after the running turn (`c q')."
-  (interactive)
-  (sprig-diff-message t))
-
-(transient-define-prefix sprig-diff-dispatch ()
-  "Comment on the working-tree diff, sent to the session."
-  [["Comment (sent to the session)"
-    ("c" "compose & send (steers a running turn)" sprig-diff-message)
-    ("q" "compose & queue (after this turn)" sprig-diff-message-queue)]])
 
 ;;;; Verb keybindings
 
@@ -3587,7 +3431,7 @@ review buffer.  With QUEUE non-nil, hold it until the running turn ends."
 (define-key sprig-session-mode-map (kbd "a")   #'sprig-session-answer-dispatch)
 (define-key sprig-session-mode-map (kbd "C")   #'sprig-session-commit)
 (define-key sprig-session-mode-map (kbd "x")   #'sprig-session-run)
-(define-key sprig-session-mode-map (kbd "d")   #'sprig-session-diff)
+(define-key sprig-session-mode-map (kbd "d")   #'sprig-session-review)
 (define-key sprig-session-mode-map (kbd "RET") #'sprig-session-visit)
 (define-key sprig-session-mode-map (kbd "t")   #'sprig-session-set-title)
 (define-key sprig-session-mode-map (kbd "T")   #'sprig-session-title-dispatch)
@@ -3643,6 +3487,24 @@ review buffer.  With QUEUE non-nil, hold it until the running turn ends."
 (define-obsolete-face-alias 'sprig-review-dialog-picked
   'sprig-session-dialog-picked "0.51.0")
 
+
+;;;; Renamed diff buffer
+;;
+;; The `d' buffer was `sprig-diff-mode', a read-only view of the working
+;; tree.  In 0.51.0 it grew draft line comments and became the changeset
+;; review (sprig-review.el); the old names still reach it.
+
+(define-obsolete-function-alias 'sprig-session-diff
+  'sprig-session-review "0.51.0")
+;; `c r' was `sprig-review-review'; renaming the transcript would have
+;; collided it with the changeset review's own entry point, so it is named
+;; for what it does instead.
+(define-obsolete-function-alias 'sprig-review-review
+  'sprig-session-independent-review "0.51.0")
+(define-obsolete-function-alias 'sprig-diff-mode
+  'sprig-review-mode "0.51.0")
+(define-obsolete-variable-alias 'sprig-diff-base
+  'sprig-review-base "0.51.0")
 
 (provide 'sprig-session-mode)
 ;;; sprig-session-mode.el ends here

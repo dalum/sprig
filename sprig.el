@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.50.0
+;; Version: 0.51.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -9,7 +9,7 @@
 
 ;; Sprig is an Emacs interface for reviewing and steering an LLM agent's
 ;; work.  You never edit a transcript: a conversation is a read-only,
-;; Magit-like review buffer (see sprig-session-mode.el and DESIGN.md), and
+;; Magit-like session buffer (see sprig-session-mode.el and DESIGN.md), and
 ;; the whole forest of them is driven from the `sprig-status' navigator.
 ;;
 ;; This file is the transport and the navigator; it owns no rendering.
@@ -26,15 +26,15 @@
 ;; as a JSONL log under ~/.claude/projects/<cwd>/<id>.jsonl on the host
 ;; where it runs, so sprig keeps no store of its own: history is replayed
 ;; from that log, and it survives an Emacs restart because the id names the
-;; file.  A review buffer owns its session outright (`sprig-session-open',
+;; file.  A session buffer owns its session outright (`sprig-session-open',
 ;; `sprig-session-connect'); the transport routes its events to the review
 ;; model and its verbs steer the session directly.
 ;;
 ;; Navigator: `sprig-status' lists every stored session on the host,
-;; newest first and capped, plus any open review buffer that owns a live
+;; newest first and capped, plus any open session buffer that owns a live
 ;; session, with per-session status and an inline preview of the last
 ;; reply.  `/' narrows to a project or title, `L' lifts the cap.  Open /
-;; connect / interrupt / disconnect act on a session-owning review buffer;
+;; connect / interrupt / disconnect act on a session-owning session buffer;
 ;; `s' starts a fresh session.
 
 ;;; Code:
@@ -62,7 +62,7 @@
 Each entry becomes a `remote' group of its own in the navigator, scanned
 and capped independently, alongside the always-present `local' group, so
 several hosts show at once.  The first entry is the primary remote: a
-session started outside the navigator, and any review buffer not pinned
+session started outside the navigator, and any session buffer not pinned
 to a host of its own, runs there rather than locally.  Nil lists only the
 local machine."
   :type '(repeat (string :tag "SSH destination")))
@@ -194,7 +194,7 @@ neither tool is offered."
 
 (defcustom sprig-permission-function nil
   "Function consulted when the CLI asks to run a tool (`can_use_tool'), or nil.
-nil, the default, asks in the review buffer: the call renders as a dialog
+nil, the default, asks in the session buffer: the call renders as a dialog
 you answer with `a a', and nothing is held up meanwhile.
 
 Non-nil is called with the tool name (a string) and its input (an alist),
@@ -208,7 +208,7 @@ wants it deliberately.
 This is consulted only for tools the CLI's own permission configuration
 does not already allow; adding `--permission-prompt-tool stdio' routes
 those escalations to sprig instead of the headless auto-deny."
-  :type '(choice (const :tag "Ask in the review buffer" nil) function))
+  :type '(choice (const :tag "Ask in the session buffer" nil) function))
 
 (defcustom sprig-error-buffer "*sprig-errors*"
   "Name of the buffer where session failures are logged.
@@ -280,7 +280,7 @@ question the reply is answering rather than more of the reply.")
 
 (defface sprig-mode-tag '((t :inherit font-lock-keyword-face))
   "Face for the permission mode tag on a state line.
-Shared by the navigator preview and the review buffer, so `plan' reads the
+Shared by the navigator preview and the session buffer, so `plan' reads the
 same in both.  Coloured on its own terms, apart from the turn's state and
 the context, so it reads as the mode it is and not as a warning about the
 turn.")
@@ -346,7 +346,7 @@ cannot tamper.  Live state, not persisted, and consumed on use.")
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
   "Function applied to each transport event in this session-owning buffer.
-A review buffer that owns its session sets this to `sprig--review-sink' to
+A session buffer that owns its session sets this to `sprig--review-sink' to
 fold the events into its model.  The default is a no-op, and its identity
 also marks a buffer as a session owner (see `sprig--owning-review-buffers'),
 so it must stay non-`sprig--review-sink' for a buffer that owns nothing.")
@@ -355,7 +355,7 @@ so it must stay non-`sprig--review-sink' for a buffer that owns nothing.")
 Lets the transport reconnect a stale session without knowing the owner.")
 (defvar-local sprig--working-dir nil
   "Working directory for a session not backed by a Markdown file.
-A review buffer owns its session directly and has no frontmatter, so it
+A session buffer owns its session directly and has no frontmatter, so it
 records the session's directory here for `sprig--directory'.")
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
@@ -1063,7 +1063,7 @@ def do_spawn(broker, req):
     config_dir = os.path.expanduser(env.get(\"CLAUDE_CONFIG_DIR\") or \"~/.claude\")
     # A missing working directory is the most likely spawn failure (a session
     # resumed against a host that lacks its recorded cwd); name it plainly
-    # rather than leaking a raw errno to the review buffer.
+    # rather than leaking a raw errno to the session buffer.
     if cwd and not os.path.isdir(cwd):
         raise RuntimeError(f\"working directory not found on host: {cwd}\")
     key = broker.new_key()
@@ -1560,7 +1560,7 @@ script.  Regenerate with broker/embed.py after editing the broker.")
 ;;
 ;; The transport turns the backend's raw output lines into a small,
 ;; backend-neutral event vocabulary; a per-buffer `sprig--sink' applies
-;; those events (a review buffer folds them into its model).  `sprig--handle'
+;; those events (a session buffer folds them into its model).  `sprig--handle'
 ;; is the seam.  Only the `sprig--claude-*' functions know the `claude' CLI's
 ;; stream-json wire format, so another backend means another parser emitting
 ;; the same events, with the sink untouched.
@@ -1900,7 +1900,7 @@ The CLI's non-JSON diagnostics accumulate quietly until an abnormal exit;
 among them are permission-handler complaints (a rejected or empty
 `updatedInput' the courier sent, say), so surfacing them mid-session lets
 a staged edit that failed to land be diagnosed without waiting for a
-crash.  Call it from the review buffer whose session you are debugging."
+crash.  Call it from the session buffer whose session you are debugging."
   (interactive)
   (let ((stderr (and (process-live-p sprig--process)
                      (process-get sprig--process :stderr-proc))))
@@ -2016,7 +2016,7 @@ the inherited default."
 Reads the resume id from `sprig--session-id' (nil for a fresh session)
 and the working directory from `sprig--directory', both already resolved
 by the caller.  Sets and returns `sprig--process'.  Buffer-agnostic: the
-Markdown transcript and a session-owning review buffer share it."
+Markdown transcript and a session-owning session buffer share it."
   ;; A brokered session needs the broker present first; ship it on first use,
   ;; then the command below attaches through it.  Remote sessions install over
   ;; SSH; a local brokered session (`all') installs here.
@@ -2361,7 +2361,7 @@ is visible without opening the header."
     (propertize (format " [%s]" sprig--permission-mode)
                 'help-echo "Claude permission mode")))
 
-;;;; Review buffer
+;;;; Session buffer
 ;;
 ;; A read-only, Magit-like view of the conversation (see DESIGN.md).  The
 ;; store is the CLI's own session log, so history is replayed from that
@@ -2511,12 +2511,12 @@ buffer has since died.  Remote only: a local caller reads the file directly."
            (when (buffer-live-p buffer)
              (with-current-buffer buffer (funcall callback lines)))))))))
 
-;; A review buffer owns its session outright: the transport routes events
+;; A session buffer owns its session outright: the transport routes events
 ;; to `sprig--review-sink' and its verbs steer the session directly (see
 ;; DESIGN.md, option A: CLI sessions are the branches).
 
 (defun sprig--review-sink (event)
-  "Sink for a review buffer that owns its session: track state, then consume.
+  "Sink for a session buffer that owns its session: track state, then consume.
 Keeps the transport bookkeeping (session id, permission mode, busy flag)
 in step without a Markdown transcript, then folds EVENT into the review
 model via `sprig-session-consume'."
@@ -2588,7 +2588,7 @@ first in the shared `*sprig-btw*' buffer.")
 
 (define-derived-mode sprig-btw-mode special-mode "sprig-btw"
   "Major mode for the `*sprig-btw*' side-question buffer."
-  ;; Render the answer's markdown the way a review buffer does: its markup
+  ;; Render the answer's markdown the way a session buffer does: its markup
   ;; carries `invisible markdown-markup' and its colours ride `font-lock-face'
   ;; (see `sprig-session--fontify-markdown').  special-mode runs no font-lock,
   ;; so hide the one here and alias the other into `face' by hand.
@@ -2934,7 +2934,7 @@ One SSH round trip finds the log by id and appends the records with `>>'."
 
 (defun sprig--title-reflect (id title)
   "Show TITLE for session ID at once, ahead of the next disk scan.
-Updates the header of any open review buffer that owns ID and marks the
+Updates the header of any open session buffer that owns ID and marks the
 navigator's log-scan cache stale so the row picks the new title up on its
 next render."
   (dolist (buf (buffer-list))
@@ -2946,7 +2946,7 @@ next render."
   (sprig--status-refresh))
 
 (defun sprig--title-live-buffer (id)
-  "Return a live review buffer that owns session ID with a running process, or nil."
+  "Return a live session buffer that owns session ID with a running process, or nil."
   (seq-find (lambda (b)
               (and (equal (buffer-local-value 'sprig--session-id b) id)
                    (process-live-p (buffer-local-value 'sprig--process b))))
@@ -2964,7 +2964,7 @@ attach-everything-held.")
 
 (defun sprig--reattach-session (dir id host)
   "Attach in the background to broker-held session ID on HOST, rooted at DIR.
-Builds the session's review buffer undisplayed and connects it attach-only,
+Builds the session's session buffer undisplayed and connects it attach-only,
 so a stale marker cannot spawn a fresh session.  Errors are swallowed: a
 reattach that cannot land must never disturb the navigator."
   (with-current-buffer (sprig--review-session-buffer dir id host nil)
@@ -3002,7 +3002,7 @@ When the session is live, sends `/rename' down the wire already open to it,
 letting the CLI write its own rename records.  Otherwise writes the same
 `custom-title'/`agent-name' records to the log directly
 \(`sprig--title-persist') on REMOTE-HOST (nil local).  Either way it updates
-any open review buffer and the navigator and messages the outcome.  Shared
+any open session buffer and the navigator and messages the outcome.  Shared
 by the agent (`sprig--title-apply') and the manual retitle commands."
   (let ((title (string-trim title))
         (buf (sprig--title-live-buffer id)))
@@ -3184,7 +3184,7 @@ still be typed past the candidates."
   "Prompt for a session working directory on HOST, returning the string.
 HOST is the resolved session host: nil for the local machine, else an SSH
 destination.  Unlike `sprig--read-working-directory' this records nothing
-in frontmatter; a session-owning review buffer keeps its directory in the
+in frontmatter; a session-owning session buffer keeps its directory in the
 buffer-local `sprig--working-dir' instead.
 
 Completion offers the working directories of existing sessions on HOST as
@@ -3210,7 +3210,7 @@ returns the string as typed, where a blank means the login directory."
 
 ;;;###autoload
 (defun sprig-session-connect (&optional no-prompt)
-  "Start or resume the session owned by this review buffer.
+  "Start or resume the session owned by this session buffer.
 Resumes `sprig--session-id' when set (replayed history already showing),
 otherwise starts a fresh session, prompting for its working directory
 unless NO-PROMPT."
@@ -3252,10 +3252,10 @@ the message is delivered as a turn of its own rather than lost."
     (message "sprig: steering (the agent takes it at its next step)")))
 
 (defun sprig--redraw-queue-floats ()
-  "Redraw the review buffer so its queued-message floats track `sprig--queued'.
+  "Redraw the session buffer so its queued-message floats track `sprig--queued'.
 The floats are drawn straight from `sprig--queued' (see
 `sprig-session--insert-pending-queue'), so any change to the queue has to
-schedule a render for the change to show.  A no-op outside a review buffer."
+schedule a render for the change to show.  A no-op outside a session buffer."
   (when (derived-mode-p 'sprig-session-mode)
     (sprig-session--schedule)))
 
@@ -3333,8 +3333,8 @@ caller read is stale."
   (message "sprig: unqueued (%d still queued)" (length sprig--queued)))
 
 (defun sprig--review-deliver (text &optional mode)
-  "Send TEXT as this review buffer's own next user turn, echoing it locally.
-Used when the review buffer owns the session.  MODE, when given, sets the
+  "Send TEXT as this session buffer's own next user turn, echoing it locally.
+Used when the session buffer owns the session.  MODE, when given, sets the
 permission mode first (e.g. \"plan\").  With none, the mode is left as it
 stands: it is sticky, the way Claude Code's own is, so a follow-up carries
 on in plan mode rather than dropping out of it.  Leaving plan mode is its
@@ -3354,7 +3354,7 @@ own gesture: approving an ExitPlanMode plan, or `P' to set the mode by hand."
   (sprig--status-refresh))
 
 (defun sprig--review-interrupt-owned ()
-  "Interrupt the in-flight turn on a review buffer that owns its session."
+  "Interrupt the in-flight turn on a session buffer that owns its session."
   (cond
    ((not sprig--busy) (message "sprig: nothing to interrupt"))
    (sprig--interrupt-timer
@@ -3423,7 +3423,7 @@ back to killing the process; the session resumes on the next send."
         (message "sprig: interrupt timed out; killed the turn (resumes on next send)")))))
 
 (defun sprig--review-session-buffer (dir session-id host fork)
-  "Build (or reuse) the review buffer owning DIR's session, and return it.
+  "Build (or reuse) the session buffer owning DIR's session, and return it.
 The buffer is left undisplayed; see `sprig-session-open' for the DIR,
 SESSION-ID, HOST, and FORK arguments.  Splitting the build from the
 display lets the navigator steer a stored session's buffer into being
@@ -3480,7 +3480,7 @@ in the background, and only the verb's own compose or answer buffer shows."
 
 ;;;###autoload
 (defun sprig-session-open (dir &optional session-id host fork)
-  "Open a review buffer that owns a session in working directory DIR.
+  "Open a session buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
 SESSION-ID, replay that stored session's log and resume it on the next
@@ -3492,7 +3492,7 @@ remote as it stands.  Pinning is what the navigator opens a row with, since a
 session id is per-host and only resumes on the host holding its log.
 FORK non-nil resumes SESSION-ID under an id of its own (see
 `sprig--fork-session'), so the replayed history is carried on in a session
-of its own and the parent is left untouched.  The review buffer is the
+of its own and the parent is left untouched.  The session buffer is the
 only conversation surface."
   (interactive
    (let ((local current-prefix-arg))
@@ -3675,7 +3675,7 @@ in.  It changes the scan itself, so the toggle re-reads the logs.")
 (defvar sprig-session--meta)             ; buffer-local in sprig-session-mode.el
 
 (defun sprig--owning-review-buffers ()
-  "Return the live review buffers that own their own session."
+  "Return the live session buffers that own their own session."
   (seq-filter
    (lambda (b)
      (and (buffer-live-p b)
@@ -3704,7 +3704,7 @@ collapses them to one."
 (defun sprig--buffer-agent-running-p (buf)
   "Non-nil when a background agent BUF's session launched is still running.
 Reads the buffer's own events, the same source its render and inline
-preview use, so the row agrees with what the review buffer shows.  Via the
+preview use, so the row agrees with what the session buffer shows.  Via the
 memoised model (see `sprig--buffer-awaiting-answer-p'), not a fresh build."
   (and (sprig-session-agent-running
         (with-current-buffer buf (sprig-session--current-model)))
@@ -4124,7 +4124,7 @@ for the markdown pass), the stamp of the freshest block, and the turn's
 outcome, context size, and permission mode for the preview's state line.
 When the turn since your prompt carried no prose (it ended on a tool call or
 a question), or there is no user turn at all, the reply falls back to the
-last assistant text anywhere.  EVENTS are chronological (the review model's
+last assistant text anywhere.  EVENTS are chronological (the session model's
 input order).
 
 Building the model is O(all events); an owning buffer already has one, so
@@ -4179,7 +4179,7 @@ split out so a caller holding a model already built need not build another."
 
 (defun sprig--entry-preview (entry)
   "Return the inline preview plist for status ENTRY, or nil.
-From the open review buffer's model when ENTRY has one, else the stored
+From the open session buffer's model when ENTRY has one, else the stored
 session log's tail, read on the host that row's session ran on rather than
 the configured default: with a group per host the two are often not the
 same, and the wrong one has no such log.
@@ -4436,7 +4436,7 @@ Each plist has :key, :host (nil for local, else an SSH destination),
 :buffer (or nil), :file (or nil), :dir (a real working directory or nil),
 :project (its display label), :title, :status, :session, :mtime (its log's
 last-run time), and :created (its creation time, what the list dates and sorts
-by).  An open session-owning review buffer wins over its stored log, carrying
+by).  An open session-owning session buffer wins over its stored log, carrying
 live status and a session with no log yet.
 
 The :key pairs the host with the session id, because an id is only unique
@@ -4480,7 +4480,7 @@ group filtered down to nothing keeps its heading all the same."
                          ;; Live buffer-local state, like the status: a message
                          ;; held for the running turn is invisible otherwise
                          ;; (nothing was sent), so carry its count for the state
-                         ;; line the way the review buffer shows it.
+                         ;; line the way the session buffer shows it.
                          :queued (length (buffer-local-value 'sprig--queued buf))
                          :session id)
                    table))))
@@ -4559,7 +4559,7 @@ group filtered down to nothing keeps its heading all the same."
   "Return the ordered group hosts for ROWS.
 `sprig--status-hosts' leads, so both groups head the list even when one of
 them has no rows.  Any other host a row actually came from follows: a
-review buffer pinned to a host no longer in `sprig-remotes' is still a
+session buffer pinned to a host no longer in `sprig-remotes' is still a
 live session you can steer, so it gets a group of its own rather than
 being filed under someone else's heading."
   (let ((hosts (sprig--status-hosts)))
@@ -4743,7 +4743,7 @@ survives."
 
 (defun sprig--status-entry-active-p (entry)
   "Non-nil when ENTRY is a live session rather than a disconnected log.
-An active session has an owning review buffer, so its status is one of the
+An active session has an owning session buffer, so its status is one of the
 live states rather than `disconnected'.  The navigator keeps such a row's
 inline preview open at all times; a disconnected row shows only its own
 line, and you open it with RET for the full transcript."
@@ -4789,7 +4789,7 @@ heading and not a row."
 (defun sprig--status-reply-oneline (reply)
   "Return REPLY collapsed to a single line of prose for the inline preview.
 Paragraph breaks and wrapping are dropped to whitespace, since the row
-shows only a one-line teaser; RET opens the review buffer for the whole
+shows only a one-line teaser; RET opens the session buffer for the whole
 reply."
   (sprig--collapse-whitespace (or reply "")))
 
@@ -4807,7 +4807,7 @@ reply."
 (defun sprig--state-parts (state)
   "Return (GLYPH TEXT FACE) for a canonical turn STATE symbol.
 The one source of truth for how a state reads on a state line, shared by
-the review buffer (`sprig-session--state') and the navigator
+the session buffer (`sprig-session--state') and the navigator
 \(`sprig--status-state-line') so the two never drift.  Each caller decides
 only which STATE applies, from whatever it can see, then renders these
 parts in its own medium.  STATE is one of `waiting', `compacting',
@@ -4828,10 +4828,10 @@ anything else for `idle'."
 
 (defun sprig--status-state-line (entry preview)
   "Return the preview's leading state line for ENTRY, or nil.
-Mirrors the review buffer's state line: a glyph and word for what the turn
+Mirrors the session buffer's state line: a glyph and word for what the turn
 is doing or how it ended, then the permission mode when it is a notable one,
 then the context in use.  The glyph, word, and face are `sprig--state-parts',
-shared with the review buffer so the two agree; only which state applies is
+shared with the session buffer so the two agree; only which state applies is
 decided here.  The live streaming and waiting states come from ENTRY's own
 status, as the row glyph does; the turn's outcome, permission mode, and
 context size come from PREVIEW's model fields.  nil when there is no status
@@ -4857,13 +4857,13 @@ and no model at all (nothing to say)."
         (concat (propertize (format "     %s  %s" glyph text) 'face face)
                 ;; A queued message is invisible otherwise (nothing was sent),
                 ;; and it fires on its own when the turn ends, so flag it here
-                ;; the way the review buffer's state line does, in its own face.
+                ;; the way the session buffer's state line does, in its own face.
                 (when (and queued (> queued 0))
                   (concat (propertize "  ·  " 'face face)
                           (propertize (format "%d queued" queued)
                                       'face 'sprig-session-pending)))
                 ;; The permission mode rides its own tag, coloured on its own
-                ;; terms rather than the turn's, the way the review buffer's
+                ;; terms rather than the turn's, the way the session buffer's
                 ;; mode line carries `[plan]'.  Only the notable modes show.
                 (when mode
                   (concat (propertize "  ·  " 'face face)
@@ -4889,7 +4889,7 @@ review header, so all three agree on what counts as notable."
 
 (defun sprig--status-context-face (tokens)
   "Return the state-line face for TOKENS of context, escalating with size.
-Mirrors the review buffer's readout: plain while the context is small,
+Mirrors the session buffer's readout: plain while the context is small,
 amber past `sprig-context-large-tokens', red past `sprig-context-huge-tokens'.
 Those thresholds and the escalated faces belong to `sprig-session-mode'; when
 it is not loaded there is nothing to escalate to, so the count stays in the
@@ -5205,7 +5205,7 @@ to the buffer's head."
 (define-key sprig-status-mode-map (kbd "TAB") #'sprig-status-toggle-preview)
 (define-key sprig-status-mode-map (kbd "n")   #'sprig-status-next)
 (define-key sprig-status-mode-map (kbd "p")   #'sprig-status-previous)
-;; Transients mirror the review buffer's steering surface, each acting on
+;; Transients mirror the session buffer's steering surface, each acting on
 ;; the session under point: `s' starts (`s n' new, `s c' new-then-compose,
 ;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
@@ -5351,8 +5351,8 @@ different.  Local is the symbol t (force local), a remote is its string."
   (or (plist-get entry :host) t))
 
 (defun sprig--status-review-buffer (entry)
-  "Return the review buffer for ENTRY, opening it from the log if needed.
-An open owning buffer is reused; otherwise a review buffer is opened that
+  "Return the session buffer for ENTRY, opening it from the log if needed.
+An open owning buffer is reused; otherwise a session buffer is opened that
 owns the session, replaying its stored log."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf)
@@ -5361,7 +5361,7 @@ owns the session, replaying its stored log."
                             (sprig--status-entry-host-arg entry)))))
 
 (defun sprig--status-session-buffer (entry)
-  "Return the review buffer for ENTRY, built undisplayed if it is not open.
+  "Return the session buffer for ENTRY, built undisplayed if it is not open.
 Like `sprig--status-review-buffer' but it never pops the buffer up: a verb
 run from the navigator steers the session in the background, and only the
 verb's own compose or answer buffer shows."
@@ -5373,14 +5373,14 @@ verb's own compose or answer buffer shows."
                                     (sprig--status-entry-host-arg entry) nil))))
 
 (defun sprig--status-owning-buffer (entry)
-  "Return ENTRY's open owning review buffer, or signal that it is not open."
+  "Return ENTRY's open owning session buffer, or signal that it is not open."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf) buf
       (user-error "That session is not open (open it first)"))))
 
 (defun sprig--status-steer (command)
   "Run review COMMAND on the session of the row at point, from the navigator.
-The row's review buffer is resolved (built undisplayed when the session is
+The row's session buffer is resolved (built undisplayed when the session is
 not already open) and COMMAND is called there, so a message composes,
 a question answers, or a turn is steered without first opening the buffer.
 COMMAND's own compose or answer buffer, if any, still pops up as usual.
@@ -5393,7 +5393,7 @@ The navigator refreshes after, so a glyph that the verb moved is redrawn."
 (defmacro sprig--status-define-steer (name command &optional doc)
   "Define NAME as a navigator verb that steers the row's session with COMMAND.
 A thin wrapper so the navigator's `c' and `a' transients can offer the
-review buffer's own verbs, each acting on the session at point.  DOC is the
+session buffer's own verbs, each acting on the session at point.  DOC is the
 command's docstring."
   (declare (indent 2) (doc-string 3))
   `(defun ,name ()
@@ -5467,7 +5467,7 @@ N defaults to 1; a negative N moves to previous rows."
   (sprig-status-next (- (or n 1))))
 
 (defun sprig-status-open ()
-  "Open the review buffer for the session on the current line.
+  "Open the session buffer for the session on the current line.
 Reuses an open owning buffer, or replays the stored log into a new one.
 Point lands on the last message, so the newest reply is what you see, and
 the view keeps following the tail as a live turn streams in, rather than
@@ -5645,7 +5645,7 @@ remote never intermix."
 ;; so every suffix command is known by the time the prefix is compiled.
 (transient-define-prefix sprig-status-dispatch ()
   "Steer the session on the row at point, without leaving the navigator.
-The same message verbs the review buffer's `c' offers, each acting on the
+The same message verbs the session buffer's `c' offers, each acting on the
 session under point.  The change-touching verbs (reject, commit, run) are
 not here: they act on a diff section, which the navigator has none of."
   [["Message"
@@ -5665,7 +5665,7 @@ not here: they act on a diff section, which the navigator has none of."
 
 (transient-define-prefix sprig-status-answer-dispatch ()
   "Answer the question the session on the row at point is waiting on.
-The review buffer's `a', acting on the session under point."
+The session buffer's `a', acting on the session under point."
   [["Answer"
     ("a" "answer, one question at a time" sprig-status-answer)
     ("r" "take every recommended option" sprig-status-answer-recommended)
@@ -5673,7 +5673,7 @@ The review buffer's `a', acting on the session under point."
 
 (transient-define-prefix sprig-status-permission-mode ()
   "Set the permission mode of the session on the row at point.
-The review buffer's `P', acting on the session under point; it must be open
+The session buffer's `P', acting on the session under point; it must be open
 and live, since the mode is a session-level setting the CLI tracks."
   [["Permission mode"
     ("p" "plan (agent plans, makes no edits)" sprig-status-plan-mode)
@@ -5716,7 +5716,7 @@ there is one, so a fresh session starts alongside it in the same place."
 Point under the `local' heading starts the session on this machine; under
 a `remote' one, on that host.  Which is why an empty group is still
 headed: the heading is the place you stand to start the first session
-there.  Opens a review buffer that owns the new session; it appears under
+there.  Opens a session buffer that owns the new session; it appears under
 its own group and streams like any other.  The working-directory prompt
 completes directories (against the local filesystem, or over SSH for a
 remote host) and suggests the host's existing session roots.  With a prefix
@@ -5732,7 +5732,7 @@ a fresh one alongside it in the same directory."
 
 (defun sprig--status-new-message (local plan)
   "Start a fresh session at point (like `s n') and open its first prompt.
-Rather than leaving you in the empty review buffer, this opens the compose
+Rather than leaving you in the empty session buffer, this opens the compose
 buffer straight away, so the opening message is one prompt rather than an
 extra keystroke away.  LOCAL forces the session onto this machine; PLAN
 opens the compose buffer in plan mode.  A session row at point seeds the
@@ -5748,7 +5748,7 @@ directory prompt, as with `s n'."
 (defun sprig-status-new-message (&optional local)
   "Start a fresh session and open a prompt for its first message (`s c').
 Like `s n', but drops you straight into the compose buffer instead of the
-empty review buffer.  With a prefix argument, LOCAL forces the session onto
+empty session buffer.  With a prefix argument, LOCAL forces the session onto
 this machine; a session row at point seeds the directory prompt."
   (interactive "P")
   (sprig--status-new-message local nil))
@@ -5957,7 +5957,7 @@ remote host whose cache is still warming may show none yet."
 (defun sprig-status ()
   "Open the `*sprig-status*' navigator listing Sprig sessions.
 Lists every stored `claude' session on the host, newest first and capped
-to `sprig-status-max-sessions', plus any open review buffer that owns a
+to `sprig-status-max-sessions', plus any open session buffer that owns a
 live session.  Narrow with `/', lift the cap with `l a'."
   (interactive)
   (let ((buf (get-buffer-create sprig-status-buffer-name))
@@ -6270,7 +6270,8 @@ cover remote hosts too."
   "Directory sprig's own source files were loaded from, for `sprig-reload'.")
 
 (defvar sprig--source-files
-  '("sprig-change" "sprig-render" "sprig-session" "sprig" "sprig-session-mode")
+  '("sprig-change" "sprig-render" "sprig-session" "sprig-review" "sprig"
+    "sprig-session-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()

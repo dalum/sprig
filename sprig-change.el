@@ -159,15 +159,48 @@ The leading marker and any trailing tab-separated timestamp are dropped."
     (if (equal field "/dev/null") nil
       (sprig--diff-strip-prefix field))))
 
+(defun sprig--diff-hunk-header (line)
+  "Parse a `@@ -A,B +C,D @@ HEADING' LINE into a unified-hunk plist, or nil.
+The counts are optional in a unified diff (`@@ -1 +1 @@' means one line
+each), so a missing one reads as 1.  HEADING is git's function context,
+kept because it is the cheapest orientation a reader gets."
+  (when (string-match
+         "\\`@@+ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@+\\(?: ?\\(.*\\)\\)?"
+         line)
+    (let ((num (lambda (n) (if (match-string n line)
+                               (string-to-number (match-string n line))
+                             1))))
+      (list :old-start (funcall num 1) :old-count (funcall num 2)
+            :new-start (funcall num 3) :new-count (funcall num 4)
+            :heading (let ((h (match-string 5 line)))
+                       (and h (not (string-empty-p h)) h))
+            :lines nil))))
+
 (defun sprig-parse-diff (text)
   "Parse unified git-diff TEXT into a list of change plists.
-Each element matches the shape `sprig-tool-changes' returns,
-\(:file PATH :kind edit|write :hunks HUNKS); see this section's
-commentary for the mapping and its limits."
+Each element carries the shape `sprig-tool-changes' returns,
+\(:file PATH :kind edit|write :hunks HUNKS), so the stat, the formatter,
+and the transcript's inline render consume it unchanged; see this
+section's commentary for that mapping and its limits.
+
+A git diff knows something a tool payload never can, though: where in the
+file each line sits.  So a parsed change carries a second, positional view
+the payload path leaves nil, `:unified': one entry per `@@' section, in
+order, each
+
+  (:old-start N :old-count N :new-start N :new-count N :heading S
+   :lines LINES)
+
+where LINES holds every line of the section including its context, each
+\(:kind context|add|del :old N :new N :text S).  `:old' is nil on an added
+line and `:new' nil on a removed one, since that line exists on one side
+only.  This is what the changeset review renders and what anchors a
+comment to a line."
   (let ((changes nil)
         (path nil) (kind 'edit) (hunks nil) (binary nil)
         (a-path nil) (b-path nil)              ; the file's --- / +++ paths
-        (old-run nil) (new-run nil) (in-hunk nil))
+        (old-run nil) (new-run nil) (in-hunk nil)
+        (unified nil) (uhunk nil) (old-n 0) (new-n 0))
     (cl-flet* ((flush-run
                  ()
                  (when (or old-run new-run)
@@ -176,15 +209,40 @@ commentary for the mapping and its limits."
                                :replace-all nil)
                          hunks)
                    (setq old-run nil new-run nil)))
+               (flush-uhunk
+                 ()
+                 (when uhunk
+                   (push (plist-put uhunk :lines
+                                    (nreverse (plist-get uhunk :lines)))
+                         unified)
+                   (setq uhunk nil)))
+               (add-uline
+                 (kind text)
+                 (when uhunk
+                   (plist-put
+                    uhunk :lines
+                    (cons (list :kind kind
+                                :old (and (memq kind '(context del)) old-n)
+                                :new (and (memq kind '(context add)) new-n)
+                                :text text)
+                          (plist-get uhunk :lines)))
+                   (when (memq kind '(context del)) (setq old-n (1+ old-n)))
+                   (when (memq kind '(context add)) (setq new-n (1+ new-n)))))
                (flush-file
                  ()
                  (flush-run)
+                 (flush-uhunk)
                  (when (and path (not binary))
-                   (push (list :file path :kind kind :hunks (nreverse hunks))
+                   (push (list :file path :kind kind :hunks (nreverse hunks)
+                               :unified (nreverse unified))
                          changes))
                  (setq path nil kind 'edit hunks nil binary nil
-                       a-path nil b-path nil in-hunk nil)))
-      (dolist (line (split-string (or text "") "\n"))
+                       a-path nil b-path nil in-hunk nil unified nil)))
+      ;; Drop only the empty tail `split-string' leaves on a trailing
+      ;; newline.  A genuinely empty line mid-diff is kept, since dropping
+      ;; one would shift every line number after it in its hunk.
+      (dolist (line (let ((ls (split-string (or text "") "\n")))
+                      (if (equal (car (last ls)) "") (butlast ls) ls)))
         (cond
          ((string-prefix-p "diff --git " line) (flush-file))
          ((string-prefix-p "new file mode" line) (setq kind 'write))
@@ -202,13 +260,24 @@ commentary for the mapping and its limits."
           ;; /dev/null old path means a new file even absent `new file mode'.
           (setq path (or b-path a-path))
           (when (null a-path) (setq kind 'write)))
-         ((string-prefix-p "@@" line) (flush-run) (setq in-hunk t))
+         ((string-prefix-p "@@" line)
+          (flush-run)
+          (flush-uhunk)
+          (setq in-hunk t)
+          (when-let ((h (sprig--diff-hunk-header line)))
+            (setq uhunk h
+                  old-n (plist-get h :old-start)
+                  new-n (plist-get h :new-start))))
          (in-hunk
           (pcase (and (> (length line) 0) (aref line 0))
-            (?- (push (substring line 1) old-run))
-            (?+ (push (substring line 1) new-run))
+            (?- (push (substring line 1) old-run)
+                (add-uline 'del (substring line 1)))
+            (?+ (push (substring line 1) new-run)
+                (add-uline 'add (substring line 1)))
             (?\\ nil)                    ; "\ No newline at end of file"
-            (_ (flush-run))))            ; context (incl. blank " ") ends a run
+            (_ (flush-run)                ; context (incl. blank " ") ends a run
+               (add-uline 'context (if (string-empty-p line) ""
+                                     (substring line 1))))))
          (t nil)))                       ; index/mode/similarity headers
       (flush-file)
       (nreverse changes))))
