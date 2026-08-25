@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.4.0
+;; Version: 0.5.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -141,7 +141,7 @@ A long region is truncated to this many with an ellipsis."
   :group 'sprig)
 
 (defface sprig-review-index '((t :inherit font-lock-keyword-face :weight bold))
-  "Face for the changed-file index heading at the top of the review."
+  "Face for the summary line at the top of the review."
   :group 'sprig)
 
 (defface sprig-review-comment-body '((t :inherit font-lock-doc-face))
@@ -184,6 +184,11 @@ refresh could no longer find that text (see `sprig-review--reanchor').")
 
 (defvar-local sprig-review--next-id 1
   "Counter handing each draft comment an id unique within the buffer.")
+
+(defvar-local sprig-review--expanded nil
+  "Files whose section the reader has unfolded.
+Folding is a reading position, not a fact about the diff, so re-reading
+the diff must not shut the file you are in the middle of.")
 
 ;;;; Reading the tree
 ;;
@@ -622,55 +627,86 @@ construct spanning several lines of the hunk comes out right."
     (pcase-dolist (`(,l . ,text) (sprig-review--hunk-texts file uhunk))
       (sprig-review--insert-uline file l text))))
 
-(defun sprig-review--insert-orphans (file)
-  "Insert FILE's orphaned drafts, if any, above its hunks.
+(defun sprig-review--file-drafts (file)
+  "Return the drafts filed against FILE, in the order they were written."
+  (seq-filter (lambda (d) (equal (plist-get d :file) file))
+              sprig-review--drafts))
+
+(defun sprig-review--insert-orphans (drafts)
+  "Insert the orphans among DRAFTS, if any, above their file's hunks.
 An orphan has no line left to sit under, so it floats to the top of the
 file it was written against rather than vanishing."
-  (when-let ((orphans (seq-filter
-                       (lambda (d) (and (equal (plist-get d :file) file)
-                                        (plist-get d :orphan)))
-                       sprig-review--drafts)))
-    (dolist (d orphans) (sprig-review--insert-draft d))))
+  (dolist (d drafts)
+    (when (plist-get d :orphan) (sprig-review--insert-draft d))))
+
+(defun sprig-review--comment-count (n)
+  "Return the \"(N comments)\" suffix for a file heading, empty when N is zero.
+A folded file has to say that it carries comments, or folding would hide
+work the reader has already done."
+  (if (zerop n) ""
+    (sprig--face (format "  (%d comment%s)" n (if (= n 1) "" "s"))
+                 'sprig-review-comment-heading)))
 
 (defun sprig-review--insert-file (change)
-  "Insert CHANGE as a foldable file section of unified hunks."
-  (magit-insert-section (sprig-change change)
-    (magit-insert-heading
-      (concat (sprig--face (plist-get change :file) 'sprig-diff-file)
-              "  " (sprig--stat-string change)))
-    (sprig-review--insert-orphans (plist-get change :file))
-    (if-let ((unified (plist-get change :unified)))
-        (dolist (u unified) (sprig-review--insert-uhunk
-                             (plist-get change :file) u))
-      (insert "  (no textual hunks)\n"))))
+  "Insert CHANGE as a file section, folded unless it is open or annotated.
+Folded by default: the first question a review answers is what changed,
+and forty files unrolled is not an answer.  A file the reader has opened
+stays open across a redraw (see `sprig-review--expanded\='), and a file
+carrying a draft opens itself, because a comment you cannot see is worse
+than a longer buffer."
+  (let* ((file (plist-get change :file))
+         (drafts (sprig-review--file-drafts file)))
+    (magit-insert-section
+        (sprig-change change
+                      (not (or drafts (member file sprig-review--expanded))))
+      (magit-insert-heading
+        (concat (sprig--face file 'sprig-diff-file)
+                "  " (sprig--stat-string change)
+                (sprig-review--comment-count (length drafts))))
+      (sprig-review--insert-orphans drafts)
+      (if-let ((unified (plist-get change :unified)))
+          (dolist (u unified) (sprig-review--insert-uhunk file u))
+        (insert "  (no textual hunks)\n")))))
 
-(defun sprig-review--insert-index (changes)
-  "Insert the changed-file index: one line per file in CHANGES, with its stat."
-  (magit-insert-section (sprig-review-index)
-    (magit-insert-heading
-      (concat (sprig--face (format "Changed files (%d)" (length changes))
-                           'sprig-review-index)
-              (sprig--face (format "   %s"
-                                   (sprig-review--scope-label sprig-review-base))
-                           'sprig-review-hunk)))
+(defun sprig-review--insert-summary (changes)
+  "Insert the one line saying how much CHANGES is, and what it is against.
+One line, not a file index: the folded headings below already list the
+files with their stats, so an index would say it all twice."
+  (let ((add 0) (del 0) (n (length changes)))
     (dolist (c changes)
-      (let ((n (length (seq-filter
-                        (lambda (d) (equal (plist-get d :file)
-                                           (plist-get c :file)))
-                        sprig-review--drafts))))
-        (insert "  " (sprig--stat-string c) "  "
-                (sprig--face (plist-get c :file) 'sprig-diff-file)
-                (if (zerop n) ""
-                  (sprig--face (format "  (%d comment%s)" n
-                                       (if (= n 1) "" "s"))
-                               'sprig-review-comment-heading))
-                "\n")))
-    (insert "\n")))
+      (let ((stat (sprig-change-stat c)))
+        (setq add (+ add (car stat))
+              del (+ del (cdr stat)))))
+    (insert (sprig--face (format "%d file%s" n (if (= n 1) "" "s"))
+                         'sprig-review-index)
+            "  ("
+            (sprig--face (format "+%d" add) 'sprig-diff-stat-added)
+            " "
+            (sprig--face (format "-%d" del) 'sprig-diff-stat-removed)
+            ")   "
+            (sprig--face (sprig-review--scope-label sprig-review-base)
+                         'sprig-review-hunk)
+            "\n\n")))
+
+(defun sprig-review--note-expansion ()
+  "Record which file sections are open, before a redraw throws them away."
+  (when magit-root-section
+    (setq sprig-review--expanded
+          (let (open)
+            (dolist (s (oref magit-root-section children) open)
+              (when (and (eq (oref s type) 'sprig-change)
+                         (not (oref s hidden)))
+                (push (sprig--section-file s) open)))))))
 
 (defun sprig-review--render ()
-  "Redraw the review buffer from `sprig-review--changes' and its drafts."
+  "Redraw the review buffer from `sprig-review--changes' and its drafts.
+Sprig owns which files are folded, in `sprig-review--expanded', so
+magit's own visibility cache is bound away for the redraw: left in, it
+would answer for a section before the fold rule here gets to."
   (let ((inhibit-read-only t)
+        (magit-section-visibility-cache nil)
         (changes sprig-review--changes))
+    (sprig-review--note-expansion)
     (remove-overlays (point-min) (point-max) 'sprig-mark t)
     (setq sprig--marks nil)
     (erase-buffer)
@@ -678,20 +714,72 @@ file it was written against rather than vanishing."
       (if (null changes)
           (insert (format "No %s.\n"
                           (sprig-review--scope-label sprig-review-base)))
-        (sprig-review--insert-index changes)
+        (sprig-review--insert-summary changes)
         (dolist (c changes) (sprig-review--insert-file c))))
+    ;; Inserting a section only records that it should be folded; magit
+    ;; draws the folds from its own refresh, which sprig does not run.
+    (magit-section-show magit-root-section)
     (goto-char (point-min))))
 
+(defun sprig-review--place ()
+  "Return where point is as (FILE SIDE N COLUMN TEXT), or nil off the diff.
+A buffer position is the wrong thing to remember across a redraw: the
+diff above point may have grown or shrunk, so the same offset lands on a
+different line.  The line\='s own identity survives that."
+  (when-let ((l (sprig-review--line-at)))
+    (let ((side (if (eq (plist-get l :kind) 'del) 'old 'new)))
+      (list (plist-get l :file) side
+            (plist-get l (sprig-review--side-key side))
+            (current-column)
+            (plist-get l :text)))))
+
+(defun sprig-review--diff-lines ()
+  "Return ((POSITION . LINE) ...) for every rendered diff line, in order."
+  (let ((pos (point-min)) out)
+    (while pos
+      (when-let ((l (get-text-property pos 'sprig-review-line)))
+        (push (cons pos l) out))
+      (setq pos (next-single-property-change pos 'sprig-review-line)))
+    (nreverse out)))
+
+(defun sprig-review--goto-place (place fallback)
+  "Put point back on PLACE, falling back to buffer position FALLBACK.
+PLACE is matched on its text first and its number second, the way a draft
+is re-anchored (`sprig-review--reanchor\='): a refresh after the agent has
+worked is exactly the case where the number moved and the line did not.
+Where that text now appears more than once the nearest to the old number
+wins, and when it has gone the old number is the last guess before the
+offset."
+  (pcase-let ((`(,file ,side ,n ,col ,text) place))
+    (let ((key (and place (sprig-review--side-key side)))
+          by-text by-number)
+      (pcase-dolist (`(,pos . ,l) (and place (sprig-review--diff-lines)))
+        (when-let* (((equal (plist-get l :file) file))
+                    (num (plist-get l key)))
+          (when (and (equal (plist-get l :text) text)
+                     (or (null by-text)
+                         (< (abs (- num n)) (abs (- (cdr by-text) n)))))
+            (setq by-text (cons pos num)))
+          (when (and (eql num n) (null by-number))
+            (setq by-number (cons pos num)))))
+      (cond ((or by-text by-number)
+             (goto-char (car (or by-text by-number)))
+             (move-to-column col))
+            (fallback (goto-char (min fallback (point-max))))))))
+
 (defun sprig-review--reload (&optional keep-point)
-  "Re-read the diff, re-anchor the drafts, and redraw; KEEP-POINT restores point."
-  (let ((pos (and keep-point (point))))
+  "Re-read the diff, re-anchor the drafts, and redraw.
+KEEP-POINT holds the reading position across the redraw: the same diff
+line under point, and the same files open (see `sprig-review--expanded\=')."
+  (let ((place (and keep-point (sprig-review--place)))
+        (pos (and keep-point (point))))
     (setq sprig-review--changes
           (sprig-parse-diff (sprig-review--git sprig-review--remote
                                                sprig-review--root))
           sprig-review--drafts
           (sprig-review--reanchor sprig-review--drafts sprig-review--changes))
     (sprig-review--render)
-    (when pos (goto-char (min pos (point-max))))))
+    (when keep-point (sprig-review--goto-place place pos))))
 
 ;;;; Writing a comment
 
@@ -709,9 +797,10 @@ file it was written against rather than vanishing."
 
 (define-derived-mode sprig-review-comment-mode text-mode "Sprig-Comment"
   "Major mode for writing one draft review comment.
-\\<sprig-review-comment-mode-map>`\\[sprig-review-comment-save]' files the \
-draft, `\\[sprig-review-comment-abort]' throws it away.  Nothing reaches \
-the agent until the review is published."
+\\<sprig-review-comment-mode-map>
+`\\[sprig-review-comment-save]' files the draft,
+`\\[sprig-review-comment-abort]' throws it away.
+Nothing reaches the agent until the review is published."
   :group 'sprig)
 
 (defun sprig-review--edit-comment (draft &optional existing)
@@ -1007,7 +1096,11 @@ that.  You edit locally and the agent writes it, as ever."
 (define-derived-mode sprig-review-mode magit-section-mode "Sprig-Review"
   "Major mode for reviewing a changeset and annotating it line by line.
 
-Move with \\`n' / \\`p', fold with \\`TAB', \\`g' re-reads the diff, and
+Files open folded, so the buffer starts as the list of what changed.
+\\`TAB' opens the file at point, \\`S-TAB' cycles the whole buffer, and a
+file you open stays open when the diff is re-read.
+
+Move with \\`n' / \\`p', \\`g' re-reads the diff, and
 \\`RET' visits the file at the line under point.  The verbs live on the
 \\`c' transient:
 

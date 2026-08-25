@@ -50,14 +50,14 @@ new file mode 100644
 
 ;;;; Rendering
 
-(ert-deftest sprig-review-test-renders-index-and-numbered-lines ()
-  "The review opens with a file index, then each file as numbered hunks."
+(ert-deftest sprig-review-test-renders-summary-and-numbered-lines ()
+  "The review opens with a one-line summary, then each file as numbered hunks."
   (sprig-review-tests--with
     (let ((s (buffer-string)))
-      (should (string-match-p "Changed files (2)" s))
-      ;; The index names every changed file with its stat.
-      (should (string-match-p "(\\+1 -1)  foo\\.el" s))
-      (should (string-match-p "(\\+1 -0)  new\\.txt" s))
+      (should (string-match-p "^2 files  (\\+2 -1)" s))
+      ;; Each file heading names the file and its own stat.
+      (should (string-match-p "foo\\.el  (\\+1 -1)" s))
+      (should (string-match-p "new\\.txt  (\\+1 -0)" s))
       ;; The hunk heading carries git's own function context.
       (should (string-match-p "@@ -1,3 \\+1,3 @@ defun foo ()" s))
       ;; Context keeps both numbers; a removal has no new-side number and
@@ -65,6 +65,49 @@ new file mode 100644
       (should (string-match-p "^ +1 +1 +(defun foo ()$" s))
       (should (string-match-p "^ +2 +- +(bar))$" s))
       (should (string-match-p "^ +2 +\\+ +(baz))$" s)))))
+
+(defun sprig-review-tests--file-section (file)
+  "Return the rendered file section for FILE."
+  (seq-find (lambda (s) (equal (sprig--section-file s) file))
+            (oref magit-root-section children)))
+
+(ert-deftest sprig-review-test-files-open-folded ()
+  "Files start folded, so the buffer opens as the list of what changed."
+  (sprig-review-tests--with
+    (should (oref (sprig-review-tests--file-section "foo.el") hidden))
+    (should (oref (sprig-review-tests--file-section "new.txt") hidden))
+    ;; Folded still says which file and how much of it moved.
+    (should (string-match-p "foo\\.el  (\\+1 -1)" (buffer-string)))
+    ;; And the fold is drawn, not merely recorded on the section: nothing
+    ;; but the render applies it, since sprig runs no magit refresh.
+    (sprig-review-tests--goto "(bar))")
+    (should (seq-some (lambda (o) (overlay-get o 'invisible))
+                      (overlays-at (point))))))
+
+(ert-deftest sprig-review-test-an-opened-file-stays-open ()
+  "Re-reading the diff must not shut the file you are reading, even when
+the file itself changed underneath and magit\='s own cache cannot match it."
+  (sprig-review-tests--with
+    (magit-section-show (sprig-review-tests--file-section "foo.el"))
+    (setq sprig-review--changes
+          (sprig-parse-diff (replace-regexp-in-string
+                             "(baz))" "(quux))" sprig-review-tests--diff)))
+    (sprig-review--render)
+    (should-not (oref (sprig-review-tests--file-section "foo.el") hidden))
+    ;; Only that one: folding the rest is still the default.
+    (should (oref (sprig-review-tests--file-section "new.txt") hidden))))
+
+(ert-deftest sprig-review-test-a-commented-file-opens-itself ()
+  "A file carrying a draft is never folded: a comment you cannot see is
+worse than a longer buffer, and the heading counts it either way."
+  (sprig-review-tests--with
+    (setq sprig-review--drafts
+          (list (sprig-review-tests--draft "foo.el" 'new 2 2
+                                           "Use bar, not baz." '("  (baz))"))))
+    (sprig-review--render)
+    (should-not (oref (sprig-review-tests--file-section "foo.el") hidden))
+    (should (oref (sprig-review-tests--file-section "new.txt") hidden))
+    (should (string-match-p "foo\\.el.*(1 comment)" (buffer-string)))))
 
 (ert-deftest sprig-review-test-empty-diff-says-so ()
   "An empty diff names the base it found nothing against, and clears marks."
@@ -186,7 +229,7 @@ branch and nothing of main's own advance, uncommitted work included."
 (ert-deftest sprig-review-test-the-scope-is-on-screen ()
   "You can always see what you are reviewing against, not just when empty."
   (sprig-review-tests--with
-    (should (string-match-p "Changed files (2) +uncommitted changes, against HEAD"
+    (should (string-match-p "2 files  (\\+2 -1) +uncommitted changes, against HEAD"
                             (buffer-string)))
     (setq-local sprig-review-base "main")
     (sprig-review--render)
@@ -309,6 +352,66 @@ losing them: that is the whole reason `b' lives in the review buffer."
     (should-not (plist-get (car sprig-review--drafts) :orphan))
     (should (string-match-p "Keep me\\." (buffer-string)))))
 
+(defconst sprig-review-tests--grown-diff
+  "diff --git a/aaa.txt b/aaa.txt
+new file mode 100644
+--- /dev/null
++++ b/aaa.txt
+@@ -0,0 +1,2 @@
++one
++two
+diff --git a/foo.el b/foo.el
+--- a/foo.el
++++ b/foo.el
+@@ -1,2 +1,3 @@ defun foo ()
+ (defun foo ()
+-  (bar))
++  (setq n 1)
++  (baz))
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,1 @@
++hello
+"
+  "The test diff grown twice over: a file added above it, shifting every
+buffer offset, and a line added inside foo.el, shifting `  (baz))\=' from
+new line 2 to 3.  Both are what a refresh after the agent has worked
+looks like, and each defeats a different lazy way of keeping point.")
+
+(ert-deftest sprig-review-test-refresh-holds-your-place ()
+  "`g\=' keeps the line under point and the files you opened, even when the
+diff above it and the file around it have both grown.  A refresh is a
+re-read, not a fresh start."
+  (sprig-review-tests--with
+    (setq sprig-review--remote nil sprig-review--root "/repo")
+    (magit-section-show (sprig-review-tests--file-section "foo.el"))
+    (sprig-review-tests--goto "(baz))")
+    (cl-letf (((symbol-function 'sprig-review--git)
+               (lambda (&rest _) sprig-review-tests--grown-diff)))
+      (sprig-review--reload t))
+    ;; The same line, not the same offset: aaa.txt pushed everything down.
+    (let ((l (sprig-review--line-at)))
+      (should (equal (plist-get l :file) "foo.el"))
+      (should (equal (plist-get l :text) "  (baz))"))
+      ;; Followed the text, not the number: it was line 2, it is now 3.
+      (should (= (plist-get l :new) 3)))
+    (should-not (oref (sprig-review-tests--file-section "foo.el") hidden))
+    (should (oref (sprig-review-tests--file-section "aaa.txt") hidden))))
+
+(ert-deftest sprig-review-test-refresh-survives-the-line-going-away ()
+  "The agent can unwrite the very line you were reading.  Refresh then
+falls back to the buffer offset rather than erroring."
+  (sprig-review-tests--with
+    (setq sprig-review--remote nil sprig-review--root "/repo")
+    (sprig-review-tests--goto "(baz))")
+    (cl-letf (((symbol-function 'sprig-review--git)
+               (lambda (&rest _) "")))
+      (sprig-review--reload t))
+    (should (string-match-p "No uncommitted changes" (buffer-string)))
+    (should (<= (point) (point-max)))))
+
 ;;;; What point resolves to
 
 (ert-deftest sprig-review-test-point-resolves-to-a-line ()
@@ -352,7 +455,7 @@ takes the whole span rather than either end of it."
         (should (equal anchor '("(defun foo ()" "  (baz))")))))))
 
 (ert-deftest sprig-review-test-point-off-the-diff-refuses ()
-  "Point on the index (or any chrome) is not a line to comment on."
+  "Point on the summary line (or any chrome) is not a line to comment on."
   (sprig-review-tests--with
     (goto-char (point-min))
     (should-error (sprig-review--region-lines) :type 'user-error)))
@@ -365,8 +468,8 @@ takes the whole span rather than either end of it."
         :start start :end end :text text :anchor anchor :orphan nil))
 
 (ert-deftest sprig-review-test-a-draft-renders-under-its-line ()
-  "A filed draft renders beneath the line it annotates, and counts in
-the index, so an annotated review reads back as one document."
+  "A filed draft renders beneath the line it annotates, and counts on its
+file's heading, so an annotated review reads back as one document."
   (sprig-review-tests--with
     (setq sprig-review--drafts
           (list (sprig-review-tests--draft "foo.el" 'new 2 2

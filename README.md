@@ -193,7 +193,9 @@ The choice rides back to the agent and the question settles in place, showing wh
 
 `d` opens the **changeset review**: the changes as one navigable diff you annotate line by line and hand back in a single round. `d d` reviews the uncommitted changes, `d m` the whole branch against main or master, and `d b` against a base you name. Where the session buffer reconstructs each edit from its tool payload turn by turn, this is the one cumulative diff of the whole tree, so it also catches a change made by `Bash` (a formatter, a `sed`, codegen) that has no payload to render from, and your own hand-authored edits alongside the agent's.
 
-It opens on an index of the changed files with their stats, then each file as foldable unified hunks with old and new line numbers in the margin. `n` / `p` move, `TAB` folds, `g` re-reads the diff, `RET` visits the file at the line under point.
+It opens as the list of changed files, one line each with its stat, folded. That is the shape of the changeset, and it is the first thing a review wants: forty files unrolled is not a shape, and there is no separate index above them because the folded headings already are one. `TAB` opens the file at point into unified hunks with old and new line numbers in the margin, `S-TAB` cycles the whole buffer, `n` / `p` move, `RET` visits the file at the line under point. A file carrying a comment opens itself, and says so on its heading, because a draft you cannot see is worse than a longer buffer.
+
+**`g` holds your place.** Re-reading the diff keeps the line under point and the files you had open, so a refresh after the agent has worked is a re-read rather than a fresh start. The line is found again by its own text rather than by buffer offset or line number, the same way a draft comment is re-anchored, which is what makes it survive both the diff above it growing and the file around it gaining lines. Where that text now appears twice, the nearest to the old number wins. If the agent has unwritten the very line you were reading, point falls back to roughly where it was.
 
 **The code is syntax-highlighted and the change lives in the gutter.** Reviewing is mostly reading code, so the code carries the colours you read it in normally, in the file's own major mode, and whether a line was added or removed is said by the line-number columns and the `+`/`-` marker instead of by painting the whole line. A removed line colours its old-side number, an added one its new-side number, and the marker stays so colour is never the only signal. Each side of a hunk is fontified as one block, so a multi-line string or comment inside the hunk comes out right; one that opens *before* the hunk cannot, since only the diff is read and never the file. Results are memoised, so re-rendering after every comment stays cheap. `sprig-review-fontify-code` turns it off, which puts the colour back on the whole line.
 
@@ -205,7 +207,7 @@ It opens on an index of the changed files with their stats, then each file as fo
 
 **`e` writes it yourself.** Some feedback is quicker to write than to describe. `e` on a hunk opens the staging buffer seeded with that hunk's new side, the context and added lines exactly as they stand on disk, and `C-c C-c` there asks the agent to apply your edit (see [Authoring by hand](#authoring-by-hand)). `c m` is the other escape hatch: a plain message about the marked hunks, for feedback about the change as a whole rather than a line of it.
 
-**What it diffs against.** Three scopes, and the buffer always says which one it is showing, next to the file count.
+**What it diffs against.** Three scopes, and the summary line at the top always says which one it is showing, next to the file count and the total stat.
 
 | Verb | Scope | Runs |
 |---|---|---|
