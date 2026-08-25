@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -67,11 +67,27 @@
 ;;;; Options
 
 (defcustom sprig-review-base "HEAD"
-  "Git revision the changeset review diffs against (`d').
-The default `\"HEAD\"' reviews the net *uncommitted* changes since the
-last commit.  Set it to a branch such as `\"main\"' to review everything
-the branch has changed on top of it, or to a range like `\"main...HEAD\"'
-for the committed changes alone.  It is passed to `git diff' verbatim."
+  "What the changeset review diffs against (`d'); `b' changes it per buffer.
+
+`\"HEAD\"', the default, reviews the uncommitted changes: what the working
+tree has that the last commit does not.  That is the right scope while a
+turn is in flight.
+
+A *branch* name such as `\"main\"' reviews the whole of what your branch
+has done to it, commits and uncommitted work together, from where the two
+diverged.  That is the right scope once the agent has been committing as
+it goes, and it is the scope a pull request would show.
+
+The middle formulation is deliberately not what you get.  Plain `git diff
+main' would compare against main's *tip*, so every commit main gained
+since you branched shows up inverted, as changes you appear to have
+reverted; `git diff main...HEAD' fixes that but drops the uncommitted work.
+Sprig runs `git diff --merge-base main', which is both halves and neither
+bug.  See `sprig-review--diff-args'.
+
+Anything containing `..' is passed to `git diff' verbatim, so an explicit
+range (`\"main...HEAD\"' for the committed changes alone) still means
+exactly what git says it means."
   :type 'string
   :group 'sprig)
 
@@ -170,11 +186,58 @@ Signals on a non-zero git exit."
       (let ((root (string-trim out)))
         (unless (string-empty-p root) root)))))
 
+(defun sprig-review--diff-args (base)
+  "Return the `git diff' arguments reviewing against BASE.
+Three cases, and the middle one is the point of this function:
+
+- an explicit range (anything with `..') passes through verbatim;
+- `\"HEAD\"' diffs the working tree against the last commit, the
+  uncommitted changes;
+- any other revision diffs from where it and HEAD diverged, so the
+  review is everything *this* branch did and nothing the base gained
+  since.  Plain `git diff BASE' would show the latter inverted, as
+  reversions you never made.
+
+Requires git 2.30 for `--merge-base'."
+  (let ((base (string-trim (or base ""))))
+    (cond ((string-empty-p base) (list "diff" "HEAD"))
+          ((string-match-p "\\.\\." base) (list "diff" base))
+          ((equal base "HEAD") (list "diff" "HEAD"))
+          (t (list "diff" "--merge-base" base)))))
+
 (defun sprig-review--git (remote root)
-  "Return `git diff' output for the repo at ROOT on REMOTE.
-The diff is against `sprig-review-base'; untracked files are not shown,
-since `git diff' omits them and staging them would touch the index."
-  (sprig-review--run-git remote root (list "diff" sprig-review-base)))
+  "Return `git diff' output reviewing ROOT on REMOTE against `sprig-review-base'.
+Untracked files are not shown, since `git diff' omits them and staging
+them would touch the index."
+  (sprig-review--run-git remote root
+                         (sprig-review--diff-args sprig-review-base)))
+
+(defun sprig-review--default-branch (remote root)
+  "Return the repository's default branch at ROOT on REMOTE, or nil.
+Asks the remote-tracking HEAD first, since that is what the forge says,
+and falls back to whichever of `main' or `master' exists.  Used only to
+offer a sensible first candidate when `b' asks for a base."
+  (or (let ((out (ignore-errors
+                   (sprig-review--run-git
+                    remote root
+                    '("symbolic-ref" "--quiet" "--short"
+                      "refs/remotes/origin/HEAD")))))
+        (when out
+          (let* ((ref (string-trim out))
+                 (short (replace-regexp-in-string "\\`origin/" "" ref)))
+            (unless (string-empty-p ref)
+              ;; Prefer the local branch when there is one: it is what the
+              ;; user types, and it diffs without needing the remote fetched.
+              (if (ignore-errors
+                    (sprig-review--run-git
+                     remote root (list "rev-parse" "--verify" "--quiet" short)))
+                  short
+                ref)))))
+      (seq-find (lambda (b)
+                  (ignore-errors
+                    (sprig-review--run-git
+                     remote root (list "rev-parse" "--verify" "--quiet" b))))
+                '("main" "master"))))
 
 ;;;; Drafts: anchoring
 ;;
@@ -312,6 +375,16 @@ post-image, which is what the file on disk actually reads.  Signals a
 
 ;;;; Rendering
 
+(defun sprig-review--scope-label (base)
+  "Return a short phrase naming what a review against BASE covers.
+The base alone does not say: `main' means something quite different from
+`main...HEAD', and neither is self-evident from the string."
+  (let ((base (string-trim (or base ""))))
+    (cond ((or (string-empty-p base) (equal base "HEAD"))
+           "uncommitted changes, against HEAD")
+          ((string-match-p "\\.\\." base) (format "range %s" base))
+          (t (format "whole branch, against %s" base)))))
+
 (defun sprig-review--lineno (n)
   "Return N right-aligned in the line-number column, blank when nil."
   (sprig--face (format "%5s" (or n "")) 'sprig-review-lineno))
@@ -396,8 +469,11 @@ file it was written against rather than vanishing."
   "Insert the changed-file index: one line per file in CHANGES, with its stat."
   (magit-insert-section (sprig-review-index)
     (magit-insert-heading
-      (sprig--face (format "Changed files (%d)" (length changes))
-                   'sprig-review-index))
+      (concat (sprig--face (format "Changed files (%d)" (length changes))
+                           'sprig-review-index)
+              (sprig--face (format "   %s"
+                                   (sprig-review--scope-label sprig-review-base))
+                           'sprig-review-hunk)))
     (dolist (c changes)
       (let ((n (length (seq-filter
                         (lambda (d) (equal (plist-get d :file)
@@ -421,7 +497,8 @@ file it was written against rather than vanishing."
     (erase-buffer)
     (magit-insert-section (sprig-review-root)
       (if (null changes)
-          (insert (format "No changes against %s.\n" sprig-review-base))
+          (insert (format "No %s.\n"
+                          (sprig-review--scope-label sprig-review-base)))
         (sprig-review--insert-index changes)
         (dolist (c changes) (sprig-review--insert-file c))))
     (goto-char (point-min))))
@@ -741,6 +818,7 @@ that.  You edit locally and the agent writes it, as ever."
     (define-key map (kbd "C-c C-c") #'sprig-review-publish)
     (define-key map (kbd "k")       #'sprig-review-comment-delete)
     (define-key map (kbd "e")       #'sprig-review-stage-hunk)
+    (define-key map (kbd "b")       #'sprig-review-set-base)
     (define-key map (kbd "g")       #'sprig-review-refresh)
     (define-key map (kbd "RET")     #'sprig-review-visit)
     (define-key map (kbd "q")       #'quit-window)
@@ -759,6 +837,8 @@ Move with \\`n' / \\`p', fold with \\`TAB', \\`g' re-reads the diff, and
   c p   publish every draft to the session, as one turn
   c Q   discard every draft
   c m   plain message about the marked hunks (\\`SPC' marks)
+
+\\`b' changes what the review diffs against, carrying the drafts across.
 
 \\`e' hand-authors the hunk at point instead of describing it, and
 \\`C-c C-c' publishes, the way it sends everywhere else in sprig.
@@ -784,14 +864,10 @@ agent, like every other sprig verb."
     ("m" "about the marked hunks" sprig-review-message)
     ("M" "…queued for after this turn" sprig-review-message-queue)]])
 
-;;;###autoload
-(defun sprig-session-review ()
-  "Open the changeset review for this session's working tree (`d').
-Every change in the tree against `sprig-review-base', as one navigable
-diff you annotate line by line and publish in a single turn.  Reads the
-diff itself, which the invariant permits, over the session's own SSH
-transport when the tree is remote."
-  (interactive)
+(defun sprig-review--session-root ()
+  "Return (REMOTE . ROOT) for the session buffer point is in.
+Signals a `user-error' when there is no session, no working directory, or
+no git repository around it."
   (unless (derived-mode-p 'sprig-session-mode)
     (user-error "Not in a sprig session buffer"))
   (let* ((remote (sprig--remote))
@@ -799,10 +875,23 @@ transport when the tree is remote."
                   (and (not remote) default-directory)
                   (user-error "This session has no working directory")))
          (root (or (sprig-review--toplevel remote dir)
-                   (user-error "Not inside a git repository: %s" dir)))
-         (session (current-buffer))
-         (buf (get-buffer-create
-               (format "*sprig-review: %s*" (buffer-name session)))))
+                   (user-error "Not inside a git repository: %s" dir))))
+    (cons remote root)))
+
+;;;###autoload
+(defun sprig-session-review (&optional base)
+  "Open the changeset review for this session's working tree (`d d').
+Every change in the tree against BASE (default `sprig-review-base') as one
+navigable diff you annotate line by line and publish in a single turn.
+BASE is held buffer-locally, so two reviews of the same session can sit at
+different scopes and `g' keeps each where you put it.  Reads the diff
+itself, which the invariant permits, over the session's own SSH transport
+when the tree is remote."
+  (interactive)
+  (pcase-let* ((`(,remote . ,root) (sprig-review--session-root))
+               (session (current-buffer))
+               (buf (get-buffer-create
+                     (format "*sprig-review: %s*" (buffer-name session)))))
     (with-current-buffer buf
       (unless (derived-mode-p 'sprig-review-mode) (sprig-review-mode))
       (setq sprig-review--session session
@@ -813,8 +902,71 @@ transport when the tree is remote."
             ;; The bulk diff read does not use it.
             default-directory (file-name-as-directory
                                (if remote (format "/ssh:%s:%s" remote root) root)))
+      (when base (setq-local sprig-review-base base))
       (sprig-review--reload))
     (pop-to-buffer buf)))
+
+(defun sprig-session-review-uncommitted ()
+  "Review the uncommitted changes: the working tree against HEAD (`d d')."
+  (interactive)
+  (sprig-session-review "HEAD"))
+
+(defun sprig-session-review-branch ()
+  "Review the whole branch, against main or master (`d m').
+Everything your branch has done to the default branch, commits and
+uncommitted work together, from where the two diverged: the scope a pull
+request would show.  What the base gained since you branched is excluded,
+which a plain `git diff main' would show inverted as reversions you never
+made."
+  (interactive)
+  (pcase-let ((`(,remote . ,root) (sprig-review--session-root)))
+    (sprig-session-review
+     (or (sprig-review--default-branch remote root)
+         (user-error
+          "No main or master branch here; `d b' names a base explicitly")))))
+
+(defun sprig-review--read-base (remote root current)
+  "Read a review base for the repo at ROOT on REMOTE, defaulting to CURRENT.
+Offers the default branch first, since reviewing the whole branch is the
+common reason to want anything but HEAD."
+  (let* ((branch (sprig-review--default-branch remote root))
+         (cands (delete-dups
+                 (delq nil (list branch "HEAD" current
+                                 (and branch (format "%s...HEAD" branch)))))))
+    (completing-read
+     (format "Review against (currently %s): " current)
+     cands nil nil nil nil current)))
+
+(defun sprig-session-review-base (base)
+  "Review against a BASE you name (`d b').
+Anything with `..' goes to `git diff' verbatim; a plain branch name
+reviews from where it and HEAD diverged (see `sprig-review--diff-args')."
+  (interactive
+   (pcase-let ((`(,remote . ,root) (sprig-review--session-root)))
+     (list (sprig-review--read-base remote root sprig-review-base))))
+  (sprig-session-review base))
+
+(transient-define-prefix sprig-session-review-dispatch ()
+  "Review the changes in this session's working tree."
+  [["Review"
+    ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
+    ("m" "the whole branch (against main/master)" sprig-session-review-branch)
+    ("b" "against a base you name" sprig-session-review-base)]])
+
+(defun sprig-review-set-base (base)
+  "Change what this review diffs against, and re-read it (`b').
+The drafts come across: they re-anchor by their recorded text the way `g'
+re-anchors them, so widening the scope mid-review keeps the comments you
+have already written."
+  (interactive
+   (progn
+     (unless (derived-mode-p 'sprig-review-mode)
+       (user-error "Not in a sprig review buffer"))
+     (list (sprig-review--read-base sprig-review--remote sprig-review--root
+                                    sprig-review-base))))
+  (setq-local sprig-review-base base)
+  (sprig-review--reload)
+  (message "sprig: reviewing against %s" base))
 
 (provide 'sprig-review)
 ;;; sprig-review.el ends here

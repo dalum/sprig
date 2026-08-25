@@ -3431,7 +3431,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-session-mode-map (kbd "a")   #'sprig-session-answer-dispatch)
 (define-key sprig-session-mode-map (kbd "C")   #'sprig-session-commit)
 (define-key sprig-session-mode-map (kbd "x")   #'sprig-session-run)
-(define-key sprig-session-mode-map (kbd "d")   #'sprig-session-review)
+(define-key sprig-session-mode-map (kbd "d")   #'sprig-session-review-dispatch)
 (define-key sprig-session-mode-map (kbd "RET") #'sprig-session-visit)
 (define-key sprig-session-mode-map (kbd "t")   #'sprig-session-set-title)
 (define-key sprig-session-mode-map (kbd "T")   #'sprig-session-title-dispatch)

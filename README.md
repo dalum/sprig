@@ -81,7 +81,7 @@ With `use-package` and a local checkout:
 2. `RET` (or `o`) on a row opens that session's session buffer, replaying its full history, on the host that row came from. `s n` starts a fresh session on the host of the group point is in, prompting for its working directory. That prompt suggests the directories the host's existing sessions already run in (no configuration, drawn from the same scan the navigator uses) and completes deeper paths live: on the local filesystem, or over SSH for a remote host. A prefix argument (`C-u s n`, or `C-u M-x sprig-session-open`) forces that one session onto the local machine wherever point sits. `s c` starts a fresh session and drops you straight into a prompt for its first message (`s p` the same but in plan mode), and `s f` forks the session at point into one of its own. `M-x sprig-session-open` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the session buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
 3. In the session buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
-5. `d` opens the **changeset review** over the working tree: navigate the changed files, `c c` to comment on a line or a marked region, `c p` to publish every comment to the agent in one turn. See [Changeset review](#changeset-review).
+5. `d` opens the **changeset review**: `d d` for the uncommitted changes, `d m` for the whole branch against main. Navigate the changed files, `c c` to comment on a line or a marked region, `c p` to publish every comment to the agent in one turn. See [Changeset review](#changeset-review).
 6. `c i` interrupts a streaming turn (in the navigator too, on the session at point). The CLI ends the turn cleanly and the session stays live, so the next send continues it with no resume; if the CLI does not honour the request within `sprig-interrupt-timeout`, Sprig falls back to killing the turn and the session resumes on the next send.
 
 The session lives on past the buffer: reopen it any time from the navigator, or resume it with `c o` there. Nothing is saved by you, because the CLI's log already is the record.
@@ -94,7 +94,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `sprig-session-open` | `M-x` | Open a session buffer (start fresh, or resume an id) |
 | `sprig-session-connect` | `M-x` | Start or resume the session owned by the current session buffer |
 | `sprig-session-open-file` | `M-x` | Replay a session-log `.jsonl` file directly (offline, read-only) |
-| `sprig-session-review` | `d` | Open the changeset review over the session's working tree |
+| `sprig-session-review` | `d d` | Open the changeset review over the session's working tree |
 | `sprig-login` | `M-x` | Log the CLI in for `sprig-config-directory`, in your local browser (once per host) |
 
 ### Navigator
@@ -191,7 +191,7 @@ The choice rides back to the agent and the question settles in place, showing wh
 
 ### Changeset review
 
-`d` opens the **changeset review**: everything changed in the working tree against `sprig-review-base` (default `HEAD`), as one navigable diff you annotate line by line and hand back in a single round. Where the session buffer reconstructs each edit from its tool payload turn by turn, this is the one cumulative diff of the whole tree, so it also catches a change made by `Bash` (a formatter, a `sed`, codegen) that has no payload to render from, and your own hand-authored edits alongside the agent's.
+`d` opens the **changeset review**: the changes as one navigable diff you annotate line by line and hand back in a single round. `d d` reviews the uncommitted changes, `d m` the whole branch against main or master, and `d b` against a base you name. Where the session buffer reconstructs each edit from its tool payload turn by turn, this is the one cumulative diff of the whole tree, so it also catches a change made by `Bash` (a formatter, a `sed`, codegen) that has no payload to render from, and your own hand-authored edits alongside the agent's.
 
 It opens on an index of the changed files with their stats, then each file as foldable unified hunks with old and new line numbers in the margin. `n` / `p` move, `TAB` folds, `g` re-reads the diff, `RET` visits the file at the line under point.
 
@@ -203,7 +203,19 @@ It opens on an index of the changed files with their stats, then each file as fo
 
 **`e` writes it yourself.** Some feedback is quicker to write than to describe. `e` on a hunk opens the staging buffer seeded with that hunk's new side, the context and added lines exactly as they stand on disk, and `C-c C-c` there asks the agent to apply your edit (see [Authoring by hand](#authoring-by-hand)). `c m` is the other escape hatch: a plain message about the marked hunks, for feedback about the change as a whole rather than a line of it.
 
-**What it diffs against.** `sprig-review-base` is passed to `git diff` verbatim. The default `HEAD` reviews the net *uncommitted* changes since the last commit. Set it to `"main"` to review everything the branch has changed on top of `main`, or to a range like `"main...HEAD"` for the committed changes alone. Untracked files are not shown, since `git diff` omits them.
+**What it diffs against.** Three scopes, and the buffer always says which one it is showing, next to the file count.
+
+| Verb | Scope | Runs |
+|---|---|---|
+| `d d` | Uncommitted changes: what the tree has that the last commit does not | `git diff HEAD` |
+| `d m` | The whole branch: commits *and* uncommitted work, from where you diverged | `git diff --merge-base main` |
+| `d b` | Whatever you name | as below |
+
+`d m` is the scope a pull request would show, and it is the one to reach for once the agent has been committing as it goes. It is deliberately not `git diff main`: that compares against main's *tip*, so every commit main has gained since you branched shows up inverted, as changes you appear to have reverted. Nor is it `git diff main...HEAD`, which fixes that but drops your uncommitted work. `--merge-base` is both halves and neither bug.
+
+`b` inside the review changes the scope in place and re-reads. Prefer it to reopening: the drafts come across, re-anchored by their recorded text the way `g` re-anchors them, so widening the scope halfway through a review keeps the comments you have already written. The base is buffer-local, so two reviews of one session can sit at different scopes.
+
+`sprig-review-base` sets the default (`"HEAD"`). A plain branch name there gets the `--merge-base` treatment above; anything containing `..` is passed to `git diff` verbatim, so `"main...HEAD"` still means exactly what git says it means. Untracked files are never shown, since `git diff` omits them.
 
 **Why the line numbers come from git.** An `Edit` payload knows the bytes it replaced but never the line they sat on, so line-anchored review can only ride the working-tree diff. Sprig reads that diff by running `git diff` itself, which is a read, not a change, so it keeps to the instruction invariant: every *write*, publish included, still goes through the agent. For a remote session the diff is read over the same SSH transport the navigator reads logs over, not TRAMP; only an optional `RET` file visit uses TRAMP.
 
@@ -250,7 +262,7 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-session-refresh-delay` | `0.1` | Floor, in seconds, for coalescing structural events before a re-render; widens toward the last render's cost on a big buffer |
 | `sprig-session-refresh-delay-max` | `0.5` | Ceiling, in seconds, on that adaptive coalescing delay; bounds how late a structural update can appear on a long history |
 | `sprig-session-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
-| `sprig-review-base` | `"HEAD"` | Git revision the `d` changeset review diffs against, passed to `git diff` verbatim (`"HEAD"` = uncommitted changes; `"main"` = everything on top of main; `"main...HEAD"` = committed changes only) |
+| `sprig-review-base` | `"HEAD"` | Default scope of the `d` changeset review. `"HEAD"` = uncommitted changes; a branch name = the whole branch from the merge base, commits and uncommitted work (`d m` picks this per review); anything with `..` goes to `git diff` verbatim. Buffer-local once `b` changes it |
 | `sprig-review-quote-lines` | `6` | Lines a published comment quotes back at the agent before truncating with an ellipsis |
 | `sprig-session-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
 | `sprig-session-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |

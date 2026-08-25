@@ -72,10 +72,47 @@ new file mode 100644
     (sprig-review-mode)
     (setq sprig-review--changes (sprig-parse-diff ""))
     (sprig-review--render)
-    (should (string-match-p "No changes against HEAD\\." (buffer-string)))
+    (should (string-match-p "No uncommitted changes, against HEAD\\."
+                            (buffer-string)))
     (should-not sprig--marks)))
 
 ;;;; Reading the tree
+
+(ert-deftest sprig-review-test-diff-args-pick-the-right-formulation ()
+  "The base decides which of git's three diffs the review actually runs.
+
+`main' must not become `git diff main': that compares against main's tip,
+so every commit main gained since the branch point shows up inverted, as
+changes the branch appears to have reverted.  `--merge-base' is the whole
+branch and nothing of main's own advance, uncommitted work included."
+  (should (equal (sprig-review--diff-args "HEAD") '("diff" "HEAD")))
+  (should (equal (sprig-review--diff-args "") '("diff" "HEAD")))
+  (should (equal (sprig-review--diff-args "main")
+                 '("diff" "--merge-base" "main")))
+  (should (equal (sprig-review--diff-args "origin/main")
+                 '("diff" "--merge-base" "origin/main")))
+  ;; An explicit range is the caller saying what they mean; leave it alone.
+  (should (equal (sprig-review--diff-args "main...HEAD")
+                 '("diff" "main...HEAD")))
+  (should (equal (sprig-review--diff-args "v1..v2") '("diff" "v1..v2"))))
+
+(ert-deftest sprig-review-test-scope-label-says-what-is-covered ()
+  "The base string does not say what it covers, so the buffer spells it out."
+  (should (equal (sprig-review--scope-label "HEAD")
+                 "uncommitted changes, against HEAD"))
+  (should (equal (sprig-review--scope-label "main")
+                 "whole branch, against main"))
+  (should (equal (sprig-review--scope-label "main...HEAD")
+                 "range main...HEAD")))
+
+(ert-deftest sprig-review-test-the-scope-is-on-screen ()
+  "You can always see what you are reviewing against, not just when empty."
+  (sprig-review-tests--with
+    (should (string-match-p "Changed files (2) +uncommitted changes, against HEAD"
+                            (buffer-string)))
+    (setq-local sprig-review-base "main")
+    (sprig-review--render)
+    (should (string-match-p "whole branch, against main" (buffer-string)))))
 
 (ert-deftest sprig-review-test-git-runs-local-and-remote ()
   "Local reads run git in the repo dir; a remote read rides the session's
@@ -96,7 +133,46 @@ SSH transport (`sprig--remote-sh'), not TRAMP, and honours the base."
       (let ((sprig-review-base "main"))
         (sprig-review--git "me@box" "/srv/app")
         (should (equal remote-host "me@box"))
-        (should (string-match-p "cd /srv/app && git diff main" remote-cmd))))))
+        (should (string-match-p "cd /srv/app && git diff --merge-base main"
+                                remote-cmd))))))
+
+(ert-deftest sprig-review-test-default-branch-prefers-the-local-name ()
+  "The forge's HEAD names the branch; the local one is what you would type."
+  (let ((answers '(("symbolic-ref" . "origin/main\n")
+                   ("rev-parse" . "abc123\n"))))
+    (cl-letf (((symbol-function 'sprig-review--run-git)
+               (lambda (_remote _root args)
+                 (or (cdr (assoc (car args) answers))
+                     (error "git %s failed" (car args))))))
+      (should (equal (sprig-review--default-branch nil "/repo") "main"))))
+  ;; With no remote HEAD, fall back to whichever of main/master exists.
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (lambda (_remote _root args)
+               (if (and (equal (car args) "rev-parse")
+                        (member "master" args))
+                   "abc\n"
+                 (error "no")))))
+    (should (equal (sprig-review--default-branch nil "/repo") "master")))
+  ;; Neither: the caller has to name a base itself.
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (lambda (&rest _) (error "no"))))
+    (should-not (sprig-review--default-branch nil "/repo"))))
+
+(ert-deftest sprig-review-test-set-base-keeps-the-drafts ()
+  "Widening the scope mid-review re-anchors the comments rather than
+losing them: that is the whole reason `b' lives in the review buffer."
+  (sprig-review-tests--with
+    (setq sprig-review--remote nil sprig-review--root "/repo"
+          sprig-review--drafts
+          (list (sprig-review-tests--draft "foo.el" 'new 2 2
+                                           "Keep me." '("  (baz))"))))
+    (cl-letf (((symbol-function 'sprig-review--git)
+               (lambda (&rest _) sprig-review-tests--diff)))
+      (sprig-review-set-base "main"))
+    (should (equal sprig-review-base "main"))
+    (should (= (length sprig-review--drafts) 1))
+    (should-not (plist-get (car sprig-review--drafts) :orphan))
+    (should (string-match-p "Keep me\\." (buffer-string)))))
 
 ;;;; What point resolves to
 
