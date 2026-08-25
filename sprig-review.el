@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.3.0
+;; Version: 0.4.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -91,6 +91,17 @@ exactly what git says it means."
   :type 'string
   :group 'sprig)
 
+(defcustom sprig-review-fontify-code t
+  "Syntax-highlight reviewed code in each file's own major mode.
+With this on the diff carries the colours you read the code in normally,
+and whether a line was added or removed is said by the gutter instead:
+the line-number columns and the `+'/`-' marker.  Reading a review is
+mostly reading code, so the code gets the syntax colours and the change
+gets the margin.  Nil renders the old way, plain text with the whole line
+coloured."
+  :type 'boolean
+  :group 'sprig)
+
 (defcustom sprig-review-default-branches
   '("main" "master" "trunk" "develop" "default")
   "Branch names `d m' considers the default branch, best first.
@@ -115,6 +126,14 @@ A long region is truncated to this many with an ellipsis."
 
 (defface sprig-review-lineno '((t :inherit line-number))
   "Face for the old/new line-number columns beside a reviewed diff line."
+  :group 'sprig)
+
+(defface sprig-review-lineno-added '((t :inherit diff-indicator-added))
+  "Face for the line number and marker of an added line."
+  :group 'sprig)
+
+(defface sprig-review-lineno-removed '((t :inherit diff-indicator-removed))
+  "Face for the line number and marker of a removed line."
   :group 'sprig)
 
 (defface sprig-review-hunk '((t :inherit font-lock-comment-face))
@@ -428,6 +447,91 @@ post-image, which is what the file on disk actually reads.  Signals a
                      (= (plist-get d :end) line)))
               sprig-review--drafts))
 
+;;;; Syntax highlighting
+;;
+;; A review is mostly reading code, so the code is fontified in its own
+;; file's major mode and the diff's own colours move to the gutter.  Each
+;; side of a hunk is fontified as one contiguous block rather than line by
+;; line, so a multi-line string or comment inside the hunk comes out right.
+;; A construct that *opens before* the hunk still cannot: we have the hunk,
+;; not the file, which is the price of never reading the tree beyond the
+;; diff (and the only thing that works unchanged for a remote tree).
+
+(defvar sprig-review--fontify-cache (make-hash-table :test 'equal :size 200)
+  "Memoises fontified diff blocks, keyed by (FILENAME . TEXT).
+A re-render fontifies every hunk afresh though only a comment moved, and
+comments move often, so the cache is what keeps `c c' cheap on a big diff.
+Keyed by the file's name rather than its path, since the name is all that
+picks the major mode.")
+
+(defconst sprig-review--fontify-cache-max 500
+  "Entries to hold before clearing `sprig-review--fontify-cache' wholesale.")
+
+(defun sprig-review--fontify-uncached (name text)
+  "Return TEXT fontified as a file called NAME would be, or TEXT on failure.
+Runs in a temp buffer with the mode hooks delayed, so none of the user's
+per-mode machinery (LSP, linters) starts up over a fragment of a diff, and
+with file-local variables off, since the text is not a file and should not
+be able to act like one."
+  (condition-case nil
+      (with-temp-buffer
+        (insert text)
+        (let ((buffer-file-name name)
+              (enable-local-variables nil)
+              (inhibit-message t))
+          (delay-mode-hooks (set-auto-mode t)))
+        (font-lock-ensure)
+        ;; Font-lock in this buffer would strip a plain `face' (see
+        ;; `sprig--adopt-faces'), so move them across before they travel.
+        (sprig--adopt-faces (buffer-string)))
+    (error text)))
+
+(defun sprig-review--fontify-block (file text)
+  "Return TEXT fontified for FILE, memoised; TEXT unchanged when off."
+  (if (or (not sprig-review-fontify-code) (string-empty-p text))
+      text
+    (let* ((name (file-name-nondirectory (or file "")))
+           (key (cons name text)))
+      (or (gethash key sprig-review--fontify-cache)
+          (progn
+            (when (> (hash-table-count sprig-review--fontify-cache)
+                     sprig-review--fontify-cache-max)
+              (clrhash sprig-review--fontify-cache))
+            (puthash key (sprig-review--fontify-uncached name text)
+                     sprig-review--fontify-cache))))))
+
+(defun sprig-review--fontify-side (file lines)
+  "Return the texts of LINES fontified together as one block, in order."
+  (if (null lines)
+      nil
+    (let ((text (mapconcat (lambda (l) (plist-get l :text)) lines "\n")))
+      (split-string (sprig-review--fontify-block file text) "\n"))))
+
+(defun sprig-review--hunk-texts (file uhunk)
+  "Return UHUNK's lines paired with their fontified text, as (LINE . TEXT).
+Each side is fontified as its own block: the pre-image for removed lines,
+the post-image for added and context ones.  Context appears in both, and
+takes the post-image's colours, since that is what the file now reads."
+  (let* ((lines (plist-get uhunk :lines))
+         (olds (seq-filter (lambda (l) (memq (plist-get l :kind) '(context del)))
+                           lines))
+         (news (seq-filter (lambda (l) (memq (plist-get l :kind) '(context add)))
+                           lines))
+         (oldf (sprig-review--fontify-side file olds))
+         (newf (sprig-review--fontify-side file news))
+         (oi 0) (ni 0))
+    (mapcar
+     (lambda (l)
+       (cons l
+             (pcase (plist-get l :kind)
+               ('del (prog1 (or (nth oi oldf) (plist-get l :text))
+                       (setq oi (1+ oi))))
+               ('add (prog1 (or (nth ni newf) (plist-get l :text))
+                       (setq ni (1+ ni))))
+               (_ (prog1 (or (nth ni newf) (plist-get l :text))
+                    (setq oi (1+ oi) ni (1+ ni)))))))
+     lines)))
+
 ;;;; Rendering
 
 (defun sprig-review--scope-label (base)
@@ -461,17 +565,35 @@ The base alone does not say: `main' means something quite different from
       (dolist (l (split-string (plist-get draft :text) "\n"))
         (insert "        " (sprig--face l 'sprig-review-comment-body) "\n")))))
 
-(defun sprig-review--insert-uline (file line)
-  "Insert one unified diff LINE of FILE, with its number columns and drafts."
+(defun sprig-review--insert-uline (file line text)
+  "Insert one unified diff LINE of FILE, whose code reads TEXT.
+The gutter says what happened to the line and the code keeps its own
+syntax colours: the number column that *has* a number on the changed side
+carries the added/removed face, along with the `+'/`-' marker.  The marker
+stays because colour alone should not be the only thing saying which way a
+line went."
   (let* ((kind (plist-get line :kind))
          (marker (pcase kind ('add "+") ('del "-") (_ " ")))
-         (face (pcase kind ('add 'sprig-diff-added) ('del 'sprig-diff-removed)
-                      (_ 'default)))
+         (gutter (pcase kind
+                   ('add 'sprig-review-lineno-added)
+                   ('del 'sprig-review-lineno-removed)
+                   (_ 'sprig-review-lineno)))
+         (plain (if sprig-review-fontify-code
+                    text
+                  ;; Unfontified, the line itself has to carry the colour.
+                  (sprig--face text (pcase kind
+                                      ('add 'sprig-diff-added)
+                                      ('del 'sprig-diff-removed)
+                                      (_ 'default)))))
          (beg (point)))
-    (insert (sprig-review--lineno (plist-get line :old))
-            (sprig-review--lineno (plist-get line :new))
-            "  "
-            (sprig--face (concat marker (plist-get line :text)) face)
+    (insert (sprig--face (format "%5s" (or (plist-get line :old) ""))
+                         (if (eq kind 'del) gutter 'sprig-review-lineno))
+            (sprig--face (format "%5s" (or (plist-get line :new) ""))
+                         (if (eq kind 'add) gutter 'sprig-review-lineno))
+            " "
+            (sprig--face marker gutter)
+            " "
+            plain
             "\n")
     ;; The whole line carries what it is, so a comment at point (or over a
     ;; region) can read its file, side, and number straight off the buffer.
@@ -486,7 +608,9 @@ The base alone does not say: `main' means something quite different from
       (sprig-review--insert-draft d))))
 
 (defun sprig-review--insert-uhunk (file uhunk)
-  "Insert UHUNK of FILE as a foldable section headed by its `@@' line."
+  "Insert UHUNK of FILE as a foldable section headed by its `@@' line.
+Both sides are fontified in one pass here rather than per line, so a
+construct spanning several lines of the hunk comes out right."
   (magit-insert-section (sprig-review-hunk uhunk)
     (magit-insert-heading
       (sprig--face
@@ -495,8 +619,8 @@ The base alone does not say: `main' means something quite different from
                (plist-get uhunk :new-start) (plist-get uhunk :new-count)
                (if-let ((h (plist-get uhunk :heading))) (concat " " h) ""))
        'sprig-review-hunk))
-    (dolist (l (plist-get uhunk :lines))
-      (sprig-review--insert-uline file l))))
+    (pcase-dolist (`(,l . ,text) (sprig-review--hunk-texts file uhunk))
+      (sprig-review--insert-uline file l text))))
 
 (defun sprig-review--insert-orphans (file)
   "Insert FILE's orphaned drafts, if any, above its hunks.

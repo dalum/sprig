@@ -195,6 +195,8 @@ The choice rides back to the agent and the question settles in place, showing wh
 
 It opens on an index of the changed files with their stats, then each file as foldable unified hunks with old and new line numbers in the margin. `n` / `p` move, `TAB` folds, `g` re-reads the diff, `RET` visits the file at the line under point.
 
+**The code is syntax-highlighted and the change lives in the gutter.** Reviewing is mostly reading code, so the code carries the colours you read it in normally, in the file's own major mode, and whether a line was added or removed is said by the line-number columns and the `+`/`-` marker instead of by painting the whole line. A removed line colours its old-side number, an added one its new-side number, and the marker stays so colour is never the only signal. Each side of a hunk is fontified as one block, so a multi-line string or comment inside the hunk comes out right; one that opens *before* the hunk cannot, since only the diff is read and never the file. Results are memoised, so re-rendering after every comment stays cheap. `sprig-review-fontify-code` turns it off, which puts the colour back on the whole line.
+
 **Comments are drafts.** `c c` comments on the line at point, or on the region if one is active, in a small buffer (`C-c C-c` files it, `C-c C-k` throws it away). The comment renders inline under the line it annotates. Nothing reaches the agent until you publish, so a review is composed as a whole rather than dribbled out a message at a time. `c e` re-edits the draft at point, `k` takes it back, and `c Q` discards the lot.
 
 **`c p` publishes.** Every draft goes out in one turn, grouped by file and ordered by line, each quoting the lines it annotates so the agent can find them without guessing. It opens the ordinary compose buffer first, so you write the covering note and see exactly what goes out before it does; `C-c C-c` in the session buffer does the same.
@@ -265,6 +267,7 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-session-refresh-delay-max` | `0.5` | Ceiling, in seconds, on that adaptive coalescing delay; bounds how late a structural update can appear on a long history |
 | `sprig-session-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
 | `sprig-review-base` | `"HEAD"` | Default scope of the `d` changeset review. `"HEAD"` = uncommitted changes; a branch name = the whole branch from the merge base, commits and uncommitted work (`d m` picks this per review); anything with `..` goes to `git diff` verbatim. Buffer-local once `b` changes it |
+| `sprig-review-fontify-code` | `t` | Syntax-highlight reviewed code in each file's own major mode, and move the added/removed colour to the line-number gutter. Nil colours the whole line instead |
 | `sprig-review-default-branches` | `("main" "master" "trunk" "develop" "default")` | Names `d m` looks for as the default branch, best first, local and remote-tracking. A tie is broken by `origin/HEAD`, not by this order |
 | `sprig-review-quote-lines` | `6` | Lines a published comment quotes back at the agent before truncating with an ellipsis |
 | `sprig-session-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |

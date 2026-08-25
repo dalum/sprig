@@ -76,6 +76,84 @@ new file mode 100644
                             (buffer-string)))
     (should-not sprig--marks)))
 
+(defun sprig-review-tests--face-on (needle)
+  "Return the `font-lock-face' on the first character of NEEDLE."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward needle)
+    (get-text-property (match-beginning 0) 'font-lock-face)))
+
+(ert-deftest sprig-review-test-code-is-syntax-highlighted ()
+  "The code carries its own major mode's faces, not the diff's."
+  (sprig-review-tests--with
+    ;; `defun' in foo.el is elisp, so it fontifies as a keyword.  The diff
+    ;; faces must not be what is on the code.
+    (let ((face (sprig-review-tests--face-on "defun foo")))
+      (should face)
+      (should-not (memq 'sprig-diff-added (ensure-list face)))
+      (should-not (memq 'sprig-diff-removed (ensure-list face))))))
+
+(ert-deftest sprig-review-test-the-gutter-carries-the-change ()
+  "Added and removed are said by the line-number columns and the marker,
+so colour is not the only signal and the code keeps its syntax colours."
+  (sprig-review-tests--with
+    (goto-char (point-min))
+    ;; The added line's *new* number is the one that exists, so it is the
+    ;; one coloured; the blank old column stays plain.
+    (search-forward "(baz))")
+    (beginning-of-line)
+    (should (eq (get-text-property (+ (point) 4) 'font-lock-face)
+                'sprig-review-lineno))
+    (should (eq (get-text-property (+ (point) 9) 'font-lock-face)
+                'sprig-review-lineno-added))
+    (goto-char (point-min))
+    (search-forward "(bar))")
+    (beginning-of-line)
+    (should (eq (get-text-property (+ (point) 4) 'font-lock-face)
+                'sprig-review-lineno-removed))
+    (should (eq (get-text-property (+ (point) 9) 'font-lock-face)
+                'sprig-review-lineno))))
+
+(ert-deftest sprig-review-test-fontify-can-be-turned-off ()
+  "With highlighting off the whole line carries the diff colour again,
+so the buffer never ends up with no signal at all."
+  (let ((sprig-review-fontify-code nil))
+    (sprig-review-tests--with
+      (should (memq 'sprig-diff-added
+                    (ensure-list (sprig-review-tests--face-on "(baz))"))))
+      (should (memq 'sprig-diff-removed
+                    (ensure-list (sprig-review-tests--face-on "(bar))")))))))
+
+(ert-deftest sprig-review-test-fontify-spans-the-hunk-not-the-line ()
+  "Each side is fontified as one block, so a construct crossing lines
+inside the hunk resolves; line-by-line fontification would not."
+  (let* ((text "def f():\n    return \"\"\"\n    still a string\n    \"\"\"")
+         (out (sprig-review--fontify-uncached "a.py" text))
+         (at (lambda (needle)
+               (get-text-property (string-match (regexp-quote needle) out)
+                                  'font-lock-face out))))
+    (should (eq (funcall at "still a string") 'font-lock-string-face))))
+
+(ert-deftest sprig-review-test-fontify-survives-an-unknown-file ()
+  "An unrecognised name is not an error; it just comes back plain."
+  (should (equal (sprig-review--fontify-uncached "x.zzzz" "a b c") "a b c"))
+  (let ((sprig-review-fontify-code nil))
+    (should (equal (sprig-review--fontify-block "a.py" "def f():") "def f():"))))
+
+(ert-deftest sprig-review-test-fontify-is-memoised ()
+  "A re-render must not re-fontify: comments move often, hunks do not."
+  (clrhash sprig-review--fontify-cache)
+  (let ((calls 0))
+    (cl-letf* ((orig (symbol-function 'sprig-review--fontify-uncached))
+               ((symbol-function 'sprig-review--fontify-uncached)
+                (lambda (&rest args) (cl-incf calls) (apply orig args))))
+      (sprig-review--fontify-block "a.py" "def f():")
+      (sprig-review--fontify-block "a.py" "def f():")
+      (should (= calls 1))
+      ;; The same text in another language is a different question.
+      (sprig-review--fontify-block "a.el" "def f():")
+      (should (= calls 2)))))
+
 ;;;; Reading the tree
 
 (ert-deftest sprig-review-test-diff-args-pick-the-right-formulation ()
@@ -236,7 +314,7 @@ losing them: that is the whole reason `b' lives in the review buffer."
 (ert-deftest sprig-review-test-point-resolves-to-a-line ()
   "Point on a rendered line yields its file, side, number, and text."
   (sprig-review-tests--with
-    (sprig-review-tests--goto "+  (baz))")
+    (sprig-review-tests--goto "(baz))")
     (pcase-let ((`(,file ,side ,start ,end ,anchor)
                  (sprig-review--region-lines)))
       (should (equal file "foo.el"))
@@ -248,7 +326,7 @@ losing them: that is the whole reason `b' lives in the review buffer."
 (ert-deftest sprig-review-test-a-removed-line-anchors-to-the-old-side ()
   "A removal exists on no other side, so it anchors to the pre-image."
   (sprig-review-tests--with
-    (sprig-review-tests--goto "-  (bar))")
+    (sprig-review-tests--goto "(bar))")
     (pcase-let ((`(,_file ,side ,start ,_end ,anchor)
                  (sprig-review--region-lines)))
       (should (eq side 'old))
@@ -261,7 +339,7 @@ takes the whole span rather than either end of it."
   (sprig-review-tests--with
     (sprig-review-tests--goto "(defun foo ()")
     (let ((beg (point)))
-      (sprig-review-tests--goto "+  (baz))")
+      (sprig-review-tests--goto "(baz))")
       (set-mark beg)
       (goto-char (line-end-position))
       (activate-mark)
@@ -319,7 +397,7 @@ the index, so an annotated review reads back as one document."
   "The comment buffer files its draft on the review, not to the agent."
   (sprig-review-tests--with
     (let ((review (current-buffer)))
-      (sprig-review-tests--goto "+  (baz))")
+      (sprig-review-tests--goto "(baz))")
       (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
         (sprig-review-comment))
       (unwind-protect
@@ -490,7 +568,7 @@ its context and added lines, never the removed ones."
     (unwind-protect
         (sprig-review-tests--with
           (setq sprig-review--session session)
-          (sprig-review-tests--goto "+  (baz))")
+          (sprig-review-tests--goto "(baz))")
           (cl-letf (((symbol-function 'sprig-session--open-stage-buffer)
                      (lambda (_review file anchor) (setq seeded (cons file anchor)))))
             (sprig-review-stage-hunk))
