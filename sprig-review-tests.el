@@ -136,27 +136,84 @@ SSH transport (`sprig--remote-sh'), not TRAMP, and honours the base."
         (should (string-match-p "cd /srv/app && git diff --merge-base main"
                                 remote-cmd))))))
 
-(ert-deftest sprig-review-test-default-branch-prefers-the-local-name ()
-  "The forge's HEAD names the branch; the local one is what you would type."
-  (let ((answers '(("symbolic-ref" . "origin/main\n")
-                   ("rev-parse" . "abc123\n"))))
+(defun sprig-review-tests--git-stub (refs &optional head)
+  "Return a `sprig-review--run-git' stub answering with REFS and HEAD.
+REFS are the short names `for-each-ref' finds; HEAD is what
+`origin/HEAD' resolves to, or nil when it is not set."
+  (lambda (_remote _root args)
+    (pcase (car args)
+      ("for-each-ref"
+       ;; Only report refs whose pattern was actually asked for, the way
+       ;; git does: a pattern matching nothing is simply absent.
+       (concat (string-join
+                (seq-filter
+                 (lambda (r)
+                   (seq-some (lambda (p)
+                               (or (equal p (concat "refs/heads/" r))
+                                   (string-suffix-p
+                                    (concat "/" (car (last (split-string r "/"))))
+                                    p)))
+                             (cdr args)))
+                 refs)
+                "\n")
+               "\n"))
+      ("symbolic-ref" (or head (error "no origin/HEAD")))
+      (_ (error "unexpected git %S" args)))))
+
+(ert-deftest sprig-review-test-default-branch-finds-either-name ()
+  "master and main are both ordinary answers, and so is only-a-remote-one."
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("main"))))
+    (should (equal (sprig-review--default-branch nil "/r") "main")))
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("master"))))
+    (should (equal (sprig-review--default-branch nil "/r") "master")))
+  ;; No local branch at all: the remote-tracking one still diffs fine, and
+  ;; returning nil here was the old bug.
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("origin/master"))))
+    (should (equal (sprig-review--default-branch nil "/r") "origin/master"))))
+
+(ert-deftest sprig-review-test-default-branch-prefers-the-local-ref ()
+  "Given both, take the local name: it is what you would type, and it
+diffs without the remote having been fetched."
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("main" "origin/main"))))
+    (should (equal (sprig-review--default-branch nil "/r") "main"))))
+
+(ert-deftest sprig-review-test-both-names-are-broken-by-origin-head ()
+  "A repo part-way through renaming carries both, and only the forge knows
+which one it means.  The list's own order must not decide it."
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("main" "master") "origin/master")))
+    (should (equal (sprig-review--default-branch nil "/r") "master")))
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("main" "master") "origin/main")))
+    (should (equal (sprig-review--default-branch nil "/r") "main")))
+  ;; With no origin/HEAD to ask, the list order is the tie-break left.
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (sprig-review-tests--git-stub '("main" "master"))))
+    (should (equal (sprig-review--default-branch nil "/r") "main"))))
+
+(ert-deftest sprig-review-test-default-branch-takes-an-unusual-name ()
+  "A project calling its default something else is configuration, and
+`origin/HEAD' still answers for one that is not on the list at all."
+  (let ((sprig-review-default-branches '("main" "master" "trunk")))
     (cl-letf (((symbol-function 'sprig-review--run-git)
-               (lambda (_remote _root args)
-                 (or (cdr (assoc (car args) answers))
-                     (error "git %s failed" (car args))))))
-      (should (equal (sprig-review--default-branch nil "/repo") "main"))))
-  ;; With no remote HEAD, fall back to whichever of main/master exists.
+               (sprig-review-tests--git-stub '("trunk"))))
+      (should (equal (sprig-review--default-branch nil "/r") "trunk"))))
   (cl-letf (((symbol-function 'sprig-review--run-git)
-             (lambda (_remote _root args)
-               (if (and (equal (car args) "rev-parse")
-                        (member "master" args))
-                   "abc\n"
-                 (error "no")))))
-    (should (equal (sprig-review--default-branch nil "/repo") "master")))
-  ;; Neither: the caller has to name a base itself.
+             (sprig-review-tests--git-stub '() "origin/release")))
+    (should (equal (sprig-review--default-branch nil "/r") "origin/release"))))
+
+(ert-deftest sprig-review-test-default-branch-gives-up-cleanly ()
+  "Nothing found and nothing to ask: nil, so `d m' can prompt instead."
   (cl-letf (((symbol-function 'sprig-review--run-git)
-             (lambda (&rest _) (error "no"))))
-    (should-not (sprig-review--default-branch nil "/repo"))))
+             (sprig-review-tests--git-stub '())))
+    (should-not (sprig-review--default-branch nil "/r")))
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (lambda (&rest _) (error "not a repo"))))
+    (should-not (sprig-review--default-branch nil "/r"))))
 
 (ert-deftest sprig-review-test-set-base-keeps-the-drafts ()
   "Widening the scope mid-review re-anchors the comments rather than

@@ -208,10 +208,12 @@ It opens on an index of the changed files with their stats, then each file as fo
 | Verb | Scope | Runs |
 |---|---|---|
 | `d d` | Uncommitted changes: what the tree has that the last commit does not | `git diff HEAD` |
-| `d m` | The whole branch: commits *and* uncommitted work, from where you diverged | `git diff --merge-base main` |
+| `d m` | The whole branch: commits *and* uncommitted work, from where you diverged | `git diff --merge-base <default>` |
 | `d b` | Whatever you name | as below |
 
 `d m` is the scope a pull request would show, and it is the one to reach for once the agent has been committing as it goes. It is deliberately not `git diff main`: that compares against main's *tip*, so every commit main has gained since you branched shows up inverted, as changes you appear to have reverted. Nor is it `git diff main...HEAD`, which fixes that but drops your uncommitted work. `--merge-base` is both halves and neither bug.
+
+**`d m` finds the default branch rather than assuming one.** Some repos call it `main`, some `master`, some something else, and some carry both part-way through a rename. It looks for every name in `sprig-review-default-branches` (`main`, `master`, `trunk`, `develop`, `default`) as a local branch and as any remote's, in one `git for-each-ref`. One match wins outright. Several, which is the both-`main`-and-`master` case, are broken by the forge's own `origin/HEAD` rather than by list order, so a repo mid-rename resolves to the branch it actually uses. None still asks `origin/HEAD`, which catches a project whose default is `release`. A local branch is preferred over a remote-tracking one, since it is what you would type and it diffs without a fetch, but `origin/main` alone is a perfectly good base and is used when there is no local branch. If nothing answers, `d m` prompts you for a base instead of refusing.
 
 `b` inside the review changes the scope in place and re-reads. Prefer it to reopening: the drafts come across, re-anchored by their recorded text the way `g` re-anchors them, so widening the scope halfway through a review keeps the comments you have already written. The base is buffer-local, so two reviews of one session can sit at different scopes.
 
@@ -263,6 +265,7 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-session-refresh-delay-max` | `0.5` | Ceiling, in seconds, on that adaptive coalescing delay; bounds how late a structural update can appear on a long history |
 | `sprig-session-expand-diffs` | `nil` | Render a diff-bearing tool call open instead of folded to its heading |
 | `sprig-review-base` | `"HEAD"` | Default scope of the `d` changeset review. `"HEAD"` = uncommitted changes; a branch name = the whole branch from the merge base, commits and uncommitted work (`d m` picks this per review); anything with `..` goes to `git diff` verbatim. Buffer-local once `b` changes it |
+| `sprig-review-default-branches` | `("main" "master" "trunk" "develop" "default")` | Names `d m` looks for as the default branch, best first, local and remote-tracking. A tie is broken by `origin/HEAD`, not by this order |
 | `sprig-review-quote-lines` | `6` | Lines a published comment quotes back at the agent before truncating with an ellipsis |
 | `sprig-session-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
 | `sprig-session-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |

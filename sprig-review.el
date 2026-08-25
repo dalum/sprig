@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.2.0
+;; Version: 0.3.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -89,6 +89,18 @@ Anything containing `..' is passed to `git diff' verbatim, so an explicit
 range (`\"main...HEAD\"' for the committed changes alone) still means
 exactly what git says it means."
   :type 'string
+  :group 'sprig)
+
+(defcustom sprig-review-default-branches
+  '("main" "master" "trunk" "develop" "default")
+  "Branch names `d m' considers the default branch, best first.
+Sprig looks for each as a local branch and as any remote's, and asks the
+forge's own `origin/HEAD' to break a tie when several exist, so a repo
+that has both `main' and `master' resolves to whichever one it actually
+uses rather than whichever this list happens to name first.  Add yours if
+your project calls it something else; `d b' names a base directly and
+needs no configuration at all."
+  :type '(repeat string)
   :group 'sprig)
 
 (defcustom sprig-review-quote-lines 6
@@ -212,32 +224,75 @@ them would touch the index."
   (sprig-review--run-git remote root
                          (sprig-review--diff-args sprig-review-base)))
 
+(defun sprig-review--ref-branch (ref)
+  "Return the branch name REF points at, dropping any remote prefix.
+`origin/main' and `main' are the same branch for our purposes.  Safe on
+the refs we build ourselves, which always end in a candidate name."
+  (car (last (split-string ref "/"))))
+
+(defun sprig-review--candidate-refs (remote root)
+  "Return the `sprig-review-default-branches' that exist at ROOT on REMOTE.
+Local refs and any remote's, short names, in one `for-each-ref': patterns
+that match nothing are simply absent from the output rather than an
+error, so a single call can ask about every candidate at once.  That
+matters over SSH, where each git call is a round trip."
+  (let* ((pats (apply #'append
+                      (mapcar (lambda (b)
+                                (list (concat "refs/heads/" b)
+                                      (concat "refs/remotes/*/" b)))
+                              sprig-review-default-branches)))
+         (out (ignore-errors
+                (sprig-review--run-git
+                 remote root
+                 (append '("for-each-ref" "--format=%(refname:short)") pats)))))
+    (and out (split-string (string-trim out) "\n" t))))
+
+(defun sprig-review--rank-refs (refs)
+  "Order REFS by `sprig-review-default-branches', local before remote.
+Local first because it is what you would type and it diffs without the
+remote being fetched."
+  (let (out)
+    (dolist (b sprig-review-default-branches)
+      (when (member b refs) (push b out))
+      (dolist (r refs)
+        (when (and (not (equal r b)) (string-suffix-p (concat "/" b) r))
+          (push r out))))
+    (nreverse out)))
+
+(defun sprig-review--origin-head (remote root)
+  "Return the branch `origin/HEAD' points at, or nil.
+The forge's own answer to which branch is default, and the only reliable
+one when a repo carries both `main' and `master'.  Often absent: `git
+init' never sets it and `git clone' can leave it stale."
+  (let ((out (ignore-errors
+               (sprig-review--run-git
+                remote root '("symbolic-ref" "--quiet" "--short"
+                              "refs/remotes/origin/HEAD")))))
+    (when out
+      (let ((ref (string-trim out)))
+        (unless (string-empty-p ref) ref)))))
+
 (defun sprig-review--default-branch (remote root)
-  "Return the repository's default branch at ROOT on REMOTE, or nil.
-Asks the remote-tracking HEAD first, since that is what the forge says,
-and falls back to whichever of `main' or `master' exists.  Used only to
-offer a sensible first candidate when `b' asks for a base."
-  (or (let ((out (ignore-errors
-                   (sprig-review--run-git
-                    remote root
-                    '("symbolic-ref" "--quiet" "--short"
-                      "refs/remotes/origin/HEAD")))))
-        (when out
-          (let* ((ref (string-trim out))
-                 (short (replace-regexp-in-string "\\`origin/" "" ref)))
-            (unless (string-empty-p ref)
-              ;; Prefer the local branch when there is one: it is what the
-              ;; user types, and it diffs without needing the remote fetched.
-              (if (ignore-errors
-                    (sprig-review--run-git
-                     remote root (list "rev-parse" "--verify" "--quiet" short)))
-                  short
-                ref)))))
-      (seq-find (lambda (b)
-                  (ignore-errors
-                    (sprig-review--run-git
-                     remote root (list "rev-parse" "--verify" "--quiet" b))))
-                '("main" "master"))))
+  "Return the default branch at ROOT on REMOTE, or nil if there is no telling.
+Costs one git call in the ordinary case and two when the answer is
+genuinely ambiguous:
+
+- exactly one of `sprig-review-default-branches' exists, so take it;
+- several do (a repo part-way through renaming `master' to `main'), so
+  ask `origin/HEAD' which one the forge means, falling back to the list's
+  own order when it cannot say;
+- none do, so ask `origin/HEAD' anyway, since a project calling its
+  default `release' is beyond guessing but not beyond asking."
+  (let* ((refs (sprig-review--rank-refs (sprig-review--candidate-refs remote root)))
+         (names (delete-dups (mapcar #'sprig-review--ref-branch refs))))
+    (cond
+     ((null refs) (sprig-review--origin-head remote root))
+     ((null (cdr names)) (car refs))
+     (t (or (when-let* ((head (sprig-review--origin-head remote root))
+                        (want (sprig-review--ref-branch head)))
+              (seq-find (lambda (r) (equal (sprig-review--ref-branch r) want))
+                        refs))
+            (car refs))))))
 
 ;;;; Drafts: anchoring
 ;;
@@ -913,17 +968,20 @@ when the tree is remote."
 
 (defun sprig-session-review-branch ()
   "Review the whole branch, against main or master (`d m').
-Everything your branch has done to the default branch, commits and
+Everything your branch has done to the default branch (`main', `master',\nor whatever `sprig-review-default-branches' names), commits and
 uncommitted work together, from where the two diverged: the scope a pull
 request would show.  What the base gained since you branched is excluded,
 which a plain `git diff main' would show inverted as reversions you never
 made."
   (interactive)
   (pcase-let ((`(,remote . ,root) (sprig-review--session-root)))
-    (sprig-session-review
-     (or (sprig-review--default-branch remote root)
-         (user-error
-          "No main or master branch here; `d b' names a base explicitly")))))
+    (if-let ((branch (sprig-review--default-branch remote root)))
+        (sprig-session-review branch)
+      ;; Undetectable is not a dead end: ask, rather than send you off to
+      ;; find another key.
+      (message "sprig: no default branch found; name one")
+      (sprig-session-review (sprig-review--read-base remote root
+                                                     sprig-review-base)))))
 
 (defun sprig-review--read-base (remote root current)
   "Read a review base for the repo at ROOT on REMOTE, defaulting to CURRENT.
@@ -950,7 +1008,7 @@ reviews from where it and HEAD diverged (see `sprig-review--diff-args')."
   "Review the changes in this session's working tree."
   [["Review"
     ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
-    ("m" "the whole branch (against main/master)" sprig-session-review-branch)
+    ("m" "the whole branch (against main, master, …)" sprig-session-review-branch)
     ("b" "against a base you name" sprig-session-review-base)]])
 
 (defun sprig-review-set-base (base)
