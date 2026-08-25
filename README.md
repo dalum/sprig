@@ -30,7 +30,7 @@ Because the whole protocol is plain stdio, running the session on a remote host 
 
 ## Install
 
-Put the three `.el` files on your `load-path`, then:
+Put the `.el` files on your `load-path`, then:
 
 ```elisp
 (require 'sprig)
@@ -76,7 +76,7 @@ With `use-package` and a local checkout:
 ## Usage
 
 1. `M-x sprig-status` opens the navigator, listing every stored session, newest first and grouped by the host it runs on (`local`, plus a `remote you@your-server` group for each host in `sprig-remotes`); `/` narrows it to a project or title.
-2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history, on the host that row came from. `s n` starts a fresh session on the host of the group point is in, prompting for its working directory. That prompt suggests the directories the host's existing sessions already run in (no configuration, drawn from the same scan the navigator uses) and completes deeper paths live: on the local filesystem, or over SSH for a remote host. A prefix argument (`C-u s n`, or `C-u M-x sprig-session-session`) forces that one session onto the local machine wherever point sits. `s c` starts a fresh session and drops you straight into a prompt for its first message (`s p` the same but in plan mode), and `s f` forks the session at point into one of its own. `M-x sprig-session-session` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the review buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
+2. `RET` (or `o`) on a row opens that session's review buffer, replaying its full history, on the host that row came from. `s n` starts a fresh session on the host of the group point is in, prompting for its working directory. That prompt suggests the directories the host's existing sessions already run in (no configuration, drawn from the same scan the navigator uses) and completes deeper paths live: on the local filesystem, or over SSH for a remote host. A prefix argument (`C-u s n`, or `C-u M-x sprig-session-open`) forces that one session onto the local machine wherever point sits. `s c` starts a fresh session and drops you straight into a prompt for its first message (`s p` the same but in plan mode), and `s f` forks the session at point into one of its own. `M-x sprig-session-open` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the review buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
 3. In the review buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
 5. `c i` interrupts a streaming turn (in the navigator too, on the session at point). The CLI ends the turn cleanly and the session stays live, so the next send continues it with no resume; if the CLI does not honour the request within `sprig-interrupt-timeout`, Sprig falls back to killing the turn and the session resumes on the next send.
@@ -88,7 +88,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | Command | Binding | Does |
 |---|---|---|
 | `sprig-status` | `M-x` | Open the navigator listing stored sessions and their status |
-| `sprig-session-session` | `M-x` | Open a review buffer for a session (start fresh, or resume an id) |
+| `sprig-session-open` | `M-x` | Open a review buffer for a session (start fresh, or resume an id) |
 | `sprig-session-connect` | `M-x` | Start or resume the session owned by the current review buffer |
 | `sprig-session-open-file` | `M-x` | Review a session-log `.jsonl` file directly (offline, read-only) |
 | `sprig-login` | `M-x` | Log the CLI in for `sprig-config-directory`, in your local browser (once per host) |
@@ -161,7 +161,7 @@ It is also the steering surface. Marking is the one selection primitive; a verb 
 
 `c c` opens a compose buffer (`C-c C-c` sends, `C-c C-k` cancels); any marked sections are attached to the message as context, and the first send starts or resumes the session. `c p` sends the turn in plan mode (the agent plans rather than acts), switched over the session's control channel. The mode is **sticky**, the way Claude Code's own is: a plain `c c` afterwards carries on in plan mode rather than dropping out of it, so steering a plan stays a plan. You leave plan mode deliberately, by approving an `ExitPlanMode` plan or with the `P` transient (`P a` back to auto, `P e` accept-edits), which is also how you set the mode by hand at any time. The header shows the permission mode while it is not the normal one, and the mode line carries it too (`[plan]`, `[acceptEdits]`, ...).
 
-Where `c` steers the conversation the buffer already owns, `s` is where a session of its own begins. `s n` starts a fresh conversation in this session's directory, leaving this one alone; `s c` does the same but opens its first-message prompt straight away (`s p` in plan mode); `M-x sprig-session-session` asks for a different directory. `s f` **forks**: the new buffer replays this history and carries it on under a session id of its own, so the two diverge from here and the parent's log is never written to again. The CLI forks from the end of a session, so the branch starts from where the conversation now stands, not from point; the fork itself is only made on its first send, until which the new buffer is just a replay.
+Where `c` steers the conversation the buffer already owns, `s` is where a session of its own begins. `s n` starts a fresh conversation in this session's directory, leaving this one alone; `s c` does the same but opens its first-message prompt straight away (`s p` in plan mode); `M-x sprig-session-open` asks for a different directory. `s f` **forks**: the new buffer replays this history and carries it on under a session id of its own, so the two diverge from here and the parent's log is never written to again. The CLI forks from the end of a session, so the branch starts from where the conversation now stands, not from point; the fork itself is only made on its first send, until which the new buffer is just a replay.
 
 **`c c` steers the turn already in flight**, rather than waiting it out or killing it. The CLI's stdin stays open for the length of a turn, so the message is handed to the agent at its next tool-call boundary: it reads it and changes course *within the same turn*, no interrupt and no restart. Until the agent reaches that boundary the message is not a transcript turn yet, so it **floats** pinned just above the state line, tinted as yours and marked `⤷` as not-yet-taken; it folds into the conversation at the point the agent actually took it, rather than splitting the streaming reply in two. Watching a turn head the wrong way, `c c` is the cheap correction and `c i` the expensive one. With no turn running the same `c c` just opens one, so there is nothing to decide and nothing to remember: you say the thing, and the message goes to the agent as directly as it can.
 
@@ -283,7 +283,7 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 
 ## Development
 
-After editing any of the three source files, `M-x sprig-reload` re-loads all of them from disk in dependency order, so a change takes effect without restarting Emacs. Open buffers keep their state and pick up the new definitions. Edited faces take effect too: `defface` is a no-op on an already-defined face, so the reload undefines sprig's own faces first, and a face you have customized or themed keeps that.
+After editing any of the source files, `M-x sprig-reload` re-loads all of them from disk in dependency order, so a change takes effect without restarting Emacs. Open buffers keep their state and pick up the new definitions. Edited faces take effect too: `defface` is a no-op on an already-defined face, so the reload undefines sprig's own faces first, and a face you have customized or themed keeps that.
 
 `sprig-tests.el` is an ERT suite covering the process-free layers (the stream-json transport and its event vocabulary, command construction, the review model and tool-payload diff engine, the stored-session log parser, and the navigator's session enumeration). It needs no extra dependencies and runs offline, starting no session:
 
@@ -296,8 +296,9 @@ The review buffer (`sprig-session-mode.el`) has its own suite in `sprig-session-
 ```
 emacs -Q --batch -L . -L .deps/compat -L .deps/cond-let -L .deps/llama \
       -L .deps/magit-section \
-      -l sprig.el -l sprig-session.el -l sprig-session-mode.el \
-      -l sprig-session-mode-tests.el -f ert-run-tests-batch-and-exit
+      -l sprig.el -l sprig-change.el -l sprig-render.el -l sprig-session.el \
+      -l sprig-session-mode.el -l sprig-session-mode-tests.el \
+      -f ert-run-tests-batch-and-exit
 ```
 
 ## Direction

@@ -26,7 +26,7 @@
 ;; as a JSONL log under ~/.claude/projects/<cwd>/<id>.jsonl on the host
 ;; where it runs, so sprig keeps no store of its own: history is replayed
 ;; from that log, and it survives an Emacs restart because the id names the
-;; file.  A review buffer owns its session outright (`sprig-session-session',
+;; file.  A review buffer owns its session outright (`sprig-session-open',
 ;; `sprig-session-connect'); the transport routes its events to the review
 ;; model and its verbs steer the session directly.
 ;;
@@ -293,7 +293,7 @@ turn.")
   "Session id captured from the CLI, used for --resume.")
 (defvar-local sprig--fork-session nil
   "Non-nil while this buffer's session is still to be forked off its parent.
-Set by `sprig-session-session' for a fork, where `sprig--session-id' starts
+Set by `sprig-session-open' for a fork, where `sprig--session-id' starts
 out as the *parent's* id so the spawn resumes it; the added
 `--fork-session' then makes the CLI continue that history under an id of
 its own rather than writing to the parent's log.  Cleared as soon as the
@@ -1738,7 +1738,7 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; count, the context now in use.  Report it so the readout drops
          ;; from the pre-compact size at once, not on the next turn.
          ;; The stream names these in snake_case; the session log spells the
-         ;; same boundary in camelCase, which `sprig-session-session-record-events'
+         ;; same boundary in camelCase, which `sprig-session-record-events'
          ;; reads on replay.  Keep the two spellings with their own reader.
          ((and (equal .type "system") (equal .subtype "compact_boundary")
                .compact_metadata.post_tokens)
@@ -2378,7 +2378,7 @@ is visible without opening the header."
 (declare-function sprig-session-flush "sprig-session-mode" (&optional buffer))
 (declare-function sprig-session--schedule "sprig-session-mode" ())
 (declare-function sprig-session-set-remote "sprig-session-mode" (remote))
-(declare-function sprig-session-session-events "sprig-session" (lines))
+(declare-function sprig-session-log-events "sprig-session" (lines))
 (declare-function sprig-session-interrupt "sprig-session-mode" ())
 ;; The review verbs the navigator's c / a dispatch runs on the row's session.
 (declare-function sprig-session-message "sprig-session-mode" (&optional plan queue))
@@ -3424,7 +3424,7 @@ back to killing the process; the session resumes on the next send."
 
 (defun sprig--review-session-buffer (dir session-id host fork)
   "Build (or reuse) the review buffer owning DIR's session, and return it.
-The buffer is left undisplayed; see `sprig-session-session' for the DIR,
+The buffer is left undisplayed; see `sprig-session-open' for the DIR,
 SESSION-ID, HOST, and FORK arguments.  Splitting the build from the
 display lets the navigator steer a stored session's buffer into being
 without popping it up: a verb run from the list acts on the session
@@ -3469,17 +3469,17 @@ in the background, and only the verb's own compose or answer buffer shows."
                           (null (buffer-local-value 'sprig-session--events
                                                      (current-buffer)))
                           (not sprig--busy))
-                 (sprig-session-seed (sprig-session-session-events lines)
+                 (sprig-session-seed (sprig-session-log-events lines)
                                     (list :project dir))))))
         (let* ((lines (and session-id (ignore-errors (sprig--session-log-lines))))
-               (events (and lines (sprig-session-session-events lines))))
+               (events (and lines (sprig-session-log-events lines))))
           (sprig-session-seed events (list :project dir))))
       (sprig-session-set-remote (sprig--remote))
       (sprig--sync-default-directory))
     buffer))
 
 ;;;###autoload
-(defun sprig-session-session (dir &optional session-id host fork)
+(defun sprig-session-open (dir &optional session-id host fork)
   "Open a review buffer that owns a session in working directory DIR.
 DIR may be nil when it is unknown (a stored session whose log carried no
 cwd), in which case the session runs in the host's login directory.  With
@@ -4197,7 +4197,7 @@ navigator does not rebuild the whole transcript on every refresh."
      (file
       (let ((tail (sprig--session-log-tail file)))
         (and tail (sprig--events-preview
-                   (sprig-session-session-events (split-string tail "\n" t)))))))))
+                   (sprig-session-log-events (split-string tail "\n" t)))))))))
 
 ;;; Collect open buffers and stored sessions into rows
 
@@ -5357,7 +5357,7 @@ owns the session, replaying its stored log."
   (let ((buf (plist-get entry :buffer)))
     (if (buffer-live-p buf)
         buf
-      (sprig-session-session (plist-get entry :dir) (plist-get entry :session)
+      (sprig-session-open (plist-get entry :dir) (plist-get entry :session)
                             (sprig--status-entry-host-arg entry)))))
 
 (defun sprig--status-session-buffer (entry)
@@ -5726,7 +5726,7 @@ session row, its directory seeds the prompt, so `s n' on a session starts
 a fresh one alongside it in the same directory."
   (interactive "P")
   (let ((args (sprig--status-new-session-args local)))
-    (sprig-session-session (sprig--read-review-dir (car args) (cdr args))
+    (sprig-session-open (sprig--read-review-dir (car args) (cdr args))
                           nil (or (car args) t)))
   (sprig--status-refresh))
 
@@ -5774,7 +5774,7 @@ resumes the parent's id and that only exists there."
          (id (plist-get entry :session)))
     (unless id
       (user-error "That session has no id yet; open and send it first, then fork"))
-    (sprig-session-session (plist-get entry :dir) id
+    (sprig-session-open (plist-get entry :dir) id
                           (sprig--status-entry-host-arg entry) t)
     (message "sprig: forked; the branch starts at its first send"))
   (sprig--status-refresh))
@@ -5919,7 +5919,7 @@ same host the roots view was opened for (a local line pins to this machine)."
   (let ((dir (get-text-property (point) 'sprig-root-dir))
         (host (get-text-property (point) 'sprig-root-host)))
     (unless dir (user-error "No root on this line"))
-    (sprig-session-session dir nil (or host t))
+    (sprig-session-open dir nil (or host t))
     (sprig--status-refresh)))
 
 (defun sprig-status-roots ()
@@ -6270,7 +6270,7 @@ cover remote hosts too."
   "Directory sprig's own source files were loaded from, for `sprig-reload'.")
 
 (defvar sprig--source-files
-  '("sprig-session" "sprig" "sprig-session-mode")
+  '("sprig-change" "sprig-render" "sprig-session" "sprig" "sprig-session-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()
@@ -6285,7 +6285,7 @@ override the defface one anyway."
     (when (string-prefix-p "sprig-" (symbol-name face))
       (put face 'face-defface-spec nil))))
 
-(declare-function sprig-session--suppress-section-highlight "sprig-session-mode")
+(declare-function sprig--suppress-section-highlight "sprig-session-mode")
 
 (defun sprig--resettle-review-buffers ()
   "Re-apply the review mode's settings in buffers already in that mode.
@@ -6297,14 +6297,14 @@ would take the buffer's session and section state down with it."
   (dolist (buffer (buffer-list))
     (with-current-buffer buffer
       (when (derived-mode-p 'sprig-session-mode)
-        (sprig-session--suppress-section-highlight)))))
+        (sprig--suppress-section-highlight)))))
 
 ;;;###autoload
 (defun sprig-reload ()
   "Reload sprig's source files from disk, in dependency order.
-A development convenience: after editing any of `sprig-session', `sprig',
-or `sprig-session-mode', re-load all three from `sprig--source-directory'
-so the change takes effect without restarting Emacs.  The `.el' source is
+A development convenience: after editing any file in
+`sprig--source-files', re-load them all from `sprig--source-directory' so
+the change takes effect without restarting Emacs.  The `.el' source is
 loaded, not any stale byte code beside it.  Edited faces take effect too
 \(see `sprig--undefine-faces'), as do the review mode's settings (see
 `sprig--resettle-review-buffers').  Open buffers keep their state; only

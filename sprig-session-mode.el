@@ -29,6 +29,8 @@
 (require 'magit-section)
 (require 'diff-mode)                     ; for the diff-* faces
 (require 'iso8601)                       ; for the log's own timestamps
+(require 'sprig-change)
+(require 'sprig-render)
 (require 'sprig-session)
 (require 'subr-x)
 (require 'eieio)
@@ -68,33 +70,48 @@
 (defvar sprig--permission-mode)
 (defvar sprig--btw-process)
 
+;;;; Renamed options
+;;
+;; The transcript buffer was `sprig-review-mode' until 0.51.0, when `review'
+;; moved to the changeset-review surface and the transcript became
+;; `sprig-session-mode'.  A `setq' on a renamed option would otherwise fail
+;; silently, so every user-facing option keeps its old name as an alias.
+
+(define-obsolete-variable-alias 'sprig-review-heading-max-width
+  'sprig-session-heading-max-width "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-expand-diffs
+  'sprig-session-expand-diffs "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-timestamp-format
+  'sprig-session-timestamp-format "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-fontify-markdown
+  'sprig-session-fontify-markdown "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-defer-live-prose
+  'sprig-session-defer-live-prose "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-fontify-async
+  'sprig-session-fontify-async "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-fontify-idle-delay
+  'sprig-session-fontify-idle-delay "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-incremental-render
+  'sprig-session-incremental-render "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-refresh-delay
+  'sprig-session-refresh-delay "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-refresh-delay-max
+  'sprig-session-refresh-delay-max "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-debug-render
+  'sprig-session-debug-render "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-commit-instruction
+  'sprig-session-commit-instruction "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-accept-instruction
+  'sprig-session-accept-instruction "0.51.0")
+(define-obsolete-variable-alias 'sprig-review-decline-instruction
+  'sprig-session-decline-instruction "0.51.0")
+
 ;;;; Faces
 
 (defface sprig-session-tool '((t :inherit font-lock-keyword-face :weight bold))
   "Face for a tool-call heading in the review buffer."
   :group 'sprig)
 
-(defface sprig-session-file '((t :inherit diff-file-header))
-  "Face for a changed file's path."
-  :group 'sprig)
-
-(defface sprig-session-added '((t :inherit diff-added))
-  "Face for an added line in a reconstructed hunk."
-  :group 'sprig)
-
-(defface sprig-session-removed '((t :inherit diff-removed))
-  "Face for a removed line in a reconstructed hunk."
-  :group 'sprig)
-
-(defface sprig-session-stat-added '((t :inherit success :weight normal))
-  "Face for the added-line count in a tool heading.
-Foreground only, unlike `sprig-session-added': a count sits in a heading,
-where the diff faces' backgrounds would be a stripe across it."
-  :group 'sprig)
-
-(defface sprig-session-stat-removed '((t :inherit error :weight normal))
-  "Face for the removed-line count in a tool heading."
-  :group 'sprig)
 
 (defface sprig-session-todo-done '((t :inherit shadow :strike-through t))
   "Face for a completed item in a `TodoWrite' checklist."
@@ -229,9 +246,6 @@ stand out as needing you rather than blending in with the running rows."
   "Face for an option picked in a question."
   :group 'sprig)
 
-(defface sprig-session-marked '((t :inherit highlight))
-  "Face for the heading of a marked section."
-  :group 'sprig)
 
 ;;;; Buffer-local state
 
@@ -285,9 +299,6 @@ it floats pinned above the state line (see `sprig-session--insert-pending-steer'
 rather than splitting the streaming message in two.  When the agent reaches
 that boundary, `sprig-session--commit-pending-steer' folds it into the events
 at the point the agent actually received it.")
-(defvar-local sprig-session--marks nil
-  "Idents (per `magit-section-ident') of the marked sections.
-Idents rather than section objects, so marks survive a re-render.")
 (defvar-local sprig-session--remote nil
   "SSH destination of the session host, or nil for local.
 Set by `sprig-session-set-remote' so visiting a file reaches it over TRAMP.")
@@ -363,46 +374,6 @@ paying its rates, so it earns a stronger flag than
   :type '(choice integer (const nil))
   :group 'sprig)
 
-;;;; Face helpers
-;;
-;; Everything rendered here carries its colours as `font-lock-face', not
-;; `face'.  `magit-section-mode' deliberately turns font-lock on (with no
-;; keywords) so that `font-lock-face' is honoured, and font-lock's
-;; unfontify pass strips the plain `face' property off every region it
-;; redisplays (see `font-lock-default-unfontify-region').  Text propertized
-;; with `face' therefore loses its colours the moment the window scrolls
-;; over it; `font-lock-face' survives and displays identically.
-
-(defun sprig-session--face (string face)
-  "Return STRING carrying FACE, as a property the buffer's font-lock keeps."
-  (propertize string 'font-lock-face face))
-
-(defun sprig-session--add-face (beg end face)
-  "Add FACE beneath the faces already on the buffer text between BEG and END.
-Appending rather than replacing leaves a foreground set by, say, markdown
-fontification in front of FACE's background."
-  (let ((pos beg))
-    (while (< pos end)
-      (let ((next (next-single-property-change pos 'font-lock-face nil end))
-            (val (get-text-property pos 'font-lock-face)))
-        (put-text-property pos next 'font-lock-face
-                           (append (ensure-list val) (list face)))
-        (setq pos next)))))
-
-(defun sprig-session--adopt-faces (string)
-  "Return STRING with each `face' property moved over to `font-lock-face'.
-Font-lock fontifies with `face', so a string fontified elsewhere (see
-`sprig-session--fontify-markdown') needs this before it is inserted here."
-  (let ((pos 0) (end (length string)))
-    (while (< pos end)
-      (let ((next (next-single-property-change pos 'face string end))
-            (val (get-text-property pos 'face string)))
-        (when val
-          (put-text-property pos next 'font-lock-face val string)
-          (remove-list-of-text-properties pos next '(face) string))
-        (setq pos next)))
-    string))
-
 ;;;; Timestamp margin
 ;;
 ;; A block's time shows in the left margin, the way magit-log shows a
@@ -459,18 +430,6 @@ The extra column is the gap holding the stamp off the text."
 
 ;;;; Heading helpers
 
-(defun sprig-session--stat-string (change)
-  "Return a \"(+A -B)\" line-count summary for CHANGE, added green, removed red.
-The numbers are the whole of what a folded edit tells you about its size,
-so they are worth reading at a glance rather than parsing."
-  (let ((stat (sprig-session-change-stat change)))
-    (concat "("
-            (sprig-session--face (format "+%d" (car stat))
-                                'sprig-session-stat-added)
-            " "
-            (sprig-session--face (format "-%d" (cdr stat))
-                                'sprig-session-stat-removed)
-            ")")))
 
 (defun sprig-session--truncate (s width)
   "Return S truncated to WIDTH columns, ending in an ellipsis when shortened."
@@ -483,7 +442,7 @@ so they are worth reading at a glance rather than parsing."
 Shows the command for `Bash'; other non-diff tools fall back to a salient
 input field (path, pattern, query, ...).  File tools that render a diff
 header instead pass their changes in, so this is only reached without one."
-  (let* ((obj (sprig-session--parse-input input))
+  (let* ((obj (sprig--parse-input input))
          (val (if (equal name "Bash")
                   (alist-get 'command obj)
                 (seq-some (lambda (k) (alist-get k obj))
@@ -496,9 +455,9 @@ header instead pass their changes in, so this is only reached without one."
 Each element is the tool's own todo alist (`content', `status', and an
 `activeForm'); their order is the agent's, which is the reading order.
 Reads both input spellings, wire (a JSON string) and stored (an alist),
-through `sprig-session--parse-input'."
+through `sprig--parse-input'."
   (when (equal (plist-get block :name) "TodoWrite")
-    (let ((obj (sprig-session--parse-input (plist-get block :input))))
+    (let ((obj (sprig--parse-input (plist-get block :input))))
       (alist-get 'todos obj))))
 
 (defun sprig-session--todo-progress (todos)
@@ -566,11 +525,11 @@ to that."
          (activity (sprig-session--agent-activity block))
          (err (plist-get (plist-get block :result) :error)))
     (concat
-     (sprig-session--face name 'sprig-session-tool)
+     (sprig--face name 'sprig-session-tool)
      (cond
       (changes
        (let ((c (car changes)))
-         (concat "  " (plist-get c :file) "  " (sprig-session--stat-string c))))
+         (concat "  " (plist-get c :file) "  " (sprig--stat-string c))))
       (todos (concat "  " (sprig-session--todo-progress todos)))
       (summary (concat "  " (sprig-session--truncate
                              summary sprig-session-heading-max-width)))
@@ -578,30 +537,15 @@ to that."
      ;; After the job it was given, not instead of it: the two say different
      ;; things, what the subagent was asked for and where it has got to.
      (if activity
-         (sprig-session--face
+         (sprig--face
           (concat "  ▸ " (sprig-session--truncate
                           activity sprig-session-heading-max-width))
           'sprig-session-working)
        "")
-     (if err (sprig-session--face "  [error]" 'error) ""))))
+     (if err (sprig--face "  [error]" 'error) ""))))
 
 ;;;; Section insertion
 
-(defun sprig-session--insert-hunk (hunk)
-  "Insert HUNK as removed lines then added lines, each a coloured section line."
-  (magit-insert-section (sprig-hunk hunk)
-    (dolist (l (plist-get hunk :old))
-      (insert (sprig-session--face (concat "-" l) 'sprig-session-removed) "\n"))
-    (dolist (l (plist-get hunk :new))
-      (insert (sprig-session--face (concat "+" l) 'sprig-session-added) "\n"))))
-
-(defun sprig-session--insert-change (change)
-  "Insert CHANGE as a foldable file section holding its hunks."
-  (magit-insert-section (sprig-change change)
-    (magit-insert-heading
-      (sprig-session--face (plist-get change :file) 'sprig-session-file))
-    (dolist (hunk (plist-get change :hunks))
-      (sprig-session--insert-hunk hunk))))
 
 (defun sprig-session--insert-result (result)
   "Insert RESULT as a section, folded by default since results can be large."
@@ -626,7 +570,7 @@ a pending one is plain, so the checklist's state is legible at a glance."
                  ("completed" 'sprig-session-todo-done)
                  ("in_progress" 'sprig-session-todo-active)
                  (_ 'sprig-session-todo-pending))))
-    (sprig-session--face (concat glyph " " content) face)))
+    (sprig--face (concat glyph " " content) face)))
 
 (defun sprig-session--insert-todos (todos)
   "Insert TODOS as a checklist, one status-marked line each."
@@ -661,7 +605,7 @@ diff-bearing tools open instead."
           (dolist (step steps)
             (sprig-session--insert-tool step))
           (dolist (change (plist-get block :changes))
-            (sprig-session--insert-change change))
+            (sprig--insert-change change))
           (when-let ((result (plist-get block :result)))
             (sprig-session--insert-result result))))))))
 
@@ -674,7 +618,7 @@ a list either way.  Folds to its heading; TAB opens the checklist."
   (let ((items (plist-get block :items)))
     (magit-insert-section (sprig-tasks block t)
       (magit-insert-heading
-        (concat (sprig-session--face "Tasks" 'sprig-session-tool)
+        (concat (sprig--face "Tasks" 'sprig-session-tool)
                 (when items
                   (concat "  " (sprig-session--todo-progress items)))))
       (magit-insert-section-body
@@ -734,7 +678,7 @@ See `sprig-session--fontify-markdown' for the whys; this is the raw pass,
 without the memo."
   (if (and sprig-session-fontify-markdown
            (require 'markdown-mode nil t))
-      (with-current-buffer (get-buffer-create " *sprig-session-markdown*")
+      (with-current-buffer (get-buffer-create " *sprig-markdown*")
         (let ((inhibit-read-only t))
           (erase-buffer)
           (delay-mode-hooks (markdown-mode))
@@ -746,7 +690,7 @@ without the memo."
             (ignore-errors (markdown-toggle-markup-hiding 1)))
           (insert text)
           (font-lock-ensure)
-          (sprig-session--adopt-faces (buffer-string))))
+          (sprig--adopt-faces (buffer-string))))
     text))
 
 (defun sprig-session--fontify-cache-refresh ()
@@ -763,7 +707,7 @@ Fontifies in a reusable hidden buffer and copies the propertized string,
 so the `*'/`#' markup carries an `invisible' property the review buffer's
 invisibility spec then hides (see `sprig-session-mode').  The copy's faces
 are adopted onto `font-lock-face', without which this buffer's font-lock
-would strip them (see `sprig-session--adopt-faces').  Returns TEXT
+would strip them (see `sprig--adopt-faces').  Returns TEXT
 unchanged when `sprig-session-fontify-markdown' is nil or markdown-mode is
 not installed.  Memoised on TEXT (see `sprig-session--fontify-cache'),
 since a full re-render fontifies every settled block afresh though only
@@ -1034,19 +978,19 @@ we want."
           (shown (sprig-session--text-shown block nil)))
       (when shown
         (insert (sprig-session--prose-for shown nil))
-        (sprig-session--add-face beg (point) 'sprig-session-user)))))
+        (sprig--add-face beg (point) 'sprig-session-user)))))
 
 (defun sprig-session--insert-thinking (block)
   "Insert a thinking BLOCK, folded by default since it is verbose."
   (magit-insert-section (sprig-thinking block t)
-    (magit-insert-heading (sprig-session--face "thinking" 'sprig-session-thinking))
+    (magit-insert-heading (sprig--face "thinking" 'sprig-session-thinking))
     (magit-insert-section-body
       (insert (string-trim-right (plist-get block :text)) "\n"))))
 
 (defun sprig-session--insert-error (block)
   "Insert an error BLOCK."
   (magit-insert-section (sprig-error block)
-    (magit-insert-heading (sprig-session--face "error" 'error))
+    (magit-insert-heading (sprig--face "error" 'error))
     (insert (string-trim-right (or (plist-get block :text) "")) "\n")))
 
 ;;;; Dialogs
@@ -1125,14 +1069,14 @@ the answering has a buffer of its own (see `sprig-session-answer')."
     (magit-insert-section (sprig-question (list :dialog (plist-get block :id)
                                                 :index index))
       (magit-insert-heading
-        (concat (sprig-session--face (concat "? " text) 'sprig-session-dialog)
+        (concat (sprig--face (concat "? " text) 'sprig-session-dialog)
                 (if (and multi (not answered))
-                    (sprig-session--face "  (any of)" 'sprig-session-meta-key)
+                    (sprig--face "  (any of)" 'sprig-session-meta-key)
                   "")))
       (if answered
           ;; Settled: what was said, not what might have been.
           (insert "    "
-                  (sprig-session--face
+                  (sprig--face
                    (or (alist-get (intern text) (plist-get block :answers))
                        "skipped")
                    'sprig-session-dialog-picked)
@@ -1140,11 +1084,11 @@ the answering has a buffer of its own (see `sprig-session-answer')."
         (seq-do
          (lambda (option)
            (insert "    "
-                   (sprig-session--face (sprig-session--option-label option)
+                   (sprig--face (sprig-session--option-label option)
                                        'default)
                    (let ((description (alist-get 'description option)))
                      (if (and description (not (string-empty-p description)))
-                         (sprig-session--face
+                         (sprig--face
                           (concat "  " (sprig-session--truncate
                                         description
                                         sprig-session-heading-max-width))
@@ -1161,12 +1105,12 @@ whole of what you are approving is here to read."
         (answered (plist-get block :answered)))
     (magit-insert-section (sprig-plan block)
       (magit-insert-heading
-        (sprig-session--face "? The agent has a plan" 'sprig-session-dialog))
+        (sprig--face "? The agent has a plan" 'sprig-session-dialog))
       (insert (sprig-session--fontify-markdown
                (sprig-session--text-body (or plan ""))))
       (when answered
         (insert "    "
-                (sprig-session--face (format "%s" (plist-get block :answers))
+                (sprig--face (format "%s" (plist-get block :answers))
                                     'sprig-session-dialog-picked)
                 "\n")))))
 
@@ -1177,16 +1121,16 @@ whole of what you are approving is here to read."
          (summary (sprig-session--input-summary tool (alist-get 'input request))))
     (magit-insert-section (sprig-permission block)
       (magit-insert-heading
-        (sprig-session--face (format "? Allow %s?" tool) 'sprig-session-dialog))
+        (sprig--face (format "? Allow %s?" tool) 'sprig-session-dialog))
       (when summary
         (insert "    "
-                (sprig-session--face
+                (sprig--face
                  (sprig-session--truncate summary sprig-session-heading-max-width)
                  'default)
                 "\n"))
       (when (plist-get block :answered)
         (insert "    "
-                (sprig-session--face (format "%s" (plist-get block :answers))
+                (sprig--face (format "%s" (plist-get block :answers))
                                     'sprig-session-dialog-picked)
                 "\n")))))
 
@@ -1214,7 +1158,7 @@ opening a child, and a wrapper here earns nothing to pay for it."
           (sprig-session--insert-question block question index))
         (sprig-session--question-list (plist-get block :input)))))
   (unless (plist-get block :answered)
-    (insert (sprig-session--face (sprig-session--dialog-hint
+    (insert (sprig--face (sprig-session--dialog-hint
                                  (plist-get block :kind))
                                 'sprig-session-meta-key)
             "\n")))
@@ -1245,7 +1189,7 @@ state line's face (see `sprig-session-context')."
 (defun sprig-session--meta-line (key value)
   "Return a header line pairing KEY with VALUE, or nil when VALUE is blank."
   (when (and value (not (string-empty-p (format "%s" value))))
-    (concat (sprig-session--face (format "%-9s" (concat key ":"))
+    (concat (sprig--face (format "%-9s" (concat key ":"))
                                 'sprig-session-meta-key)
             (format "%s" value) "\n")))
 
@@ -1333,34 +1277,34 @@ the turn as plainly as the line does."
               (queued (and (boundp 'sprig--queued) (length sprig--queued)))
               (start (point)))
     (magit-insert-section (sprig-state)
-      (insert (sprig-session--face (format "%s  %s" glyph text) face))
+      (insert (sprig--face (format "%s  %s" glyph text) face))
       ;; Nearest the state, since it qualifies it: `working…' says something is
       ;; happening, `☑ 4/5' says how much of it is left to happen.
       (when plan
-        (insert (sprig-session--face "  ·  " face)
-                (sprig-session--face (format "☑ %s" plan) 'sprig-session-plan)))
+        (insert (sprig--face "  ·  " face)
+                (sprig--face (format "☑ %s" plan) 'sprig-session-plan)))
       ;; A queued message is invisible otherwise: it is not in the transcript
       ;; (nothing was sent), and it fires on its own, so without this the turn
       ;; ending would spawn a message the reader never asked for twice.  In
       ;; its own face, like the context: it is not the turn's state, it is
       ;; what happens next.
       (when (and queued (> queued 0))
-        (insert (sprig-session--face "  ·  " face)
-                (sprig-session--face (format "%d queued" queued)
+        (insert (sprig--face "  ·  " face)
+                (sprig--face (format "%d queued" queued)
                                     'sprig-session-pending)))
       ;; The permission mode rides its own tag, coloured on its own terms
       ;; rather than the turn's, exactly as the navigator's state line carries
       ;; it (same `sprig--notable-mode' filter, same `sprig-mode-tag' face).
       ;; Only the notable modes show; the everyday ones say nothing worth it.
       (when-let ((mode (sprig--notable-mode (plist-get model :mode))))
-        (insert (sprig-session--face "  ·  " face)
-                (sprig-session--face mode 'sprig-mode-tag)))
+        (insert (sprig--face "  ·  " face)
+                (sprig--face mode 'sprig-mode-tag)))
       (when ctx
         ;; The separator belongs to the line, the readout does not: the
         ;; context is coloured on its own terms, so a normal one does not
         ;; read as a warning just because the turn is busy (both yellow).
-        (insert (sprig-session--face "  ·  " face)
-                (sprig-session--face (car ctx) (cdr ctx))))
+        (insert (sprig--face "  ·  " face)
+                (sprig--face (car ctx) (cdr ctx))))
       (insert "\n"))
     (when (> (sprig-session--margin-width) 0)
       (let ((ov (make-overlay start (min (1+ start) (point-max)))))
@@ -1389,10 +1333,10 @@ teaser, since its full text is about to become a real user turn."
             (line (sprig-session--truncate
                    (replace-regexp-in-string "[ \t\n]+" " " (string-trim text))
                    sprig-session-heading-max-width)))
-        (insert (sprig-session--face "⤷ " 'sprig-session-pending) line "\n")
+        (insert (sprig--face "⤷ " 'sprig-session-pending) line "\n")
         ;; The user tint beneath, so the arrow keeps its own colour on top and
         ;; the line reads as yours (see `sprig-session--insert-user').
-        (sprig-session--add-face beg (point) 'sprig-session-user)))))
+        (sprig--add-face beg (point) 'sprig-session-user)))))
 
 (defun sprig-session--insert-pending-queue ()
   "Draw any queued messages, pinned below the steers and above the state line.
@@ -1411,8 +1355,8 @@ line, since its full text becomes a real user turn once the queue flushes."
             (line (sprig-session--truncate
                    (replace-regexp-in-string "[ \t\n]+" " " (string-trim text))
                    sprig-session-heading-max-width)))
-        (insert (sprig-session--face "⧖ " 'sprig-session-queued) line "\n")
-        (sprig-session--add-face beg (point) 'sprig-session-user)))))
+        (insert (sprig--face "⧖ " 'sprig-session-queued) line "\n")
+        (sprig--add-face beg (point) 'sprig-session-user)))))
 
 ;;;; Rendering entry points
 
@@ -1862,7 +1806,7 @@ while a turn came in."
         ;; NOFORCE, so a start that would now put point off screen is
         ;; recomputed rather than obeyed.
         (set-window-start win (sprig-session--relocate start-loc start-pos) t)))
-    (sprig-session--apply-marks)))
+    (sprig--apply-marks)))
 
 (defun sprig-session--cancel-timer ()
   "Cancel this buffer's pending coalescing-refresh timer, if any."
@@ -2106,23 +2050,6 @@ from the buffer."
 Inherits magit-section's navigation and folding; the sprig verbs are
 added on top as they land.")
 
-(defun sprig-session--suppress-section-highlight ()
-  "Turn magit's section highlight off in the current buffer.
-Magit highlights the section at point to show what its verbs would act
-on.  Here the verbs act on marks and hunks, not on whatever point drifts
-over, so the highlight says nothing and only washes out the faces the
-conversation is read through.  The selection highlight goes with it, so
-the region looks as it does in any other buffer.
-
-Both settings are buffer-local, leaving a real magit buffer alone.  This
-is called from `sprig-session-mode', and again by `sprig-reload' for the
-buffers whose mode body ran before the edit."
-  (setq-local magit-section-highlight-current nil)
-  (setq-local magit-section-highlight-selection nil)
-  ;; The settings only govern the next update, so a highlight already drawn
-  ;; would sit there until something else redrew it.  Force the update that
-  ;; deletes it; magit runs one from `post-command-hook'.
-  (setq magit-section-highlight-force-update t))
 
 (define-derived-mode sprig-session-mode magit-section-mode "Sprig-Review"
   "Major mode for reviewing an agent conversation as read-only sections.
@@ -2141,7 +2068,7 @@ Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   ;; Markdown markup (`*', `#', ...) carries `invisible markdown-markup' from
   ;; `sprig-session--fontify-markdown'; hide it here so only the styling shows.
   (add-to-invisibility-spec 'markdown-markup)
-  (sprig-session--suppress-section-highlight)
+  (sprig--suppress-section-highlight)
   ;; Claim the margin the timestamps hang in before the buffer is displayed,
   ;; so its first window comes up with the right width.
   (setq-local left-margin-width (sprig-session--margin-width)))
@@ -2197,13 +2124,13 @@ extra, and the `Agent' row still carries the report without it."
 The steps go last, after the whole transcript: they are read from files of
 their own, so there is no interleaving them by time, and the fold finds an
 `Agent' call by id whether or not its result has landed."
-  (append (sprig-session-session-events lines)
+  (append (sprig-session-log-events lines)
           (and file (sprig-session--subagent-events-for-file file))))
 
 ;;;###autoload
 (defun sprig-session-open-file (file)
   "Open a read-only review of a stored `claude' session-log FILE.
-Replays the whole transcript from the log; see `sprig-session-session-events'.
+Replays the whole transcript from the log; see `sprig-session-log-events'.
 This is the local-read path.  A remote session's log lives on the SSH host
 and is fetched by the integration layer, not here."
   (interactive "fSession log (.jsonl): ")
@@ -2214,64 +2141,6 @@ and is fetched by the integration layer, not here."
       (sprig-session-seed (sprig-session--replayed-events
                           (sprig-session-read-session-lines file) file)))
     (pop-to-buffer buffer)))
-
-;;;; Marks
-;;
-;; Marking is the review buffer's one selection primitive (see DESIGN.md):
-;; a verb acts on the marked sections, or on the section at point when
-;; nothing is marked.  Marks are stored as section idents so they survive
-;; a re-render, and re-applied by `sprig-session--refresh'.
-
-(defun sprig-session--apply-marks ()
-  "Highlight the marked sections; drop marks whose section no longer exists."
-  (remove-overlays (point-min) (point-max) 'sprig-session-mark t)
-  (setq sprig-session--marks (seq-filter #'magit-get-section sprig-session--marks))
-  (dolist (ident sprig-session--marks)
-    (let* ((sec (magit-get-section ident))
-           (beg (oref sec start))
-           (end (save-excursion (goto-char beg)
-                                (min (1+ (line-end-position)) (point-max))))
-           (ov (make-overlay beg end)))
-      (overlay-put ov 'sprig-session-mark t)
-      (overlay-put ov 'face 'sprig-session-marked)
-      (overlay-put ov 'before-string (propertize "▸" 'face 'sprig-session-marked)))))
-
-(defun sprig-session-toggle-mark ()
-  "Toggle the mark on the section at point, then move to the next section."
-  (interactive)
-  (when-let ((sec (magit-current-section)))
-    (let ((ident (magit-section-ident sec)))
-      (setq sprig-session--marks
-            (if (member ident sprig-session--marks)
-                (delete ident sprig-session--marks)
-              (cons ident sprig-session--marks))))
-    (sprig-session--apply-marks)
-    (ignore-errors (magit-section-forward))))
-
-(defun sprig-session-unmark-all ()
-  "Clear all marks."
-  (interactive)
-  (setq sprig-session--marks nil)
-  (sprig-session--apply-marks))
-
-(defun sprig-session--marked-sections ()
-  "Return the marked sections, or the section at point if none are marked."
-  (or (let (secs)
-        (dolist (ident (reverse sprig-session--marks))
-          (when-let ((s (magit-get-section ident))) (push s secs)))
-        (nreverse secs))
-      (when-let ((s (magit-current-section))) (list s))))
-
-(defun sprig-session--sections-of-type (sections type)
-  "Return the members of SECTIONS whose section type is TYPE."
-  (seq-filter (lambda (s) (eq (oref s type) type)) sections))
-
-(defun sprig-session--unmark-sections (sections)
-  "Drop the marks on SECTIONS and refresh the highlighting."
-  (dolist (s sections)
-    (setq sprig-session--marks
-          (delete (magit-section-ident s) sprig-session--marks)))
-  (sprig-session--apply-marks))
 
 ;;;; Instruction builders
 ;;
@@ -2313,7 +2182,7 @@ CHANGES is a list of (FILE . HUNK-PLIST)."
    (mapconcat
     (lambda (fc)
       (format "In `%s`:\n```diff\n%s\n```"
-              (car fc) (sprig-session--format-hunk (cdr fc))))
+              (car fc) (sprig--format-hunk (cdr fc))))
     changes "\n\n")))
 
 (defun sprig-session-run-instruction (command)
@@ -2419,17 +2288,17 @@ building on it.  With no turn running that is an ordinary send."
      ((and section (eq (oref section type) 'sprig-pending-steer))
       (user-error "A steer is already sent; interrupt with `c i' to stop it"))
      (t
-      (let* ((sections (sprig-session--marked-sections))
+      (let* ((sections (sprig--marked-sections))
              (pairs (sprig-session--reject-pairs sections)))
         (unless pairs (user-error "No diff hunk marked or at point"))
-        (when (and sprig-session--marks (< (length pairs) (length sections))
+        (when (and sprig--marks (< (length pairs) (length sections))
                    (not (y-or-n-p
                          (format "Reject %d hunk(s), ignoring %d other mark(s)? "
                                  (length pairs) (- (length sections) (length pairs))))))
           (user-error "Cancelled"))
         (sprig-session--steer (sprig-session-reject-instruction pairs))
-        (sprig-session--unmark-sections
-         (sprig-session--sections-of-type sections 'sprig-hunk)))))))
+        (sprig--unmark-sections
+         (sprig--sections-of-type sections 'sprig-hunk)))))))
 
 (defun sprig-session-commit ()
   "Ask the agent to commit the current changes."
@@ -2458,7 +2327,7 @@ refusing outright."
 (defun sprig-session--tool-command (section)
   "Return the shell command a `sprig-tool' SECTION ran, or nil."
   (alist-get 'command
-             (sprig-session--parse-input
+             (sprig--parse-input
               (plist-get (oref section value) :input))))
 
 (defun sprig-session--prose-command (section)
@@ -2495,7 +2364,7 @@ is the case that matters (it is usually a correction to what you are
 watching), and waiting out the turn to ask would defeat it.  With no turn
 running this is an ordinary send."
   (interactive)
-  (let* ((sections (sprig-session--marked-sections))
+  (let* ((sections (sprig--marked-sections))
          (tool (seq-find (lambda (s) (eq (oref s type) 'sprig-tool)) sections))
          (prose (seq-find (lambda (s) (memq (oref s type)
                                             '(sprig-text sprig-user)))
@@ -2576,7 +2445,7 @@ only relabels this buffer's header, as the plain `t' key does."
     ("m" "set by hand, then save" sprig-session-retitle-manually)
     ("t" "relabel the header only (not saved)" sprig-session-set-title)]])
 
-(declare-function sprig-session-session "sprig" (dir &optional session-id host fork))
+(declare-function sprig-session-open "sprig" (dir &optional session-id host fork))
 (declare-function sprig--remote "sprig" ())
 
 (defun sprig-session-new ()
@@ -2584,12 +2453,12 @@ only relabels this buffer's header, as the plain `t' key does."
 This session is left alone: the new one gets its own review buffer and its
 own session, which is what you want when the next piece of work is
 unrelated rather than a continuation of this one.  Call
-`sprig-session-session' directly to be asked for a different directory."
+`sprig-session-open' directly to be asked for a different directory."
   (interactive)
   ;; On this session's host, pinned: an unrelated piece of work still
   ;; belongs where the work is, and a session started off a local `C-u s'
   ;; must not quietly come back on the primary remote.
-  (sprig-session-session sprig--working-dir nil (or (sprig--remote) t)))
+  (sprig-session-open sprig--working-dir nil (or (sprig--remote) t)))
 
 (defun sprig-session-new-message ()
   "Start a fresh session and open a prompt for its first message (`s c').
@@ -2623,7 +2492,7 @@ replay of this history."
     (user-error "This session has no id yet; send something first, then fork"))
   ;; The fork resumes the parent's id, which only exists on the parent's
   ;; host, so it is pinned there rather than left to follow the primary remote.
-  (sprig-session-session sprig--working-dir sprig--session-id
+  (sprig-session-open sprig--working-dir sprig--session-id
                         (or (sprig--remote) t) t)
   (message "sprig: forked; the branch starts at its first send"))
 
@@ -2645,7 +2514,7 @@ not the same agent marking its own work; Sprig renders its run inline as a
 nested `Agent' row.  Any marked sections narrow what to review, the way `c c'
 attaches them."
   (interactive)
-  (let ((context (sprig-session--marked-context)))
+  (let ((context (sprig--marked-context)))
     (sprig-session--send
      (concat
       "Launch a subagent with the Task tool to independently review the "
@@ -2668,15 +2537,6 @@ turn if the CLI does not honour the request (see `sprig-interrupt-timeout')."
   (interactive)
   (sprig--review-interrupt-owned))
 
-(defun sprig-session--section-file (section)
-  "Return the file path SECTION refers to, or nil."
-  (and section
-       (pcase (oref section type)
-         ('sprig-hunk (plist-get (oref (oref section parent) value) :file))
-         ('sprig-change (plist-get (oref section value) :file))
-         ('sprig-tool (plist-get (car (plist-get (oref section value) :changes))
-                                 :file))
-         (_ nil))))
 
 (defun sprig-session--file-location (path)
   "Return PATH, as a TRAMP name on the session host when the session is remote."
@@ -2698,7 +2558,7 @@ line."
   (let ((section (magit-current-section)))
     (if (sprig-session--question-section-p section)
         (sprig-session-answer)
-      (let ((file (sprig-session--section-file section)))
+      (let ((file (sprig--section-file section)))
         (unless file (user-error "No file to visit here"))
         (find-file (sprig-session--file-location file))
         (when (eq (oref section type) 'sprig-hunk)
@@ -2739,15 +2599,6 @@ than as a turn in the conversation.")
 \\<sprig-session-compose-mode-map>\\[sprig-session-compose-send] sends, \
 \\[sprig-session-compose-abort] cancels.")
 
-(defun sprig-session--marked-context ()
-  "Return the text of the marked sections as a context string, or nil.
-Uses only real marks, not the section-at-point fallback."
-  (when sprig-session--marks
-    (let ((secs (sprig-session--marked-sections)))
-      (mapconcat (lambda (s)
-                   (string-trim (buffer-substring-no-properties
-                                 (oref s start) (oref s end))))
-                 secs "\n\n"))))
 
 (defun sprig-session-message (&optional plan queue)
   "Compose a message and send it to this review's session (`c c').
@@ -2763,7 +2614,7 @@ With PLAN non-nil, send the turn in plan mode (`c p'), which needs a turn
 of its own and so refuses to fold into a running one.  With QUEUE non-nil,
 hold it until the running turn ends (`c q')."
   (interactive)
-  (sprig-session--compose (current-buffer) (sprig-session--marked-context)
+  (sprig-session--compose (current-buffer) (sprig--marked-context)
                          plan queue))
 
 (defun sprig-session--compose (target context &optional plan queue)
@@ -2773,7 +2624,7 @@ CONTEXT is the attached-context string (or nil), PLAN sends in plan mode
 Shared by `sprig-session-message' and `sprig-diff-message'; call it from the
 buffer whose marks CONTEXT was collected in, so the section count reads
 right before the compose buffer takes over."
-  (let ((n (and context (length sprig-session--marks)))
+  (let ((n (and context (length sprig--marks)))
         (buf (get-buffer-create "*sprig-message*")))
     (with-current-buffer buf
       (sprig-session-compose-mode)
@@ -2846,7 +2697,7 @@ the CLI's own `/btw'."
   (unless sprig--session-id
     (user-error "No session yet to ask about; send a message first"))
   (let ((review (current-buffer))
-        (context (sprig-session--marked-context))
+        (context (sprig--marked-context))
         (buf (get-buffer-create "*sprig-message*")))
     (with-current-buffer buf
       (sprig-session-compose-mode)
@@ -2859,7 +2710,7 @@ the CLI's own `/btw'."
     (pop-to-buffer buf)
     (message "%sby the way: C-c C-c to ask, C-c C-k to cancel"
              (if context (format "%d section(s) attached.  "
-                                 (length (sprig-session--marked-sections)))
+                                 (length (sprig--marked-sections)))
                ""))))
 
 (defun sprig-session-compose-send ()
@@ -3001,7 +2852,7 @@ the couriered Edit must match."
   (let* ((section (magit-current-section))
          (hunk (or (sprig-session--stage-hunk section)
                    (user-error "Point is not on a hunk; try `e f' or `e s'")))
-         (file (or (sprig-session--section-file section)
+         (file (or (sprig--section-file section)
                    (user-error "No file at point to stage")))
          (lines (or (plist-get hunk :new) (plist-get hunk :old))))
     (sprig-session--open-stage-buffer
@@ -3017,7 +2868,7 @@ the whole file (`e f')."
    (progn
      (sprig-session--stage-guard)
      (list (read-string "Stage which file: "
-                        (sprig-session--section-file (magit-current-section)))
+                        (sprig--section-file (magit-current-section)))
            (read-string "Region (blank = whole file): "))))
   (sprig-session--stage-guard)
   (let ((path (string-trim (or file "")))
@@ -3078,7 +2929,7 @@ file the agent chose."
                        (equal (plist-get b :name) "Read")
                        (not (plist-get (plist-get b :result) :error))
                        (alist-get 'file_path
-                                  (sprig-session--parse-input
+                                  (sprig--parse-input
                                    (plist-get b :input))))))
         (when (and path (or (null base)
                             (equal base (file-name-nondirectory path))))
@@ -3539,7 +3390,7 @@ the hunk you are on, from a file you name, or from what the agent suggests."
     ("f" "a file / region you name (agent reads it)" sprig-session-stage-file)
     ("s" "let the agent suggest what to edit" sprig-session-stage-suggested)]])
 
-(transient-define-prefix sprig-session-session-dispatch ()
+(transient-define-prefix sprig-session-start-dispatch ()
   "Start or fork a session from the review buffer.
 `c' steers the conversation this buffer already owns; `s' is where a
 session of its own begins.  `s c' / `s p' start one and drop you straight
@@ -3557,7 +3408,7 @@ into its first-message prompt (plan mode for `s p')."
 ;; diff-review model, the ground truth that catches a change made by `Bash'
 ;; (a formatter, a `sed') with no tool payload to reconstruct from.  It
 ;; reuses the review-buffer grammar wholesale: the same `sprig-change' /
-;; `sprig-hunk' sections (`sprig-session--insert-change'), the same marks
+;; `sprig-hunk' sections (`sprig--insert-change'), the same marks
 ;; (`SPC' / `m'), and the same compose-and-send path, with a comment routed
 ;; back to the owning session (`sprig-session--compose').
 ;;
@@ -3593,9 +3444,9 @@ the committed changes alone.  It is passed to `git diff' verbatim."
 (defvar sprig-diff-mode-map
   (let ((map (make-sparse-keymap)))
     (set-keymap-parent map magit-section-mode-map)
-    (define-key map (kbd "SPC") #'sprig-session-toggle-mark)
-    (define-key map (kbd "m")   #'sprig-session-toggle-mark)
-    (define-key map (kbd "U")   #'sprig-session-unmark-all)
+    (define-key map (kbd "SPC") #'sprig-toggle-mark)
+    (define-key map (kbd "m")   #'sprig-toggle-mark)
+    (define-key map (kbd "U")   #'sprig-unmark-all)
     (define-key map (kbd "c")   #'sprig-diff-dispatch)
     (define-key map (kbd "g")   #'sprig-diff-refresh)
     (define-key map (kbd "RET") #'sprig-session-visit)
@@ -3611,7 +3462,7 @@ Mark a hunk with \\`SPC' and `c c' sends a comment about it to the session
   (setq-local revert-buffer-function #'sprig-diff-refresh)
   (setq-local truncate-lines nil)
   (setq-local word-wrap t)
-  (sprig-session--suppress-section-highlight))
+  (sprig--suppress-section-highlight))
 
 (defun sprig-diff--run-git (remote dir args)
   "Run git ARGS in DIR and return stdout, on REMOTE over SSH or locally.
@@ -3649,15 +3500,15 @@ staging them would touch the index."
   "Render git-diff TEXT as change sections in the current diff buffer.
 Marks anchor to sections about to be rebuilt, so they are cleared first."
   (let ((inhibit-read-only t)
-        (changes (sprig-session-parse-diff text)))
-    (remove-overlays (point-min) (point-max) 'sprig-session-mark t)
-    (setq sprig-session--marks nil)
+        (changes (sprig-parse-diff text)))
+    (remove-overlays (point-min) (point-max) 'sprig-mark t)
+    (setq sprig--marks nil)
     (erase-buffer)
     (magit-insert-section (sprig-diff-root)
       (if (null changes)
           (insert (format "No changes against %s.\n" sprig-diff-base))
         (dolist (change changes)
-          (sprig-session--insert-change change))))
+          (sprig--insert-change change))))
     (goto-char (point-min))))
 
 (defun sprig-session-diff ()
@@ -3706,7 +3557,7 @@ review buffer.  With QUEUE non-nil, hold it until the running turn ends."
   (interactive)
   (unless (buffer-live-p sprig-diff--review)
     (user-error "The review buffer for this diff is gone"))
-  (sprig-session--compose sprig-diff--review (sprig-session--marked-context)
+  (sprig-session--compose sprig-diff--review (sprig--marked-context)
                          nil queue))
 
 (defun sprig-diff-message-queue ()
@@ -3722,11 +3573,11 @@ review buffer.  With QUEUE non-nil, hold it until the running turn ends."
 
 ;;;; Verb keybindings
 
-(define-key sprig-session-mode-map (kbd "SPC") #'sprig-session-toggle-mark)
-(define-key sprig-session-mode-map (kbd "m")   #'sprig-session-toggle-mark)
-(define-key sprig-session-mode-map (kbd "U")   #'sprig-session-unmark-all)
+(define-key sprig-session-mode-map (kbd "SPC") #'sprig-toggle-mark)
+(define-key sprig-session-mode-map (kbd "m")   #'sprig-toggle-mark)
+(define-key sprig-session-mode-map (kbd "U")   #'sprig-unmark-all)
 (define-key sprig-session-mode-map (kbd "c")   #'sprig-session-dispatch)
-(define-key sprig-session-mode-map (kbd "s")   #'sprig-session-session-dispatch)
+(define-key sprig-session-mode-map (kbd "s")   #'sprig-session-start-dispatch)
 (define-key sprig-session-mode-map (kbd "P")   #'sprig-session-permission-mode)
 (define-key sprig-session-mode-map (kbd "e")   #'sprig-session-stage-dispatch)
 (define-key sprig-session-mode-map (kbd "k")   #'sprig-session-reject)
@@ -3741,41 +3592,56 @@ review buffer.  With QUEUE non-nil, hold it until the running turn ends."
 (define-key sprig-session-mode-map (kbd "t")   #'sprig-session-set-title)
 (define-key sprig-session-mode-map (kbd "T")   #'sprig-session-title-dispatch)
 
-;;;; Renamed options
+;;;; Renamed faces
 ;;
-;; The transcript buffer was `sprig-review-mode' until 0.51.0, when `review'
-;; moved to the changeset-review surface and the transcript became
-;; `sprig-session-mode'.  A `setq' on a renamed option would otherwise fail
-;; silently, so every user-facing option keeps its old name as an alias.
+;; The transcript's own faces, renamed with the mode in 0.51.0.  Aliased for
+;; the same reason the options above are: a theme naming a face that no
+;; longer exists fails silently.
 
-(define-obsolete-variable-alias 'sprig-review-heading-max-width
-  'sprig-session-heading-max-width "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-expand-diffs
-  'sprig-session-expand-diffs "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-timestamp-format
-  'sprig-session-timestamp-format "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-fontify-markdown
-  'sprig-session-fontify-markdown "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-defer-live-prose
-  'sprig-session-defer-live-prose "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-fontify-async
-  'sprig-session-fontify-async "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-fontify-idle-delay
-  'sprig-session-fontify-idle-delay "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-incremental-render
-  'sprig-session-incremental-render "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-refresh-delay
-  'sprig-session-refresh-delay "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-refresh-delay-max
-  'sprig-session-refresh-delay-max "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-debug-render
-  'sprig-session-debug-render "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-commit-instruction
-  'sprig-session-commit-instruction "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-accept-instruction
-  'sprig-session-accept-instruction "0.51.0")
-(define-obsolete-variable-alias 'sprig-review-decline-instruction
-  'sprig-session-decline-instruction "0.51.0")
+(define-obsolete-face-alias 'sprig-review-tool
+  'sprig-session-tool "0.51.0")
+(define-obsolete-face-alias 'sprig-review-todo-done
+  'sprig-session-todo-done "0.51.0")
+(define-obsolete-face-alias 'sprig-review-todo-active
+  'sprig-session-todo-active "0.51.0")
+(define-obsolete-face-alias 'sprig-review-todo-pending
+  'sprig-session-todo-pending "0.51.0")
+(define-obsolete-face-alias 'sprig-review-user
+  'sprig-session-user "0.51.0")
+(define-obsolete-face-alias 'sprig-review-user-highlight
+  'sprig-session-user-highlight "0.51.0")
+(define-obsolete-face-alias 'sprig-review-thinking
+  'sprig-session-thinking "0.51.0")
+(define-obsolete-face-alias 'sprig-review-meta-key
+  'sprig-session-meta-key "0.51.0")
+(define-obsolete-face-alias 'sprig-review-time
+  'sprig-session-time "0.51.0")
+(define-obsolete-face-alias 'sprig-review-working
+  'sprig-session-working "0.51.0")
+(define-obsolete-face-alias 'sprig-review-pending
+  'sprig-session-pending "0.51.0")
+(define-obsolete-face-alias 'sprig-review-queued
+  'sprig-session-queued "0.51.0")
+(define-obsolete-face-alias 'sprig-review-plan
+  'sprig-session-plan "0.51.0")
+(define-obsolete-face-alias 'sprig-review-context
+  'sprig-session-context "0.51.0")
+(define-obsolete-face-alias 'sprig-review-context-large
+  'sprig-session-context-large "0.51.0")
+(define-obsolete-face-alias 'sprig-review-context-huge
+  'sprig-session-context-huge "0.51.0")
+(define-obsolete-face-alias 'sprig-review-done
+  'sprig-session-done "0.51.0")
+(define-obsolete-face-alias 'sprig-review-failed
+  'sprig-session-failed "0.51.0")
+(define-obsolete-face-alias 'sprig-review-idle
+  'sprig-session-idle "0.51.0")
+(define-obsolete-face-alias 'sprig-review-waiting
+  'sprig-session-waiting "0.51.0")
+(define-obsolete-face-alias 'sprig-review-dialog
+  'sprig-session-dialog "0.51.0")
+(define-obsolete-face-alias 'sprig-review-dialog-picked
+  'sprig-session-dialog-picked "0.51.0")
 
 
 (provide 'sprig-session-mode)

@@ -144,9 +144,9 @@ timestamp, or the state line's rule."
                 (re-search-forward re)
                 (get-text-property (match-beginning 0) 'font-lock-face)))
       (should (eq (face-at "^Edit  ") 'sprig-session-tool))
-      (should (eq (face-at "^\\+new$") 'sprig-session-added))
-      (should (eq (face-at "^-old$") 'sprig-session-removed))
-      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-session-file))
+      (should (eq (face-at "^\\+new$") 'sprig-diff-added))
+      (should (eq (face-at "^-old$") 'sprig-diff-removed))
+      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-diff-file))
       (should (eq (face-at "Title:") 'sprig-session-meta-key)))))
 
 (ert-deftest sprig-session-mode-test-fontify-is-memoised ()
@@ -1071,19 +1071,19 @@ the fold learns the id from the result rather than from the call."
     (goto-char (point-min))
     (re-search-forward "\\+1")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                'sprig-session-stat-added))
+                'sprig-diff-stat-added))
     (re-search-forward "-2")
     (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
-                'sprig-session-stat-removed))))
+                'sprig-diff-stat-removed))))
 
 (ert-deftest sprig-session-mode-test-verbs-are-bound ()
   ;; Every verb the README documents as a key has to actually be on that key.
   ;; `C' was documented and unbound, reachable only through the transient.
   (with-temp-buffer
     (sprig-session-mode)
-    (dolist (pair '(("SPC" . sprig-session-toggle-mark)
-                    ("m"   . sprig-session-toggle-mark)
-                    ("U"   . sprig-session-unmark-all)
+    (dolist (pair '(("SPC" . sprig-toggle-mark)
+                    ("m"   . sprig-toggle-mark)
+                    ("U"   . sprig-unmark-all)
                     ("c"   . sprig-session-dispatch)
                     ("k"   . sprig-session-reject)
                     ("a"   . sprig-session-answer-dispatch)
@@ -1732,14 +1732,14 @@ the fold learns the id from the result rather than from the call."
     (goto-char (point-min))
     (should (re-search-forward "^\\+new$" nil t))
     (let ((ident (magit-section-ident (magit-current-section))))
-      (sprig-session-toggle-mark)
-      (should (member ident sprig-session--marks))
-      (should (memq (magit-get-section ident) (sprig-session--marked-sections)))
+      (sprig-toggle-mark)
+      (should (member ident sprig--marks))
+      (should (memq (magit-get-section ident) (sprig--marked-sections)))
       ;; Toggling again clears it.
       (goto-char (point-min))
       (re-search-forward "^\\+new$")
-      (sprig-session-toggle-mark)
-      (should-not (member ident sprig-session--marks)))))
+      (sprig-toggle-mark)
+      (should-not (member ident sprig--marks)))))
 
 (ert-deftest sprig-session-mode-test-reject-pairs ()
   (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
@@ -1870,8 +1870,8 @@ the fold learns the id from the result rather than from the call."
   (let ((sprig-remotes nil) buffers)
     (unwind-protect
         (progn
-          (push (sprig-session-session "/tmp/sprig-newsess-probe/") buffers)
-          (push (sprig-session-session "/tmp/sprig-newsess-probe/") buffers)
+          (push (sprig-session-open "/tmp/sprig-newsess-probe/") buffers)
+          (push (sprig-session-open "/tmp/sprig-newsess-probe/") buffers)
           (should (= 2 (length buffers)))
           (should (not (eq (nth 0 buffers) (nth 1 buffers))))
           (should (= 2 (length (seq-uniq (mapcar #'buffer-name buffers))))))
@@ -1884,8 +1884,8 @@ the fold learns the id from the result rather than from the call."
   (let ((sprig-remotes nil) parent forked)
     (unwind-protect
         (progn
-          (setq parent (sprig-session-session "/tmp/sprig-fork-probe/" "sess-1"))
-          (setq forked (sprig-session-session "/tmp/sprig-fork-probe/" "sess-1"
+          (setq parent (sprig-session-open "/tmp/sprig-fork-probe/" "sess-1"))
+          (setq forked (sprig-session-open "/tmp/sprig-fork-probe/" "sess-1"
                                              nil t))
           (should-not (eq parent forked))
           (with-current-buffer forked
@@ -1896,7 +1896,7 @@ the fold learns the id from the result rather than from the call."
           (with-current-buffer parent
             (should-not sprig--fork-session))
           ;; Opening the parent again still reuses the parent's buffer.
-          (should (eq parent (sprig-session-session "/tmp/sprig-fork-probe/"
+          (should (eq parent (sprig-session-open "/tmp/sprig-fork-probe/"
                                                    "sess-1"))))
       (dolist (b (list parent forked))
         (when (buffer-live-p b) (kill-buffer b))))))
@@ -2122,7 +2122,7 @@ the fold learns the id from the result rather than from the call."
   (with-temp-buffer
     (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-session--marked-context) (lambda () nil))
+      (cl-letf (((symbol-function 'sprig--marked-context) (lambda () nil))
                 ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
         (sprig-session-review)
@@ -2136,7 +2136,7 @@ the fold learns the id from the result rather than from the call."
   (with-temp-buffer
     (sprig-session-mode)
     (let (sent)
-      (cl-letf (((symbol-function 'sprig-session--marked-context)
+      (cl-letf (((symbol-function 'sprig--marked-context)
                  (lambda () "MARKED-HUNK"))
                 ((symbol-function 'sprig-session--send)
                  (lambda (text) (setq sent text))))
@@ -2159,12 +2159,12 @@ the fold learns the id from the result rather than from the call."
     ;; On a hunk: the owning change's file.
     (goto-char (point-min))
     (re-search-forward "^\\+new$")
-    (should (equal (sprig-session--section-file (magit-current-section))
+    (should (equal (sprig--section-file (magit-current-section))
                    "/tmp/x.el"))
     ;; On the change (file) heading: the same file.
     (goto-char (point-min))
     (re-search-forward "^/tmp/x\\.el$")
-    (should (equal (sprig-session--section-file (magit-current-section))
+    (should (equal (sprig--section-file (magit-current-section))
                    "/tmp/x.el")))
   ;; A Bash tool refers to no file.
   (let ((model (sprig-session-build
@@ -2174,7 +2174,7 @@ the fold learns the id from the result rather than from the call."
     (sprig-session-tests--rendered model nil
       (goto-char (point-min))
       (re-search-forward "^Bash  ")
-      (should (null (sprig-session--section-file (magit-current-section)))))))
+      (should (null (sprig--section-file (magit-current-section)))))))
 
 (ert-deftest sprig-session-mode-test-strip-read-numbers ()
   "The cat -n prefix is stripped and wrapper lines dropped, bytes preserved."
@@ -2640,7 +2640,7 @@ new file mode 100644
     (sprig-diff--render "")
     (should (string-match-p "No changes against HEAD\\."
                             (buffer-string)))
-    (should-not sprig-session--marks)))
+    (should-not sprig--marks)))
 
 (ert-deftest sprig-session-mode-test-diff-runs-local-and-remote ()
   ;; Local reads run git in the repo dir; a remote read rides the session's
@@ -2677,8 +2677,8 @@ new file mode 100644
             ;; Mark the first hunk (first child of the first change).
             (let* ((change (car (oref magit-root-section children)))
                    (hunk (car (oref change children))))
-              (setq sprig-session--marks (list (magit-section-ident hunk))))
-            (should (equal (sprig-session--marked-context)
+              (setq sprig--marks (list (magit-section-ident hunk))))
+            (should (equal (sprig--marked-context)
                            "-  (bar))\n+  (baz))"))
             (sprig-diff-message))
           (with-current-buffer "*sprig-message*"

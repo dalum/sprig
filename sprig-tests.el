@@ -459,7 +459,7 @@ with an empty, actionless list."
   "Visiting a root starts a fresh session in it, pinned to the line's host;
 a local line (no host) pins to this machine rather than following a remote."
   (let (captured)
-    (cl-letf (((symbol-function 'sprig-session-session)
+    (cl-letf (((symbol-function 'sprig-session-open)
                (lambda (dir &optional id host &rest _)
                  (setq captured (list dir id host))))
               ((symbol-function 'sprig--status-refresh) #'ignore))
@@ -1712,19 +1712,19 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
 
 (ert-deftest sprig-session-test-lines ()
   ;; A trailing newline does not add a spurious final empty line.
-  (should (equal (sprig-session--lines "foo\nbar\n") '("foo" "bar")))
-  (should (equal (sprig-session--lines "foo\nbar") '("foo" "bar")))
+  (should (equal (sprig--lines "foo\nbar\n") '("foo" "bar")))
+  (should (equal (sprig--lines "foo\nbar") '("foo" "bar")))
   ;; A blank line inside the text is preserved.
-  (should (equal (sprig-session--lines "a\n\nb") '("a" "" "b")))
+  (should (equal (sprig--lines "a\n\nb") '("a" "" "b")))
   ;; Empty text is no lines, not one empty line.
-  (should (equal (sprig-session--lines "") nil))
-  (should (equal (sprig-session--lines nil) nil)))
+  (should (equal (sprig--lines "") nil))
+  (should (equal (sprig--lines nil) nil)))
 
 (ert-deftest sprig-session-test-edit-changes ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/x.el" :old_string "old\nline"
                        :new_string "new\nline\nhere")))
-         (changes (sprig-session-tool-changes "Edit" input))
+         (changes (sprig-tool-changes "Edit" input))
          (change (car changes)))
     (should (= (length changes) 1))
     (should (equal (plist-get change :file) "/tmp/x.el"))
@@ -1733,13 +1733,13 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
       (should (equal (plist-get hunk :old) '("old" "line")))
       (should (equal (plist-get hunk :new) '("new" "line" "here"))))
     ;; +3 / -2.
-    (should (equal (sprig-session-change-stat change) '(3 . 2)))))
+    (should (equal (sprig-change-stat change) '(3 . 2)))))
 
 (ert-deftest sprig-session-test-edit-replace-all ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/x.el" :old_string "a"
                        :new_string "b" :replace_all t)))
-         (hunk (car (plist-get (car (sprig-session-tool-changes "Edit" input))
+         (hunk (car (plist-get (car (sprig-tool-changes "Edit" input))
                                :hunks))))
     (should (eq (plist-get hunk :replace-all) t))))
 
@@ -1748,32 +1748,32 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                  (list :file_path "/tmp/x.el"
                        :edits (vector (list :old_string "a" :new_string "b")
                                       (list :old_string "c" :new_string "d")))))
-         (change (car (sprig-session-tool-changes "MultiEdit" input))))
+         (change (car (sprig-tool-changes "MultiEdit" input))))
     (should (= (length (plist-get change :hunks)) 2))
     (should (equal (plist-get (nth 1 (plist-get change :hunks)) :old) '("c")))))
 
 (ert-deftest sprig-session-test-write-changes ()
   (let* ((input (json-serialize
                  (list :file_path "/tmp/new.el" :content "line1\nline2\n")))
-         (change (car (sprig-session-tool-changes "Write" input))))
+         (change (car (sprig-tool-changes "Write" input))))
     (should (eq (plist-get change :kind) 'write))
     (let ((hunk (car (plist-get change :hunks))))
       ;; A write has no removals, only additions.
       (should (null (plist-get hunk :old)))
       (should (equal (plist-get hunk :new) '("line1" "line2"))))
-    (should (equal (sprig-session-change-stat change) '(2 . 0)))))
+    (should (equal (sprig-change-stat change) '(2 . 0)))))
 
 (ert-deftest sprig-session-test-non-file-tool ()
-  (should (null (sprig-session-tool-changes
+  (should (null (sprig-tool-changes
                  "Bash" (json-serialize (list :command "ls")))))
   ;; A file tool missing its path yields no change rather than an error.
-  (should (null (sprig-session-tool-changes "Edit" "{}"))))
+  (should (null (sprig-tool-changes "Edit" "{}"))))
 
 (ert-deftest sprig-session-test-format-change ()
   (let* ((input (json-serialize
                  (list :file_path "x" :old_string "a\nb" :new_string "c")))
-         (change (car (sprig-session-tool-changes "Edit" input))))
-    (should (equal (sprig-session-format-change change)
+         (change (car (sprig-tool-changes "Edit" input))))
+    (should (equal (sprig-format-change change)
                    "x\n-a\n-b\n+c"))))
 
 ;;;; Courier
@@ -1874,7 +1874,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "-old\n"
                        "+new\n"
                        " tail\n"))
-         (changes (sprig-session-parse-diff diff))
+         (changes (sprig-parse-diff diff))
          (change (car changes)))
     (should (= (length changes) 1))
     (should (equal (plist-get change :file) "x.el"))
@@ -1884,13 +1884,13 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
       ;; Context lines are dropped, matching the tool-payload model.
       (should (equal (plist-get hunk :old) '("old")))
       (should (equal (plist-get hunk :new) '("new"))))
-    (should (equal (sprig-session-change-stat change) '(1 . 1)))))
+    (should (equal (sprig-change-stat change) '(1 . 1)))))
 
 (ert-deftest sprig-session-test-parse-diff-splits-runs ()
   "Two change runs separated by context in one hunk become two hunks."
   (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
                        "@@ -1,6 +1,6 @@\n a\n-b\n+B\n c\n d\n-e\n+E\n f\n"))
-         (hunks (plist-get (car (sprig-session-parse-diff diff)) :hunks)))
+         (hunks (plist-get (car (sprig-parse-diff diff)) :hunks)))
     (should (= (length hunks) 2))
     (should (equal (plist-get (nth 0 hunks) :old) '("b")))
     (should (equal (plist-get (nth 0 hunks) :new) '("B")))
@@ -1905,13 +1905,13 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "--- /dev/null\n"
                        "+++ b/n.el\n"
                        "@@ -0,0 +1,2 @@\n+line1\n+line2\n"))
-         (change (car (sprig-session-parse-diff diff)))
+         (change (car (sprig-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
     (should (equal (plist-get change :file) "n.el"))
     (should (eq (plist-get change :kind) 'write))
     (should (null (plist-get hunk :old)))
     (should (equal (plist-get hunk :new) '("line1" "line2")))
-    (should (equal (sprig-session-change-stat change) '(2 . 0)))))
+    (should (equal (sprig-change-stat change) '(2 . 0)))))
 
 (ert-deftest sprig-session-test-parse-diff-deleted-file ()
   "A deleted file is an `edit' with a nil new side (a pure deletion)."
@@ -1920,13 +1920,13 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "--- a/d.el\n"
                        "+++ /dev/null\n"
                        "@@ -1,2 +0,0 @@\n-line1\n-line2\n"))
-         (change (car (sprig-session-parse-diff diff)))
+         (change (car (sprig-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
     (should (equal (plist-get change :file) "d.el"))
     (should (eq (plist-get change :kind) 'edit))
     (should (equal (plist-get hunk :old) '("line1" "line2")))
     (should (null (plist-get hunk :new)))
-    (should (equal (sprig-session-change-stat change) '(0 . 2)))))
+    (should (equal (sprig-change-stat change) '(0 . 2)))))
 
 (ert-deftest sprig-session-test-parse-diff-multi-file ()
   "Each `diff --git' header starts a fresh file."
@@ -1934,7 +1934,7 @@ If the browser didn't open, visit: https://claude.com/cai/oauth/authorize\
                        "@@ -1 +1 @@\n-a\n+A\n"
                        "diff --git a/two b/two\n--- a/two\n+++ b/two\n"
                        "@@ -1 +1 @@\n-b\n+B\n"))
-         (changes (sprig-session-parse-diff diff)))
+         (changes (sprig-parse-diff diff)))
     (should (equal (mapcar (lambda (c) (plist-get c :file)) changes)
                    '("one" "two")))))
 
@@ -1945,9 +1945,9 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                        "@@ -1,2 +1,2 @@\n"
                        "---- old rule\n"          ; a removed line "--- old rule"
                        "++++ new rule\n"))        ; an added line "+++ new rule"
-         (change (car (sprig-session-parse-diff diff)))
+         (change (car (sprig-parse-diff diff)))
          (hunk (car (plist-get change :hunks))))
-    (should (= (length (sprig-session-parse-diff diff)) 1))
+    (should (= (length (sprig-parse-diff diff)) 1))
     (should (equal (plist-get change :file) "md"))
     (should (equal (plist-get hunk :old) '("--- old rule")))
     (should (equal (plist-get hunk :new) '("+++ new rule")))))
@@ -1956,18 +1956,18 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
   "Binary files carry no hunks and are dropped."
   (let ((diff (concat "diff --git a/img.png b/img.png\n"
                       "Binary files a/img.png and b/img.png differ\n")))
-    (should (null (sprig-session-parse-diff diff)))))
+    (should (null (sprig-parse-diff diff)))))
 
 (ert-deftest sprig-session-test-parse-diff-empty ()
-  (should (null (sprig-session-parse-diff "")))
-  (should (null (sprig-session-parse-diff nil))))
+  (should (null (sprig-parse-diff "")))
+  (should (null (sprig-parse-diff nil))))
 
 (ert-deftest sprig-session-test-parse-diff-round-trips-format ()
   "Parsing then formatting a single-run edit matches the payload path."
   (let* ((diff (concat "diff --git a/x b/x\n--- a/x\n+++ b/x\n"
                        "@@ -1,2 +1,1 @@\n-a\n-b\n+c\n"))
-         (change (car (sprig-session-parse-diff diff))))
-    (should (equal (sprig-session-format-change change) "x\n-a\n-b\n+c"))))
+         (change (car (sprig-parse-diff diff))))
+    (should (equal (sprig-format-change change) "x\n-a\n-b\n+c"))))
 
 (ert-deftest sprig-session-test-build-coalesces-text ()
   (let* ((model (sprig-session-build
@@ -2051,10 +2051,10 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
 ;;;; Stored-session log parser (sprig-session.el)
 
 (ert-deftest sprig-session-test-session-path ()
-  (should (equal (sprig-session-session-file "/home/dalum/Projects/sprig" "abc")
+  (should (equal (sprig-session-log-path "/home/dalum/Projects/sprig" "abc")
                  "~/.claude/projects/-home-dalum-Projects-sprig/abc.jsonl"))
   ;; Dots become dashes too, matching the CLI's project-dir naming.
-  (should (equal (sprig-session-session-file "/home/x/.cache/p" "id")
+  (should (equal (sprig-session-log-path "/home/x/.cache/p" "id")
                  "~/.claude/projects/-home-x--cache-p/id.jsonl")))
 
 (ert-deftest sprig-session-test-session-parse-assistant ()
@@ -2075,7 +2075,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
       (should (equal (nth 2 tc) "Bash"))
       ;; The input passes through as the parsed object; the diff engine
       ;; reads it the same as a wire-path JSON string.
-      (should (null (sprig-session-tool-changes "Bash" (nth 3 tc)))))))
+      (should (null (sprig-tool-changes "Bash" (nth 3 tc)))))))
 
 (ert-deftest sprig-session-test-session-edit-changes ()
   (let* ((line (json-serialize
@@ -2087,7 +2087,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                                                        :old_string "x"
                                                        :new_string "y")))))))
          (tc (car (sprig-session-parse-session-line line)))
-         (changes (sprig-session-tool-changes (nth 2 tc) (nth 3 tc))))
+         (changes (sprig-tool-changes (nth 2 tc) (nth 3 tc))))
     (should (equal (plist-get (car changes) :file) "a.el"))))
 
 (ert-deftest sprig-session-test-session-parse-user ()
@@ -2195,7 +2195,7 @@ Position disambiguates: once inside a hunk a `-'/`+' line is a change."
                   (list :type "assistant"
                         :message (list :content
                                        (vector (list :type "text" :text "yo")))))))
-         (model (sprig-session-session-model lines))
+         (model (sprig-session-log-model lines))
          (blocks (plist-get model :blocks)))
     (should (equal (plist-get model :title) "T"))
     (should (eq (plist-get (nth 0 blocks) :type) 'user))
@@ -3386,7 +3386,7 @@ without a real SSH process."
   ;; must not come back on the primary remote nor a remote row run locally.
   (let ((sprig-remotes '("me@host"))
         calls)
-    (cl-letf (((symbol-function 'sprig-session-session)
+    (cl-letf (((symbol-function 'sprig-session-open)
                (lambda (&rest args) (push args calls) (current-buffer))))
       (sprig--status-review-buffer '(:host "me@host" :dir "/p" :session "s1"))
       (sprig--status-review-buffer '(:host nil :dir "/p" :session "s2"))
