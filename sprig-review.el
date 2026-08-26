@@ -767,19 +767,58 @@ offset."
              (move-to-column col))
             (fallback (goto-char (min fallback (point-max))))))))
 
+(defun sprig-review--place-at (pos)
+  "Return the place (see `sprig-review--place\=') read at POS."
+  (save-excursion (goto-char pos) (sprig-review--place)))
+
+(defun sprig-review--relocate (place fallback)
+  "Return where PLACE is now, or FALLBACK, without moving point."
+  (save-excursion (sprig-review--goto-place place fallback) (point)))
+
+(defun sprig-review--render-in-place (&optional redraw)
+  "Run REDRAW (default `sprig-review--render\='), keeping the reading position.
+A redraw erases the buffer, so `sprig-review--render\=' leaves point at the
+top.  That is right for a fresh review and wrong for an edit made while
+reading one: filing a comment should not cost you your place.  Each
+window showing the review is put back by its own point and start as
+well, since the erase collapses those independently of the buffer\='s own
+point, and the window you are reading in need not be the selected one."
+  (let ((place (sprig-review--place))
+        (pos (point))
+        (windows (mapcar (lambda (win)
+                           (list win
+                                 (sprig-review--place-at (window-point win))
+                                 (window-point win)
+                                 (sprig-review--place-at (window-start win))
+                                 (window-start win)))
+                         (get-buffer-window-list nil nil t))))
+    (funcall (or redraw #'sprig-review--render))
+    (sprig-review--goto-place place pos)
+    (pcase-dolist (`(,win ,point-place ,point-pos ,start-place ,start-pos)
+                   windows)
+      (when (window-live-p win)
+        (set-window-point win (sprig-review--relocate point-place point-pos))
+        ;; NOFORCE, so a start that would now put point off screen is
+        ;; recomputed rather than obeyed.
+        (set-window-start win (sprig-review--relocate start-place start-pos)
+                          t)))))
+
 (defun sprig-review--reload (&optional keep-point)
   "Re-read the diff, re-anchor the drafts, and redraw.
 KEEP-POINT holds the reading position across the redraw: the same diff
 line under point, and the same files open (see `sprig-review--expanded\=')."
-  (let ((place (and keep-point (sprig-review--place)))
-        (pos (and keep-point (point))))
-    (setq sprig-review--changes
-          (sprig-parse-diff (sprig-review--git sprig-review--remote
-                                               sprig-review--root))
-          sprig-review--drafts
-          (sprig-review--reanchor sprig-review--drafts sprig-review--changes))
-    (sprig-review--render)
-    (when keep-point (sprig-review--goto-place place pos))))
+  (let ((redraw
+         (lambda ()
+           (setq sprig-review--changes
+                 (sprig-parse-diff (sprig-review--git sprig-review--remote
+                                                      sprig-review--root))
+                 sprig-review--drafts
+                 (sprig-review--reanchor sprig-review--drafts
+                                         sprig-review--changes))
+           (sprig-review--render))))
+    (if keep-point
+        (sprig-review--render-in-place redraw)
+      (funcall redraw))))
 
 ;;;; Writing a comment
 
@@ -838,7 +877,7 @@ Nothing reaches the agent until the review is published."
                                                 (plist-get draft :id)))
                                 sprig-review--drafts)
                     (list draft)))
-      (sprig-review--render))
+      (sprig-review--render-in-place))
     (quit-window t)
     (message "sprig: draft comment filed; `c p' publishes the review")))
 
@@ -880,7 +919,7 @@ another thing point can sit on, and nothing has been sent."
     (setq sprig-review--drafts
           (seq-remove (lambda (d) (eq (plist-get d :id) (plist-get draft :id)))
                       sprig-review--drafts))
-    (sprig-review--render)
+    (sprig-review--render-in-place)
     (message "sprig: comment taken back")))
 
 (defun sprig-review-discard-drafts ()
@@ -891,7 +930,7 @@ another thing point can sit on, and nothing has been sent."
     (when (yes-or-no-p (format "Discard %d draft comment%s? "
                                n (if (= n 1) "" "s")))
       (setq sprig-review--drafts nil)
-      (sprig-review--render)
+      (sprig-review--render-in-place)
       (message "sprig: %d draft%s discarded" n (if (= n 1) "" "s")))))
 
 ;;;; Publishing
@@ -989,7 +1028,7 @@ yours."
        (when (buffer-live-p review)
          (with-current-buffer review
            (setq sprig-review--drafts nil)
-           (sprig-review--render)))
+           (sprig-review--render-in-place)))
        (sprig-review--publish-format text ctx))
      (format "%d comment%s" n (if (= n 1) "" "s")))
     (with-current-buffer "*sprig-message*"

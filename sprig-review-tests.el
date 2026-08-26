@@ -516,6 +516,55 @@ file's heading, so an annotated review reads back as one document."
         (should (equal (plist-get d :file) "foo.el"))
         (should (equal (plist-get d :anchor) '("  (baz))")))))))
 
+(ert-deftest sprig-review-test-filing-a-comment-holds-your-place ()
+  "Filing a draft redraws the review, and the redraw must not cost you your
+place: point stays on the line you were commenting on, not the top."
+  (sprig-review-tests--with
+    (let ((review (current-buffer)))
+      (sprig-review-tests--goto "(baz))")
+      (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+        (sprig-review-comment))
+      (unwind-protect
+          (with-current-buffer "*sprig-comment*"
+            (insert "Prefer bar.")
+            (cl-letf (((symbol-function 'quit-window) #'ignore))
+              (sprig-review-comment-save)))
+        (kill-buffer "*sprig-comment*"))
+      (with-current-buffer review
+        (let ((l (sprig-review--line-at)))
+          (should (equal (plist-get l :file) "foo.el"))
+          (should (equal (plist-get l :text) "  (baz))")))))))
+
+(ert-deftest sprig-review-test-filing-a-comment-holds-the-window ()
+  "The window showing the review keeps its point too.  The redraw runs from
+the comment buffer, so the review is not even current, and a window keeps
+its own point that `erase-buffer\=' collapses independently."
+  (let ((buf (get-buffer-create "*sprig-review-place-test*")))
+    (unwind-protect
+        (with-current-buffer buf
+          (sprig-review-mode)
+          (setq sprig-review--changes
+                (sprig-parse-diff sprig-review-tests--diff))
+          (sprig-review--render)
+          (let ((win (display-buffer buf '(display-buffer-same-window))))
+            (should (window-live-p win))
+            (set-window-buffer win buf)
+            (sprig-review-tests--goto "(baz))")
+            (set-window-point win (point))
+            (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+              (sprig-review-comment))
+            (unwind-protect
+                (with-current-buffer "*sprig-comment*"
+                  (insert "Prefer bar.")
+                  (cl-letf (((symbol-function 'quit-window) #'ignore))
+                    (sprig-review-comment-save)))
+              (kill-buffer "*sprig-comment*"))
+            (should (window-live-p win))
+            (should (equal (plist-get (sprig-review--line-at (window-point win))
+                                      :text)
+                           "  (baz))"))))
+      (kill-buffer buf))))
+
 ;;;; Re-anchoring across a refresh
 
 (ert-deftest sprig-review-test-reanchor-keeps-an-unmoved-comment ()
