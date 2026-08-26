@@ -278,6 +278,12 @@ question the reply is answering rather than more of the reply.")
 (defface sprig-status-group '((t :inherit font-lock-keyword-face :weight bold))
   "Face for a navigator group heading naming the host its rows run on.")
 
+(defface sprig-model-tag '((t :inherit shadow))
+  "Face for the model tag on a state line.
+Dim, unlike the mode beside it: which model a session runs on is standing
+identity rather than news about this turn, so it should be readable at a
+glance without competing with the state it sits next to.")
+
 (defface sprig-mode-tag '((t :inherit font-lock-keyword-face))
   "Face for the permission mode tag on a state line.
 Shared by the navigator preview and the session buffer, so `plan' reads the
@@ -1579,6 +1585,7 @@ script.  Regenerate with broker/embed.py after editing the broker.")
 ;;   (subagent-call ID TID NAME INPUT)  a step the subagent under ID took
 ;;   (subagent-result ID TID ERR TEXT)  that step's result
 ;;   (mode MODE)               the session's permission mode (e.g. "plan")
+;;   (model NAME)              the model the CLI is actually running on
 ;;   (control-request ID REQ)  the CLI asks us to answer a control request
 ;;   (control-response ID SUB) the CLI's receipt for a request we sent
 ;;   (error MESSAGE)           a backend error to surface inline
@@ -1704,7 +1711,12 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
         (cond
          ;; Session init: report the id; the sink decides whether to keep it.
          ((and (equal .type "system") (equal .subtype "init"))
-          (when .session_id (list (list 'session .session_id))))
+          (append
+           (when .session_id (list (list 'session .session_id)))
+           ;; The only place the CLI names the model with its context marker
+           ;; (`claude-opus-5[1m]'), which the per-turn field below drops, and
+           ;; the only word we get at all before the first turn runs.
+           (when .model (list (list 'model .model)))))
          ;; A status message reports the current permission mode, e.g. after
          ;; a `set_permission_mode' control request switches to plan, and it
          ;; brackets a compaction: `compacting' when it starts, then a
@@ -1749,11 +1761,17 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
            ;; The turn opens: its message carries the prompt's token usage,
            ;; which is the context-window size in use for this turn.
            ((equal .event.type "message_start")
-            (when .event.message.usage
-              (list (list 'context
-                          (+ (or .event.message.usage.input_tokens 0)
-                             (or .event.message.usage.cache_read_input_tokens 0)
-                             (or .event.message.usage.cache_creation_input_tokens 0))))))
+            (append
+             ;; Every turn names its own model, so a switch mid-session, or a
+             ;; fallback the CLI made on its own, shows up on the turn it
+             ;; happens rather than only on the next fresh session.
+             (when .event.message.model
+               (list (list 'model .event.message.model)))
+             (when .event.message.usage
+               (list (list 'context
+                           (+ (or .event.message.usage.input_tokens 0)
+                              (or .event.message.usage.cache_read_input_tokens 0)
+                              (or .event.message.usage.cache_creation_input_tokens 0)))))))
            ;; A new text block after earlier text (e.g. prose resuming after
            ;; a tool use): the sink separates them with a paragraph break.
            ((and (equal .event.type "content_block_start")
@@ -4116,12 +4134,13 @@ be parsed."
 (defun sprig--events-preview (events)
   "Return a preview plist for EVENTS' conversation tail, or nil.
 The plist is (:prompt STR :reply STR :time ISO :context N :done BOOL :error
-BOOL :mode STR :pending BOOL :agent-running BOOL): the last user turn
-collapsed to a line, the
+BOOL :mode STR :model STR :pending BOOL :agent-running BOOL): the last user
+turn collapsed to a line, the
 agent's final message that answered it (only the last text block of that
 turn, not the running narration between its tool calls, its structure kept
 for the markdown pass), the stamp of the freshest block, and the turn's
-outcome, context size, and permission mode for the preview's state line.
+outcome, context size, permission mode, and model for the preview's state
+line.
 When the turn since your prompt carried no prose (it ended on a tool call or
 a question), or there is no user turn at all, the reply falls back to the
 last assistant text anywhere.  EVENTS are chronological (the session model's
@@ -4164,6 +4183,7 @@ split out so a caller holding a model already built need not build another."
               (done (plist-get model :done))
               (err (plist-get model :error))
               (mode (plist-get model :mode))
+              (model-name (plist-get model :model))
               (pending (and (sprig-session-pending-dialog model) t))
               (agent-running (and (sprig-session-agent-running model) t)))
           (when (or prompt* reply ctx done err pending mode agent-running)
@@ -4175,6 +4195,7 @@ split out so a caller holding a model already built need not build another."
                   :prompt-time (and prompt* (plist-get prompt-block :time))
                   :reply-time (and reply (plist-get reply-block :time))
                   :context ctx :done done :error err :mode mode
+                  :model model-name
                   :pending pending :agent-running agent-running)))))))
 
 (defun sprig--entry-preview (entry)
@@ -4830,16 +4851,18 @@ anything else for `idle'."
   "Return the preview's leading state line for ENTRY, or nil.
 Mirrors the session buffer's state line: a glyph and word for what the turn
 is doing or how it ended, then the permission mode when it is a notable one,
-then the context in use.  The glyph, word, and face are `sprig--state-parts',
-shared with the session buffer so the two agree; only which state applies is
-decided here.  The live streaming and waiting states come from ENTRY's own
-status, as the row glyph does; the turn's outcome, permission mode, and
-context size come from PREVIEW's model fields.  nil when there is no status
-and no model at all (nothing to say)."
+the model it runs on, then the context in use.  The glyph, word, and face
+are `sprig--state-parts', shared with the session buffer so the two agree;
+only which state applies is decided here.  The live streaming and waiting
+states come from ENTRY's own status, as the row glyph does; the turn's
+outcome, permission mode, model, and context size come from PREVIEW's model
+fields.  nil when there is no status and no built model at all (nothing to
+say)."
   (let ((status (plist-get entry :status))
         (queued (plist-get entry :queued))
         (ctx (plist-get preview :context))
-        (mode (sprig--notable-mode (plist-get preview :mode))))
+        (mode (sprig--notable-mode (plist-get preview :mode)))
+        (model (sprig--model-label (plist-get preview :model))))
     (when (or status ctx mode (and queued (> queued 0))
               (plist-get preview :done) (plist-get preview :error)
               (plist-get preview :pending) (plist-get preview :agent-running))
@@ -4868,6 +4891,13 @@ and no model at all (nothing to say)."
                 (when mode
                   (concat (propertize "  ·  " 'face face)
                           (propertize mode 'face 'sprig-mode-tag)))
+                ;; Which model the row actually runs on, which `sprig-model'
+                ;; only asks for: the CLI can answer with another, and a
+                ;; session keeps the model it was started on however that
+                ;; setting later changes.  Dim, in its own face.
+                (when model
+                  (concat (propertize "  ·  " 'face face)
+                          (propertize model 'face 'sprig-model-tag)))
                 (when (and (numberp ctx) (> ctx 0))
                   (concat (propertize "  ·  " 'face face)
                           ;; Colour the count on its own terms, escalating past
@@ -4886,6 +4916,23 @@ review header, so all three agree on what counts as notable."
   (and (stringp mode)
        (not (member mode '("auto" "default" "manual")))
        mode))
+
+(defun sprig--model-label (model)
+  "Return a short display label for MODEL, or nil when there is none.
+The CLI names a model in full (`claude-opus-5', `claude-sonnet-4-5-20250929')
+and a state line has no room for that, so the vendor prefix and the dated
+snapshot suffix go: neither tells a reader of one line anything.  A trailing
+marker stays, because `claude-opus-5[1m]' reading as `opus-5[1m]' says the
+session has the 1M context window, which is exactly what the line beside the
+context readout is for.  Shared by the navigator and the session buffer so
+the two agree."
+  (when (and (stringp model) (not (string-empty-p model)))
+    (let* ((marker (when (string-match "\\(\\[[^]]*\\]\\)\\'" model)
+                     (match-string 1 model)))
+           (base (if marker (substring model 0 (match-beginning 1)) model)))
+      (setq base (if (string-prefix-p "claude-" base) (substring base 7) base))
+      (setq base (replace-regexp-in-string "-[0-9]\\{8\\}\\'" "" base))
+      (unless (string-empty-p base) (concat base marker)))))
 
 (defun sprig--status-context-face (tokens)
   "Return the state-line face for TOKENS of context, escalating with size.

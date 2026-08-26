@@ -211,11 +211,11 @@ rebuild the whole history.")
 (defun sprig-session--initial-state ()
   "Return a fresh, empty `sprig-session--fold-events' state.
 The state is an opaque list of the fold's accumulators, in the order the
-folder and finaliser unpack them: session, title, mode, cost, error, done,
-context, the pending block timestamp, the reversed block list, the open
-text/thinking block, the task list, pending TaskCreate subjects, Task* tool
-ids, and the running task snapshot."
-  (list nil nil nil nil nil nil nil nil '() nil '() '() '() nil))
+folder and finaliser unpack them: session, title, mode, model, cost, error,
+done, context, the pending block timestamp, the reversed block list, the
+open text/thinking block, the task list, pending TaskCreate subjects, Task*
+tool ids, and the running task snapshot."
+  (list nil nil nil nil nil nil nil nil nil '() nil '() '() '() nil))
 
 (defun sprig-session--events-since (events old-head)
   "Return the events in EVENTS newer than OLD-HEAD, and whether OLD-HEAD held.
@@ -235,10 +235,10 @@ own blocks in place (a result landing on a call, a delta extending the open
 text) without those edits reaching a model already handed out: each build
 is an independent value, which is what lets the renderer diff one against
 the next by `equal'."
-  (pcase-let ((`(,session ,title ,mode ,cost ,error ,done ,context ,_time
-                 ,blocks . ,_rest)
+  (pcase-let ((`(,session ,title ,mode ,model ,cost ,error ,done ,context
+                 ,_time ,blocks . ,_rest)
                state))
-    (list :session session :title title :mode mode
+    (list :session session :title title :mode mode :model model
           :cost cost :error error :done done :context context
           :blocks (mapcar #'copy-tree (reverse blocks)))))
 
@@ -287,8 +287,9 @@ STATE is the opaque accumulator list built by `sprig-session--initial-state';
 EVENTS are in order (oldest first).  Blocks accumulate in place, so a state
 may be carried across calls to continue a fold (see
 `sprig-session--current-model')."
-  (pcase-let ((`(,session ,title ,mode ,cost ,error ,done ,context ,time
-                 ,blocks ,open ,tasks ,pending-creates ,task-ids ,tasks-block)
+  (pcase-let ((`(,session ,title ,mode ,model ,cost ,error ,done ,context
+                 ,time ,blocks ,open ,tasks ,pending-creates ,task-ids
+                 ,tasks-block)
                state))
     (let ((snapshot
            (lambda ()
@@ -309,6 +310,14 @@ may be carried across calls to continue a fold (see
         (`(session ,id) (setq session id))
         (`(title ,tt) (setq title tt))
         (`(mode ,m) (setq mode m))
+        ;; A turn names the model bare (`claude-opus-5') where the session's
+        ;; own init line names it with a context marker (`claude-opus-5[1m]').
+        ;; Reporting the same model must not cost us the marker, so only a
+        ;; genuinely different model replaces what we have.
+        (`(model ,m)
+         (when (and (stringp m)
+                    (not (and model (string-prefix-p m model))))
+           (setq model m)))
         (`(time ,ts) (setq time ts))
         (`(text-block) (setq open nil))
         (`(text ,s)
@@ -421,7 +430,7 @@ may be carried across calls to continue a fold (see
         (setq tasks-block nil))))
     ;; Repack the advanced accumulators, in the order `sprig-session--initial-state'
     ;; lays them out, so a later fold can pick this state up.
-    (list session title mode cost error done context time
+    (list session title mode model cost error done context time
           blocks open tasks pending-creates task-ids tasks-block)))
 
 (defun sprig-session-events-title (events)
@@ -560,6 +569,11 @@ conversation content.  A conversation record is stamped with its own
       (sprig-session--stamp-events
        record
        (append
+        ;; The log keeps each turn's model, so a replayed session reads the
+        ;; model it actually ran on rather than whatever `sprig-model' asks
+        ;; for today.
+        (when-let ((m (alist-get 'model (alist-get 'message record))))
+          (list (list 'model m)))
         (sprig-session--assistant-events
          (alist-get 'content (alist-get 'message record)))
         (sprig-session--usage-context-event

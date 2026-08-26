@@ -1109,6 +1109,17 @@ the fold learns the id from the result rather than from the call."
       (should (string-match-p "Cost:" s))
       (should (string-match-p "\\$0\\.0123" s)))))
 
+(ert-deftest sprig-session-mode-test-header-model ()
+  ;; The header names the model the session actually runs on, taken from the
+  ;; stream; a caller that knows better still overrides it through the meta.
+  (let ((model (sprig-session-build '((model "claude-opus-5[1m]") (text "hi")))))
+    (sprig-session-tests--rendered model nil
+      (let ((s (buffer-string)))
+        (should (string-match-p "Model:" s))
+        (should (string-match-p "opus-5\\[1m\\]" s))))
+    (sprig-session-tests--rendered model '(:model "by hand")
+      (should (string-match-p "by hand" (buffer-string))))))
+
 (ert-deftest sprig-session-mode-test-blank-meta-lines-omitted ()
   ;; With no meta and no session, those header lines simply do not appear.
   (let ((model (sprig-session-build '((text "hi") (done nil nil)))))
@@ -2517,6 +2528,17 @@ the fold learns the id from the result rather than from the call."
       (erase-buffer)
       (sprig-session--insert-state nil)
       (should-not (string-match-p "☑" (buffer-string))))))
+
+(ert-deftest sprig-session-mode-test-state-shows-the-model ()
+  "The model rides the state line, shortened, and stays off it without one."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (let ((inhibit-read-only t))
+      (sprig-session--insert-state (list :model "claude-opus-5[1m]"))
+      (should (string-match-p "opus-5\\[1m\\]" (buffer-string)))
+      (erase-buffer)
+      (sprig-session--insert-state nil)
+      (should-not (string-match-p "opus" (buffer-string))))))
 
 (ert-deftest sprig-session-mode-test-state-shows-the-queue ()
   "A queued message is visible on the state line, and only while queued."

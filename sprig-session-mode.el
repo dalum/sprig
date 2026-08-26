@@ -57,6 +57,7 @@
 (declare-function sprig--session-log-file "sprig" ())
 (declare-function sprig--set-permission-mode "sprig" (mode))
 (declare-function sprig--notable-mode "sprig" (mode))
+(declare-function sprig--model-label "sprig" (model))
 (declare-function sprig--state-parts "sprig" (state))
 ;; Transport state, defined in sprig.el; a session-owning session buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
@@ -1202,7 +1203,9 @@ META may carry :title, :project, :model, and :status."
                    (sprig-session--meta-line
                     "Title" (or (plist-get meta :title) (plist-get model :title)))
                    (sprig-session--meta-line "Project" (plist-get meta :project))
-                   (sprig-session--meta-line "Model"   (plist-get meta :model))
+                   (sprig-session--meta-line
+                    "Model" (or (plist-get meta :model)
+                                (sprig--model-label (plist-get model :model))))
                    (sprig-session--meta-line "Status"  (plist-get meta :status))
                    (sprig-session--meta-line
                     "Mode" (sprig--notable-mode (plist-get model :mode)))
@@ -1300,6 +1303,13 @@ the turn as plainly as the line does."
       (when-let ((mode (sprig--notable-mode (plist-get model :mode))))
         (insert (sprig--face "  ·  " face)
                 (sprig--face mode 'sprig-mode-tag)))
+      ;; Which model the session actually runs on, which `sprig-model' only
+      ;; asks for: the CLI can answer with another, and a session keeps the
+      ;; model it started on however that setting later changes.  Dim, in its
+      ;; own face: standing identity, not news about this turn.
+      (when-let ((name (sprig--model-label (plist-get model :model))))
+        (insert (sprig--face "  ·  " face)
+                (sprig--face name 'sprig-model-tag)))
       (when ctx
         ;; The separator belongs to the line, the readout does not: the
         ;; context is coloured on its own terms, so a normal one does not
@@ -1509,7 +1519,7 @@ session change, or a reset)."
   (list (or (plist-get meta :title) (plist-get model :title))
         (plist-get meta :project) (plist-get meta :model)
         (plist-get meta :status)  (plist-get model :mode)
-        (plist-get model :session)))
+        (plist-get model :model)  (plist-get model :session)))
 
 (defun sprig-session--record-baseline (model meta sections)
   "Store MODEL's blocks, header signature, and per-block SECTIONS as baseline."

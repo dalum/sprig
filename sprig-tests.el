@@ -103,6 +103,38 @@
                     (sprig-tests--message-start 5 190000 2000))
                    '((context 192005))))))
 
+(ert-deftest sprig-test-parse-init-model ()
+  ;; The init line names the model the session actually got, and is the only
+  ;; line carrying its context marker.  A line without one still yields just
+  ;; the session, which is all the CLI used to give us.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize
+                     (list :type "system" :subtype "init" :session_id "s1"
+                           :model "claude-opus-5[1m]")))
+                   '((session "s1") (model "claude-opus-5[1m]"))))
+    (should (equal (sprig--claude-parse-line (sprig-tests--init "s1"))
+                   '((session "s1"))))))
+
+(ert-deftest sprig-test-parse-message-start-model-verbatim ()
+  ;; A turn opening, captured verbatim off the wire, kept as the ground truth
+  ;; for where the model sits: beside the usage in the same `message', and
+  ;; without the init line's context marker.
+  (with-temp-buffer
+    (should (equal (sprig--claude-parse-line
+                    (concat "{\"type\":\"stream_event\",\"event\":{\"type\":"
+                            "\"message_start\",\"message\":{\"model\":"
+                            "\"claude-opus-5\",\"id\":\"msg_011CeQtpSCJTcdKQ\","
+                            "\"type\":\"message\",\"role\":\"assistant\","
+                            "\"content\":[],\"stop_reason\":null,"
+                            "\"usage\":{\"input_tokens\":2,"
+                            "\"cache_creation_input_tokens\":7637,"
+                            "\"cache_read_input_tokens\":15820,"
+                            "\"output_tokens\":3}}},"
+                            "\"session_id\":\"09baaed2-0ea7-424b-b421\","
+                            "\"parent_tool_use_id\":null,\"ttft_ms\":993}"))
+                   '((model "claude-opus-5") (context 23459))))))
+
 (ert-deftest sprig-test-parse-compact-boundary-context ()
   ;; A compaction reports its post-compact size, so the readout drops at once.
   ;; The stream spells the boundary in snake_case, unlike the session log's
@@ -2046,6 +2078,17 @@ Line-anchored review therefore rides the git diff, not the payload."
          (model (sprig-session-build (sprig-session-parse-session-line line))))
     (should (equal (plist-get model :context) (+ 3 199000 1000)))))
 
+(ert-deftest sprig-session-test-log-carries-the-model ()
+  ;; A replayed session reads the model each turn actually ran on, rather
+  ;; than whatever `sprig-model' happens to ask for today.
+  (let* ((line (json-serialize
+                (list :type "assistant"
+                      :message
+                      (list :model "claude-opus-5"
+                            :content (vector (list :type "text" :text "hi"))))))
+         (model (sprig-session-build (sprig-session-parse-session-line line))))
+    (should (equal (plist-get model :model) "claude-opus-5"))))
+
 (ert-deftest sprig-session-test-compact-boundary-becomes-context ()
   ;; A replayed compaction boundary reports its post-compact size, so a
   ;; refreshed log shows the shrunk context without waiting for a new turn.
@@ -3761,6 +3804,34 @@ without a real SSH process."
   (should (equal (sprig--format-tokens 134000) "134.0k"))
   (should (equal (sprig--format-tokens 2500000) "2.5M")))
 
+(ert-deftest sprig-test-model-label ()
+  ;; The vendor prefix and the dated snapshot go, since neither says anything
+  ;; on a one-line readout; the context marker stays, because it does.
+  (should (equal (sprig--model-label "claude-opus-5") "opus-5"))
+  (should (equal (sprig--model-label "claude-opus-5[1m]") "opus-5[1m]"))
+  (should (equal (sprig--model-label "claude-sonnet-4-5-20250929") "sonnet-4-5"))
+  (should (equal (sprig--model-label "claude-sonnet-4-5-20250929[1m]")
+                 "sonnet-4-5[1m]"))
+  ;; An alias, or another backend's id, is left as it came.
+  (should (equal (sprig--model-label "sonnet") "sonnet"))
+  (should-not (sprig--model-label nil))
+  (should-not (sprig--model-label "")))
+
+(ert-deftest sprig-test-model-keeps-its-context-marker ()
+  ;; Only the init line carries the marker, and every turn afterwards names
+  ;; the same model without it, so reporting it again must not cost us the
+  ;; marker.  A genuine switch still replaces the lot.
+  (should (equal (plist-get (sprig-session-build
+                             '((model "claude-opus-5[1m]")
+                               (model "claude-opus-5")))
+                            :model)
+                 "claude-opus-5[1m]"))
+  (should (equal (plist-get (sprig-session-build
+                             '((model "claude-opus-5[1m]")
+                               (model "claude-sonnet-4-5")))
+                            :model)
+                 "claude-sonnet-4-5")))
+
 (ert-deftest sprig-test-status-state-line ()
   ;; The state line mirrors the session buffer: live states from the row's
   ;; status, the turn's outcome and context from the model fields; nil when
@@ -3799,6 +3870,14 @@ without a real SSH process."
   (should-not (string-match-p
                "queued"
                (sprig--status-state-line '(:status streaming :queued 0) nil)))
+  ;; The model rides the line too, shortened; without one, nothing shows.
+  (let ((l (sprig--status-state-line '(:status idle)
+                                     '(:done t :model "claude-opus-5[1m]"))))
+    (should (string-match-p "turn over" l))
+    (should (string-match-p "opus-5\\[1m\\]" l)))
+  (should-not (string-match-p
+               "opus"
+               (sprig--status-state-line '(:status idle) '(:done t))))
   ;; A queue alone is enough to draw the line even with nothing else to say.
   (should (string-match-p
            "1 queued"
