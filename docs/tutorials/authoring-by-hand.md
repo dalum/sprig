@@ -17,38 +17,25 @@ This tutorial covers hand-authoring as it stands today.
 
 ## The loop
 
-Authoring a change is four steps: open a staging buffer, edit it, send it, and
-let the agent apply it.
+Authoring a change is four steps: open a staging buffer, edit it, file it, and
+publish the review so the agent applies it.
 
 ### 1. Open a staging buffer with `e`
 
-In the **session buffer**, press **`e`** to open the staging menu. It offers
-three ways to fill the buffer, differing only in how the region is chosen:
+In the **changeset review** (`d`), press **`e`**. There is no menu: the review
+already holds the whole diff with its line numbers, so `e` stages what you are
+looking at straight away, and no more than that.
 
-- **`e e` — the hunk at point.** With point on a `+`/`-` line of a change
-  already shown in the buffer, the staging buffer opens straight away, seeded
-  with that region's current text.
-- **`e f` — a file you name.** Sprig asks you for a file, then for an optional
-  region hint. The hint is free text the agent reads, like `the save function`
-  or `lines 10-40`; leave it blank to take the whole file. The agent reads that
-  region and the staging buffer opens once its read comes back.
-- **`e s` — let the agent suggest.** The agent already knows the task from your
-  conversation, so it works out the single most relevant file and region to edit
-  next, reads exactly that, and the staging buffer opens on it. You can add a
-  short nudge at the prompt, or just press `RET` to lean on the conversation.
-  Use this when you know the change you want but not yet where it lands.
+- **The region**, when one is active, so you can pull out three lines rather
+  than a whole hunk.
+- **The hunk you marked** with `SPC`, since marking a chunk is naming it. It
+  outranks whatever line point is resting on.
+- **The line point is on**, otherwise. This is the common case and the grain
+  most hand-authored feedback wants.
 
-`e f` and `e s` involve the agent reading, so the buffer opens once that read
-comes back (you will see a brief "…to seed a staging buffer" message meanwhile).
-
-In the **changeset review** (`d`), `e` needs no menu: the review already has the
-whole diff with its line numbers, so `e` stages what you are looking at straight
-away, and no more than that. It takes the region when one is active; else the
-hunk you marked with `SPC`, since marking a chunk is naming it; else just the
-one line point is on. It widens to the whole hunk only where there is no line to
-take: the `@@` heading, a file heading, or a removed line, which is not in the
-file to begin with. Either way you land in the same staging buffer, and the rest
-of the loop below is the same.
+It widens to the whole hunk only where there is no line to take: the `@@`
+heading, a file heading, or a removed line, which is not in the file to begin
+with.
 
 Two selections it refuses, because neither is a block the agent could match.
 One spanning two hunks: git showed you neither the lines between them nor how
@@ -63,31 +50,27 @@ highlighting and indentation. Edit it however you like. This is plain local
 Emacs, instant even when the session runs on a remote host, and it is not backed
 by a file, so a stray `C-x C-s` writes nothing.
 
-### 3. Send with `C-c C-c`
+### 3. File it with `C-c C-c`
 
-When you are happy, press **`C-c C-c`** to send your edit, or **`C-c C-k`** to
+When you are happy, press **`C-c C-c`** to file the edit, or **`C-c C-k`** to
 throw it away.
 
-From the **changeset review** this files the edit as a draft rather than sending
-it: it appears inline under the lines it replaces, next to your comments, and
-goes out with them on `c p`. That is the whole point of a review being composed
-as a whole. `c e` on it re-opens the staging buffer seeded with what you wrote,
-and `k` takes it back. Because a draft is local, you can write one before the
-session has even started. From the session buffer, `C-c C-c` sends there and
-then, as below.
+Filing does not send anything. The edit becomes a **draft**, exactly like a
+comment: it appears inline under the lines it replaces, `c e` re-opens it seeded
+with what you wrote, and `k` takes it back. That is the point of a review being
+composed as a whole rather than dribbled out an edit at a time. Because a draft
+is local, you can write one before the session has even started.
 
-### 4. The agent applies it
+### 4. Publish, and the agent applies it
 
-On sending (or on publishing the review), Sprig gives the agent your exact text
-and asks it to make that one edit, verbatim. Your change lands in the working
-tree as a normal diff.
+`c p` publishes the review: your comments and your edits in one turn. Each edit
+carries both blocks in full, and the covering instruction says they are not
+suggestions to interpret, but one `Edit` each, character for character. Your
+change lands in the working tree as a normal diff.
 
 Because the agent does the write, glance at the resulting diff to confirm it
-matches what you typed. If you want a stronger guarantee, set
-`sprig-courier-edits`: your bytes then stay in Emacs and are substituted into the
-agent's edit at its permission prompt, so the agent cannot change a character.
-That is safer but needs the edit to prompt, so it refuses the auto-approve modes
-(more on that below).
+matches what you typed. `g` in the review re-reads the tree, so the check is one
+key.
 
 From there it is just like any other change: review it, commit it with **`C`**,
 ask the agent to critique it with `c c`, or press **`c r`** to have it spawn a
@@ -95,50 +78,45 @@ subagent that reviews the changes with fresh eyes and then acts on the findings.
 
 ## A worked example
 
-You have been discussing with the agent that `parse_config` in `config.py` needs
-a guard clause, and you want to write it yourself.
+The agent has changed `parse_config` in `config.py`, and reading the diff you
+decide the guard clause it wrote is wrong and it is quicker to write the right
+one than to describe it.
 
-1. `e s`, then `RET` (the agent already knows the task from your chat). It reads
-   `parse_config` and a staging buffer opens with its current source in Python
-   mode. (Or `e f`, `config.py`, `the parse_config function`, to point it
-   yourself.)
-2. You add your guard clause at the top of the function.
-3. `C-c C-c`. Sprig sends the agent your version and asks it to apply that one
-   edit; your change lands.
-4. The change shows as a diff in the review buffer. You skim it to confirm it is
-   what you wrote, then press `C` to commit, or `c c` to ask "any edge cases I
-   missed?" before committing.
+1. `d d` to open the review, `TAB` on `config.py`, and move to the guard line.
+2. `e`. A staging buffer opens on that line, in Python mode.
+3. You write the guard you actually want, then `C-c C-c`. It is filed as a
+   draft, and shows up inline under the line it replaces.
+4. You carry on reading. Two files later you leave an ordinary comment with
+   `c c`.
+5. `c p` publishes both in one turn: your comment for the agent to answer, and
+   your edit for it to apply verbatim.
+6. `g` re-reads the diff once the turn lands, and you check what it wrote is
+   what you typed.
 
 ## Good to know
 
-- **No mode to enter.** `e` works from the ordinary review flow, in the session
-  buffer or the changeset review. You do not switch the agent into anything
-  first.
-- **It knows where your block sits.** From the changeset review, the
-  instruction names the line the block starts at, so a one-line edit whose text
-  appears elsewhere in the file still lands in the right place. That is what
-  makes taking a single line the sane default there. A hunk staged
-  from the session buffer cannot say: an `Edit` payload knows the bytes it
-  replaced but never the line they sat on.
-- **One edit per send.** A single `C-c C-c` asks for exactly one edit, your text
-  applied verbatim. Nothing else is touched. A published review asks for one
-  `Edit` per staged block, which is the same rule counted differently.
+- **No mode to enter.** `e` works from the ordinary review flow. You do not
+  switch the agent into anything first.
+- **It knows where your block sits.** The instruction names the line the block
+  starts at, so a one-line edit whose text appears elsewhere in the file still
+  lands in the right place. That is what makes taking a single line the sane
+  default. The review can say it because it reads its line numbers from git; an
+  `Edit` payload knows the bytes it replaced but never the line they sat on,
+  which is why hand-authoring lives in the review and not in the transcript.
+- **One `Edit` per staged block.** Each block you stage asks for exactly one
+  edit, your text applied verbatim. Nothing else is touched.
 - **A staged edit re-anchors.** In the review, a draft edit records the lines it
   was written against, so if the agent moves them before you publish, it is
   flagged as orphaned and published asking to be checked rather than applied
   blind.
 - **Check the diff.** The agent does the write, so it could in principle drift
-  from your bytes. The resulting diff is your check; if it does not match, send
-  again. For a hard guarantee instead of a check, see the courier option below.
-- **Drift fails safe.** If the file changed under you between the read and the
+  from your bytes. The resulting diff is your check; if it does not match, stage
+  it again.
+- **Drift fails safe.** If the file changed under you between staging and the
   apply (because you edited it out of band, say), the edit simply fails to match
-  and nothing is written. Send it again.
-- **The courier option.** Set `sprig-courier-edits` to have Sprig substitute
-  your exact bytes into the agent's edit at its permission prompt, so the agent
-  cannot alter them. Stronger, but it needs the edit to prompt: in a mode that
-  auto-approves edits (`acceptEdits`, `bypassPermissions`) there is no prompt to
-  override, so it refuses rather than risk writing the wrong bytes. Change the
-  mode with `P` first, or leave `sprig-courier-edits` off.
+  and nothing is written. Stage it again. Within the review, drift that happens
+  before you publish is caught earlier still: the draft is re-anchored on `g`
+  and flagged orphaned.
 
 ## Why bother
 

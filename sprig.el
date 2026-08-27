@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.52.0
+;; Version: 0.53.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -217,12 +217,11 @@ stderr are appended here and the buffer is displayed."
   :type 'string)
 
 (defcustom sprig-debug nil
-  "When non-nil, trace courier and permission activity to `*sprig-debug*'.
-Every control response sprig sends is logged with its raw bytes, each
-courier decision (fired, or reached the gate with nothing staged) is
-noted, and the session's stderr is mirrored live, so a staged edit that
-fails to land can be traced end to end.  Off by default: the log is
-verbose and only useful when diagnosing the courier."
+  "When non-nil, trace permission activity to `*sprig-debug*'.
+Every control response sprig sends is logged with its raw bytes, and the
+session's stderr is mirrored live, so a permission decision that goes the
+wrong way can be traced end to end.  Off by default: the log is verbose
+and only useful when diagnosing the control channel."
   :type 'boolean)
 
 (defcustom sprig-status-max-sessions 30
@@ -340,14 +339,6 @@ the streamed `input_json_delta' fragments until the block closes.")
 (defvar-local sprig--permission-mode nil
   "The session's current permission mode, tracked from `status' events.
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
-(defvar-local sprig--courier nil
-  "Human-authored edits waiting for the agent to courier to disk, newest first.
-Each entry is a plist (:file PATH :old STRING :new STRING) staged from a
-staging buffer (see `sprig-session-stage-dispatch').  When the agent then
-issues an edit on a matching file, `sprig--maybe-courier' allows it but
-replaces the tool input's strings with the staged pair via `updatedInput',
-so the human's bytes land whatever the agent proposed: a courier that
-cannot tamper.  Live state, not persisted, and consumed on use.")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
@@ -1915,10 +1906,10 @@ HEADER names what failed; BODY is the captured stderr or detail text."
 (defun sprig-show-stderr ()
   "Show the live session's captured stderr in `sprig-error-buffer'.
 The CLI's non-JSON diagnostics accumulate quietly until an abnormal exit;
-among them are permission-handler complaints (a rejected or empty
-`updatedInput' the courier sent, say), so surfacing them mid-session lets
-a staged edit that failed to land be diagnosed without waiting for a
-crash.  Call it from the session buffer whose session you are debugging."
+among them are permission-handler complaints, so surfacing them
+mid-session lets a control-channel problem be diagnosed without waiting
+for a crash.  Call it from the session buffer whose session you are
+debugging."
   (interactive)
   (let ((stderr (and (process-live-p sprig--process)
                      (process-get sprig--process :stderr-proc))))
@@ -2144,75 +2135,6 @@ does with the interrupt receipt."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
 
-(defun sprig--courier-take (file-path)
-  "Pop the staged courier edit for FILE-PATH off `sprig--courier', or nil.
-Matches on the basename, so the agent's absolute path lines up with a
-repo-relative staged path; with a single edit pending it takes that one.
-Consumes the entry, so each staged edit is couriered at most once."
-  (when sprig--courier
-    (let* ((base (and file-path (file-name-nondirectory file-path)))
-           (hit (or (seq-find (lambda (e)
-                                (equal base (file-name-nondirectory
-                                             (plist-get e :file))))
-                              sprig--courier)
-                    (and (null (cdr sprig--courier)) (car sprig--courier)))))
-      (when hit
-        (setq sprig--courier (delq hit sprig--courier))
-        hit))))
-
-(defun sprig--courier-updated-input (input edit)
-  "Return INPUT (a tool-input alist) with EDIT's staged strings substituted.
-Keeps the agent's own `file_path' (already resolved to an absolute path)
-and overrides only `old_string'/`new_string' with the human-authored pair,
-so the couriered write carries exactly the staged bytes."
-  (let ((out (copy-alist input)))
-    (setf (alist-get 'old_string out) (plist-get edit :old))
-    (setf (alist-get 'new_string out) (plist-get edit :new))
-    out))
-
-(defvar sprig--edit-tools '("Edit" "Write" "MultiEdit" "NotebookEdit")
-  "Tool names that write a file, and so can carry a staged courier edit.
-A `can_use_tool' for one of these is where `sprig--maybe-courier' steps in
-to substitute the human's staged bytes.")
-
-(defun sprig--maybe-courier (request-id tool-name input)
-  "Courier a staged edit if TOOL-NAME/INPUT matches one, answering REQUEST-ID.
-When a human staged an edit for this file (see `sprig--courier') and the
-agent reaches for an edit tool, allow the call but replace the tool input's
-strings with the staged pair via `updatedInput', so the human's bytes land
-whatever the agent proposed: the courier that cannot tamper.  Returns
-non-nil when it answered, nil to let normal permission handling take the
-call.  Works in any permission mode, since an edit reaching `can_use_tool'
-is all it needs; it rides the same channel Sprig already answers on."
-  (if-let ((_ (member tool-name sprig--edit-tools))
-           (edit (sprig--courier-take (alist-get 'file_path input))))
-      (progn
-        (sprig--debug
-         "courier: firing %s for %s (old=%d new=%d bytes, req=%s)"
-         tool-name (alist-get 'file_path input)
-         (length (or (plist-get edit :old) ""))
-         (length (or (plist-get edit :new) "")) request-id)
-        (message "sprig: couriered your staged edit to %s"
-                 (file-name-nondirectory (or (alist-get 'file_path input) "")))
-        (sprig--send-control-response
-         request-id
-         (list :behavior "allow"
-               :updatedInput (sprig--courier-updated-input input edit)))
-        t)
-    ;; A staged edit is pending but this edit did not match it: the human's
-    ;; bytes are about to be lost to the agent's placeholder.  Warn always,
-    ;; not just under `sprig-debug', since it is silent data loss otherwise.
-    (when (and (member tool-name sprig--edit-tools) sprig--courier)
-      (sprig--debug
-       "courier: %s for %s reached the gate, nothing staged matched (%d pending)"
-       tool-name (alist-get 'file_path input) (length sprig--courier))
-      (message
-       "sprig: staged edit NOT couriered: %s did not match the %d staged; \
-check the path or re-stage"
-       (file-name-nondirectory (or (alist-get 'file_path input) "?"))
-       (length sprig--courier)))
-    nil))
-
 (defun sprig--send-interrupt ()
   "Ask the session to interrupt the turn in flight, returning the request id.
 The CLI aborts the current turn and ends it with a `result', so the turn
@@ -2273,12 +2195,6 @@ session never hangs on an unanswered request."
          ((and (equal .subtype "can_use_tool")
                (equal .tool_name "ExitPlanMode"))
           (sprig--offer-plan request-id .input))
-         ;; A staged courier edit (see `sprig--courier') is applied here,
-         ;; overriding the agent's bytes with the human's.  Before the generic
-         ;; gate so the couriered write is not prompted; after the interactive
-         ;; cases so a question or plan still renders.  A no-op otherwise.
-         ((and (equal .subtype "can_use_tool")
-               (sprig--maybe-courier request-id .tool_name .input)))
          ((equal .subtype "can_use_tool")
           (if sprig-permission-function
               (sprig--send-control-response

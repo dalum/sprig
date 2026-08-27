@@ -201,7 +201,7 @@ It opens as the list of changed files, one line each with its stat, folded. That
 
 **Comments are drafts.** `c c` comments on the line at point, or on the region if one is active, in a small buffer (`C-c C-c` files it, `C-c C-k` throws it away). The comment renders inline under the line it annotates. Nothing reaches the agent until you publish, so a review is composed as a whole rather than dribbled out a message at a time. `c e` re-edits the draft at point, `k` takes it back, and `c Q` discards the lot. **An edit you write yourself (`e`) is a draft in the same store**, rendered inline the same way and published in the same turn: an edit is a comment you were too impatient to phrase, so it is composed with the review rather than sent on its own.
 
-**`c p` publishes.** Every draft goes out in one turn, grouped by file and ordered by line, each quoting the lines it annotates so the agent can find them without guessing. A hand-authored edit carries both blocks in full instead of a quote, since the old side is what the agent has to match, and the covering instruction tells it those are not suggestions to interpret: one `Edit` each, character for character. It opens the ordinary compose buffer first, so you write the covering note and see exactly what goes out before it does; `C-c C-c` in the session buffer does the same.
+**`c p` publishes.** Every draft goes out in one turn, grouped by file and ordered by line, each quoting the lines it annotates so the agent can find them without guessing. A hand-authored edit carries both blocks in full instead of a quote, since the old side is what the agent has to match, and the covering instruction tells it those are not suggestions to interpret: one `Edit` each, character for character. It opens the ordinary compose buffer first, so you write the covering note and see exactly what goes out before it does; `C-c C-c` in the review does the same.
 
 **Comments survive a refresh, honestly.** A draft records the file, the side, the line range, *and* the text of the lines it was written against. `g` re-anchors every one: text still at its line keeps the line, text that moved follows it, and text that has gone from the diff is marked orphaned and floated to the top of its file with a note saying so. A comment you wrote is never dropped on your behalf, and never left pointing at a line number that now means something else. This matters more for an edit than for a comment: an orphaned edit is published saying its lines have gone and asking the agent to check before applying it, rather than being handed over as bytes to write somewhere that has moved.
 
@@ -249,7 +249,7 @@ The rename sets the session's **user title**, the same thing the CLI's own `/ren
 
 Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 
-- [Authoring by hand: writing code yourself](docs/tutorials/authoring-by-hand.md) — write a piece of the change yourself with `e` in a session buffer, and let the agent write your bytes to disk without Sprig touching the repo itself.
+- [Authoring by hand: writing code yourself](docs/tutorials/authoring-by-hand.md) — write a piece of the change yourself with `e` in the changeset review, and let the agent write your bytes to disk without Sprig touching the repo itself.
 
 ## Options
 

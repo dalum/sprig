@@ -2187,104 +2187,6 @@ the fold learns the id from the result rather than from the call."
       (re-search-forward "^Bash  ")
       (should (null (sprig--section-file (magit-current-section)))))))
 
-(ert-deftest sprig-session-mode-test-strip-read-numbers ()
-  "The cat -n prefix is stripped and wrapper lines dropped, bytes preserved."
-  (should (equal (sprig-session--strip-read-numbers
-                  "     1\thello\n     2\t\n     3\t  world")
-                 "hello\n\n  world"))
-  ;; A non-numbered wrapper line (a system note) is not part of the content.
-  (should (equal (sprig-session--strip-read-numbers
-                  "     1\tcode\n(a note without a number)")
-                 "code")))
-
-(ert-deftest sprig-session-mode-test-latest-read ()
-  "The latest non-error Read wins; a file filter matches by basename."
-  (let ((model (sprig-session-build
-                `((tool-call "r1" "Read"
-                             ,(json-serialize (list :file_path "/repo/x.el")))
-                  (tool-result "r1" nil "     1\told")
-                  (tool-call "r2" "Read"
-                             ,(json-serialize (list :file_path "/repo/y.el")))
-                  (tool-result "r2" nil "     1\tnew")))))
-    ;; Filtered to x.el by basename: its read, not the later y.el one.
-    (should (equal (sprig-session--latest-read model "x.el")
-                   '("/repo/x.el" . "     1\told")))
-    (should (null (sprig-session--latest-read model "other.el")))
-    ;; Unfiltered (agent-suggested): the latest read of any file, path and all.
-    (should (equal (sprig-session--latest-read model)
-                   '("/repo/y.el" . "     1\tnew")))))
-
-(ert-deftest sprig-session-mode-test-seed-from-read-opens-buffer ()
-  "A pending seed served on a read opens the staging buffer with its bytes."
-  (unwind-protect
-      (with-temp-buffer
-        (sprig-session-mode)
-        (setq sprig-session--pending-seed '(:file "x.el"))
-        (sprig-session-consume (list 'tool-call "r1" "Read"
-                                    (json-serialize (list :file_path "/repo/x.el"))))
-        (sprig-session-consume '(tool-result "r1" nil "     1\thello\n     2\tworld"))
-        (sprig-session--seed-from-read)
-        (should (null sprig-session--pending-seed))
-        (with-current-buffer "*sprig-stage*"
-          (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                         "hello\nworld"))
-          ;; Seeded at the path the agent actually read, not the request.
-          (should (equal sprig-session--stage-file "/repo/x.el"))))
-    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
-
-(ert-deftest sprig-session-mode-test-seed-from-read-any-learns-file ()
-  "An agent-suggested seed (:any) opens at whatever file the agent read."
-  (unwind-protect
-      (with-temp-buffer
-        (sprig-session-mode)
-        (setq sprig-session--pending-seed '(:any t))
-        (sprig-session-consume (list 'tool-call "r1" "Read"
-                                    (json-serialize (list :file_path "/repo/z.el"))))
-        (sprig-session-consume '(tool-result "r1" nil "     1\tpicked"))
-        (sprig-session--seed-from-read)
-        (with-current-buffer "*sprig-stage*"
-          (should (equal (buffer-substring-no-properties (point-min) (point-max))
-                         "picked"))
-          (should (equal sprig-session--stage-file "/repo/z.el"))))
-    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
-
-(ert-deftest sprig-session-mode-test-seed-from-read-missing-clears ()
-  "With no read back, the seed is cleared and no staging buffer opens."
-  (unwind-protect
-      (with-temp-buffer
-        (sprig-session-mode)
-        (setq sprig-session--pending-seed '(:file "x.el"))
-        (sprig-session--seed-from-read)
-        (should (null sprig-session--pending-seed))
-        (should (null (get-buffer "*sprig-stage*"))))
-    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
-
-(ert-deftest sprig-session-mode-test-stage-direct-sends-both-blocks ()
-  "Direct staging sends the agent the old and new text, verbatim-marked."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (let (sent)
-      (cl-letf (((symbol-function 'sprig-session--send)
-                 (lambda (text &rest _) (setq sent text))))
-        (sprig-session--stage-direct "app/x.py" "OLD-REGION" "NEW-REGION")
-        (should (string-match-p "app/x.py" sent))
-        (should (string-match-p "OLD-REGION" sent))
-        (should (string-match-p "NEW-REGION" sent))
-        (should (string-match-p "character for character" sent))))))
-
-(ert-deftest sprig-session-mode-test-stage-direct-names-the-line ()
-  "When the caller knows where the block starts, the instruction says so,
-which is what saves an edit whose text is not unique in the file."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (let (sent)
-      (cl-letf (((symbol-function 'sprig-session--send)
-                 (lambda (text &rest _) (setq sent text))))
-        (sprig-session--stage-direct "app/x.py" "OLD" "NEW" 42)
-        (should (string-match-p "starts at line 42" sent))
-        (sprig-session--stage-direct "app/x.py" "OLD" "NEW")
-        (should-not (string-match-p "starts at line" sent))))))
-
 (ert-deftest sprig-session-mode-test-stage-buffer-opens-in-the-file-mode ()
   "The staging buffer is the file's own major mode, so you edit code with
 the highlighting you read it in; it visits nothing, so a save writes no file."
@@ -2300,26 +2202,6 @@ the highlighting you read it in; it visits nothing, so a save writes no file."
           (should (equal sprig-session--stage-line 12))
           (should (equal sprig-session--stage-anchor "(defun foo ())"))))
     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
-
-(ert-deftest sprig-session-mode-test-stage-courier-records-and-asks ()
-  "Courier staging records the bytes and asks for the placeholder Edit."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (setq sprig--permission-mode "default")
-    (let (sent)
-      (cl-letf (((symbol-function 'sprig-session--send)
-                 (lambda (text &rest _) (setq sent text))))
-        (sprig-session--stage-courier "app/x.py" "OLD" "NEW")
-        (should (equal sprig--courier '((:file "app/x.py" :old "OLD" :new "NEW"))))
-        (should (string-match-p "placeholders" sent))))))
-
-(ert-deftest sprig-session-mode-test-stage-courier-refuses-auto-approve ()
-  "Courier staging refuses a mode that would auto-run the placeholder Edit."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (setq sprig--permission-mode "acceptEdits")
-    (should-error (sprig-session--stage-courier "x.py" "a" "b")
-                  :type 'user-error)))
 
 (ert-deftest sprig-session-mode-test-set-title ()
   (with-temp-buffer

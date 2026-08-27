@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.36.0
+;; Version: 0.37.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -285,14 +285,6 @@ says so.
 Liveness cannot be read off the model instead: a replayed session log
 carries no `done' event, so its last block would pass for a live tail
 forever, and a conversation read from disk would claim to be working.")
-(defvar-local sprig-session--pending-seed nil
-  "A staging seed waiting on a `Read', a plist, or nil.
-Set when `e' targets a region not already in the model: the agent is asked
-to `Read' it, and the next turn's `done' seeds a staging buffer from that
-read (see `sprig-session--seed-from-read').  The plist is (:file PATH) when
-you named the file (`e f'), or (:any t) when the agent chose it (`e s'), in
-which case the file is learnt from the read itself.  Live state, consumed on
-use, so a later replay never re-opens the buffer.")
 (defvar-local sprig-session--pending-steer nil
   "Steer messages written to stdin mid-turn but not yet taken, oldest first.
 A `c c' sent into a running turn is handed to the agent at its next
@@ -1951,17 +1943,7 @@ first `text' of a run, clears the tail and schedules a coalesced render
     (pcase (car event)
       ((or 'text 'thinking 'tool-call) (setq sprig-session--streaming t))
       ((or 'done 'error)
-       (setq sprig-session--streaming nil)
-       ;; A staging seed waiting on a read is served now the turn (and so the
-       ;; `Read' result) has landed.  Deferred a tick so the model folds this
-       ;; `done' in first, and only for `done': an errored turn read nothing.
-       (when (and sprig-session--pending-seed (eq (car event) 'done))
-         (run-at-time 0 nil
-                      (let ((buf (current-buffer)))
-                        (lambda ()
-                          (when (buffer-live-p buf)
-                            (with-current-buffer buf
-                              (sprig-session--seed-from-read))))))))
+       (setq sprig-session--streaming nil))
       ;; A dialog opening or settling flips the session's `waiting' status, so
       ;; the navigator's `?' glyph appears and clears in step with it.
       ((or 'dialog 'dialog-answer) (sprig--status-refresh))
@@ -2785,67 +2767,40 @@ the CLI's own `/btw'."
   (quit-window t)
   (message "sprig: message cancelled"))
 
-;;;; Staging buffer (author an edit by hand, then apply)
-
-(declare-function sprig--courier "sprig")
-(defvar sprig--courier)
-
-(defcustom sprig-courier-edits nil
-  "How a hand-authored staging edit (`C-c C-c') reaches disk.
-When nil (the default), the edit is sent to the agent directly: your
-bytes ride in the instruction and the agent writes them with one Edit.
-Simple and works in every permission mode, but the agent, generating the
-write, could in principle alter a character, so eyeball the resulting
-diff.
-
-When non-nil, the edit is couriered instead: your bytes stay in Emacs and
-are substituted into the agent's Edit at the permission prompt, so the
-agent cannot change them (see `sprig--maybe-courier').  Stronger, but it
-needs the edit to prompt, so it refuses the auto-approve modes
-\(`acceptEdits', `bypassPermissions')."
-  :type 'boolean
-  :group 'sprig)
+;;;; Staging buffer (author an edit by hand, then file it)
+;;
+;; The buffer itself lives here, with the session's other windows onto a
+;; conversation, but nothing in this file opens one any more: the changeset
+;; review does, and takes the result back as a draft.  What is left is the
+;; buffer and the gesture, which are the same wherever they are used from.
 
 (defvar-local sprig-session--stage-target nil
-  "Session buffer a staging buffer couriers its edit to.")
+  "Review buffer a staging buffer files its edit with.")
 (defvar-local sprig-session--stage-file nil
   "Path of the file a staging buffer edits, as the change model records it.")
 (defvar-local sprig-session--stage-anchor nil
-  "The staged region's original text: the `old_string' the courier edit matches.")
+  "The staged region's original text: the `old_string' the edit will match.
+Kept to tell an untouched buffer from an edited one, and filed with the
+draft as the block the agent has to replace.")
 (defvar-local sprig-session--stage-apply nil
-  "Function `C-c C-c' hands the staged text to, instead of sending it.
+  "Function `C-c C-c' hands the staged text to.
 The changeset review sets it, so an edit written there is filed as a
-draft alongside the comments and goes out when the review is published;
-with no function, staging sends its own turn there and then.")
+draft alongside the comments and goes out when the review is published.
+A staging buffer without one has nowhere to put its edit, and says so.")
 (defvar-local sprig-session--stage-line nil
   "Line the staged region starts at in the file, or nil when nothing knows.
 The changeset review reads its diff from git, so it can say; a payload
 hunk cannot, since an `Edit' knows the bytes it replaced but never where
 they sat.  It rides along to break a tie when the anchor is not unique.")
 
-(defun sprig-session--stage-hunk (section)
-  "Return the hunk plist to stage from SECTION, or nil when there is none.
-Point on a hunk gives that hunk; on a file change with a single hunk, that
-hunk; a multi-hunk change is ambiguous, so it asks for a hunk.  Anywhere
-else returns nil, the caller's cue to seed from a fresh `Read' instead."
-  (pcase (and section (oref section type))
-    ('sprig-hunk (oref section value))
-    ('sprig-change
-     (let ((hunks (plist-get (oref section value) :hunks)))
-       (cond ((null hunks) (user-error "This change has no hunk to stage"))
-             ((cdr hunks) (user-error "Point on a single hunk to stage it"))
-             (t (car hunks)))))
-    (_ nil)))
-
 (defun sprig-session--open-stage-buffer (review file anchor &optional line apply)
-  "Open the staging buffer for FILE, seeded with ANCHOR, couriering to REVIEW.
-ANCHOR is the region's current text and the `old_string' the courier edit
-will match; the buffer opens in FILE's own major mode but visits nothing,
-so a stray save writes no file.  LINE, when the caller knows it, is where
+  "Open the staging buffer for FILE, seeded with ANCHOR, filing with REVIEW.
+ANCHOR is the region's current text and the `old_string' the edit will
+match; the buffer opens in FILE's own major mode but visits nothing, so a
+stray save writes no file.  LINE, when the caller knows it, is where
 ANCHOR starts in FILE, and says which occurrence to change if the anchor
-turns out not to be unique.  APPLY, when given, takes the edited text on
-`C-c C-c' instead of it being sent (see `sprig-session--stage-apply').
-Returns the buffer."
+turns out not to be unique.  APPLY takes the edited text on `C-c C-c'
+(see `sprig-session--stage-apply').  Returns the buffer."
   (let ((buf (get-buffer-create "*sprig-stage*")))
     (with-current-buffer buf
       (erase-buffer)
@@ -2862,219 +2817,29 @@ Returns the buffer."
       (local-set-key (kbd "C-c C-k") #'sprig-session-stage-abort)
       (goto-char (point-min)))
     (pop-to-buffer buf)
-    (message "Edit %s, then C-c C-c to %s, C-c C-k to cancel"
-             (file-name-nondirectory file)
-             (if apply "file it as a draft" "stage"))
+    (message "Edit %s, then C-c C-c to file it as a draft, C-c C-k to cancel"
+             (file-name-nondirectory file))
     buf))
 
-(defun sprig-session--stage-guard ()
-  "Signal a `user-error' unless there is a live session to stage on.
-Staging reads and applies over the session, so a dead one cannot serve it.
-No mode switch is needed: the edit rides the ordinary channel, so `e' works
-whatever posture you are in."
-  (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
-    (user-error "No live session to stage on; send a message first")))
-
-(defun sprig-session--request-seed (pending instruction reading)
-  "Arrange to seed a staging buffer from a read the agent is about to run.
-Records PENDING (see `sprig-session--pending-seed') as the seed to serve,
-sends INSTRUCTION as a turn, and says READING; the next turn's `done' opens
-the staging buffer from the `Read' result (see `sprig-session--seed-from-read')."
-  (setq sprig-session--pending-seed pending)
-  (sprig-session--send instruction)
-  (message "sprig: %s to seed a staging buffer…" reading))
-
-(defun sprig-session-stage-at-point ()
-  "Stage the diff hunk at point, seeded straight from the model (`e e').
-The region's current text is the post-image where the model has one, else
-the pre-image: the best guess at what is on disk, and so the `old_string'
-the couriered Edit must match."
-  (interactive)
-  (sprig-session--stage-guard)
-  (let* ((section (magit-current-section))
-         (hunk (or (sprig-session--stage-hunk section)
-                   (user-error "Point is not on a hunk; try `e f' or `e s'")))
-         (file (or (sprig--section-file section)
-                   (user-error "No file at point to stage")))
-         (lines (or (plist-get hunk :new) (plist-get hunk :old))))
-    (sprig-session--open-stage-buffer
-     (current-buffer) file (mapconcat #'identity lines "\n"))))
-
-(defun sprig-session-stage-file (file &optional region)
-  "Name a FILE (and optional REGION hint) for the agent to read, then stage it.
-Asks the agent to `Read' the region and seeds the staging buffer from that
-read when the turn ends, so you can edit a region the diff does not already
-show.  REGION is free text (\"function foo\", \"lines 10-40\"); blank reads
-the whole file (`e f')."
-  (interactive
-   (progn
-     (sprig-session--stage-guard)
-     (list (read-string "Stage which file: "
-                        (sprig--section-file (magit-current-section)))
-           (read-string "Region (blank = whole file): "))))
-  (sprig-session--stage-guard)
-  (let ((path (string-trim (or file "")))
-        (hint (string-trim (or region ""))))
-    (when (string-empty-p path) (user-error "No file to stage"))
-    (sprig-session--request-seed
-     (list :file path)
-     (format "Read the file `%s'%s and return only that one Read, nothing else: \
-no edits, no summary, no other tools. I am about to edit it by hand and Sprig \
-seeds my staging buffer from your read."
-             path (if (string-empty-p hint) "" (format " (just %s)" hint)))
-     (format "reading %s" (file-name-nondirectory path)))))
-
-(defun sprig-session-stage-suggested (&optional note)
-  "Let the agent suggest what to put in the staging buffer, from context (`e s').
-The agent already knows the task from the conversation, so it decides the
-single most relevant file and region to edit next, reads exactly that, and
-Sprig seeds the staging buffer from its read when the turn ends: the agent
-scopes, you author.  NOTE, if you give one, nudges the choice; blank leans
-wholly on the conversation so far.  This is the scoping front-end to staging,
-for when you know the change but not yet where it lands."
-  (interactive
-   (progn (sprig-session--stage-guard)
-          (list (read-string "Nudge (blank = use our conversation): "))))
-  (sprig-session--stage-guard)
-  (let ((note (string-trim (or note ""))))
-    (sprig-session--request-seed
-     (list :any t)
-     (concat
-      "Based on what we have been working on, decide the single most relevant \
-file and the specific region within it for me to edit next by hand"
-      (if (string-empty-p note) "" (format ", keeping in mind: %s" note))
-      ". Then `Read' exactly that region and return only that one Read: no \
-edits, no summary, no other tools. Sprig seeds my staging buffer from your \
-read, so read the slice you would want me to be editing.")
-     "asking the agent what to stage")))
-
-(defun sprig-session--strip-read-numbers (text)
-  "Reconstruct file content from a `Read' TEXT in cat -n form.
-Each content line is `<spaces><n>\\t<content>'; keep the content after the
-tab, drop any line without that shape (a wrapper note), and join with
-newlines.  The result is the file's bytes as read, the courier anchor."
-  (let (out)
-    (dolist (line (split-string (or text "") "\n"))
-      (when (string-match "\\`[ \t]*[0-9]+\t" line)
-        (push (substring line (match-end 0)) out)))
-    (mapconcat #'identity (nreverse out) "\n")))
-
-(defun sprig-session--latest-read (model &optional file)
-  "Return (FILE-PATH . TEXT) for the latest non-error `Read' in MODEL, or nil.
-With FILE, restrict to reads whose basename matches it, so a repo-relative
-request lines up with the agent's absolute path.  Without, take the most
-recent read of any file, which is how an agent-suggested seed learns the
-file the agent chose."
-  (let ((base (and file (file-name-nondirectory file))) hit)
-    (dolist (b (plist-get model :blocks))
-      (let ((path (and (eq (plist-get b :type) 'tool)
-                       (equal (plist-get b :name) "Read")
-                       (not (plist-get (plist-get b :result) :error))
-                       (alist-get 'file_path
-                                  (sprig--parse-input
-                                   (plist-get b :input))))))
-        (when (and path (or (null base)
-                            (equal base (file-name-nondirectory path))))
-          (setq hit (cons path (plist-get (plist-get b :result) :text))))))
-    hit))
-
-(defun sprig-session--seed-from-read ()
-  "Seed a staging buffer from the read a `sprig-session--pending-seed' asked for.
-Called on a turn's `done': finds the relevant `Read' in the model (the named
-file, or the latest read for an agent-suggested seed), reconstructs its bytes
-as the anchor, and opens the staging buffer at the file the agent read.
-Clears the pending seed either way, and reports when no usable read came back."
-  (let* ((seed sprig-session--pending-seed)
-         (hit (and seed (sprig-session--latest-read
-                         (sprig-session--current-model) (plist-get seed :file)))))
-    (setq sprig-session--pending-seed nil)
-    (if (not hit)
-        (message "sprig: no read came back; staging cancelled")
-      (sprig-session--open-stage-buffer
-       (current-buffer) (car hit)
-       (sprig-session--strip-read-numbers (cdr hit))))))
-
 (defun sprig-session-stage-apply ()
-  "Hand this buffer's edit on: to a review as a draft, else to the session.
-A review takes it as a draft, published with the comments in one turn
-\(`sprig-session--stage-apply').  Otherwise it goes out now, sent to the
-agent directly or couriered when `sprig-courier-edits' is set (see that
-variable for the trade-off)."
+  "File this buffer's hand-authored edit with the review that opened it.
+Nothing is sent: the edit becomes a draft alongside the review's comments
+and goes out when the review is published (`sprig-session--stage-apply').
+A draft is local, so it needs no live session; you can write one before
+the session has ever been started."
   (interactive)
   (let ((review sprig-session--stage-target)
-        (file sprig-session--stage-file)
         (anchor sprig-session--stage-anchor)
-        (line sprig-session--stage-line)
         (apply sprig-session--stage-apply)
         (new (buffer-substring-no-properties (point-min) (point-max))))
-    (unless (buffer-live-p review) (user-error "The session buffer is gone"))
-    (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
-    (if apply
-        ;; A draft is local, so it needs no live session: you can write one
-        ;; before the session has ever been started.
-        (progn (quit-window t) (funcall apply new))
-      (with-current-buffer review
-        (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
-          (user-error "No live session to send to; send a message first"))
-        (if sprig-courier-edits
-            (sprig-session--stage-courier file anchor new)
-          (sprig-session--stage-direct file anchor new line)))
-      (quit-window t)
-      (message "sprig: sent your edit to %s to apply"
-               (file-name-nondirectory file)))))
-
-(defun sprig-session--stage-direct (file anchor new &optional line)
-  "Ask the agent to apply a hand-authored edit of FILE directly.
-ANCHOR is the region's original text and NEW your edited version; both
-ride in the instruction so the agent writes them with one Edit, in any
-permission mode.  LINE, where the caller knows it, says where ANCHOR
-starts, which is what saves a one-line edit whose text appears elsewhere
-in the file.  The agent generates the write, so it could drift from NEW:
-the resulting diff is the check.  Run in the session buffer."
-  (sprig-session--send
-   (format "I have hand-authored an edit to `%s' and want it applied exactly \
-as written.  With a single Edit on that file, replace this block verbatim:
-
-```
-%s
-```
-
-with this block verbatim:
-
-```
-%s
-```
-
-%sReproduce my text character for character: do not reformat, re-indent, \
-correct, or improve any of it.  Make only this one edit and nothing else."
-           file anchor new
-           (if line
-               (format "The block to replace starts at line %d of the file; \
-if that text appears more than once, that is the occurrence I mean.\n\n" line)
-             ""))))
-
-(defun sprig-session--stage-courier (file anchor new)
-  "Stage a hand-authored edit of FILE for the tamper-proof courier apply.
-Records NEW (over ANCHOR) in `sprig--courier' so the permission gate can
-substitute your exact bytes into the agent's Edit (see
-`sprig--maybe-courier'), and asks the agent to make that one write.  Needs
-the edit to prompt, so it refuses the auto-approve modes.  Run in the
-session buffer."
-  (when (member sprig--permission-mode '("acceptEdits" "bypassPermissions"))
-    (user-error
-     "This session auto-approves edits (%s); the courier needs them to \
-prompt, so change the mode with `P' first, or unset `sprig-courier-edits'"
-     sprig--permission-mode))
-  (push (list :file file :old anchor :new new) sprig--courier)
-  (sprig-session--send
-   (format "I have authored an edit to `%s' by hand and staged it in Sprig. \
-Call the Edit tool on that file once now to apply it: your `old_string' and \
-`new_string' arguments are placeholders, because Sprig replaces them with the \
-exact staged bytes through the permission channel. This one write is \
-authorised; make only this single Edit and nothing else." file)))
+    (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+    (unless apply (user-error "This staging buffer has nowhere to file its edit"))
+    (when (equal new anchor) (user-error "Nothing changed; edit before filing"))
+    (quit-window t)
+    (funcall apply new)))
 
 (defun sprig-session-stage-abort ()
-  "Discard the staging buffer without sending the edit."
+  "Discard the staging buffer without filing the edit."
   (interactive)
   (quit-window t)
   (message "sprig: staging cancelled"))
@@ -3436,17 +3201,6 @@ name the CLI's own modes, the ones the shift-tab cycle steps through."
     ("m" "manual (prompt for every tool call)" sprig-session-manual-mode)
     ("b" "bypass (auto-approve everything, incl. shell)" sprig-session-bypass-mode)]])
 
-(transient-define-prefix sprig-session-stage-dispatch ()
-  "Open a staging buffer to author an edit by hand (`e').
-You edit the seeded buffer, then `C-c C-c' sends it to the agent to apply
-\(or couriers it when `sprig-courier-edits' is set); `C-c C-k' cancels.  No
-mode switch first.  The routes differ only in how the buffer is seeded: from
-the hunk you are on, from a file you name, or from what the agent suggests."
-  [["Stage an edit"
-    ("e" "the hunk at point" sprig-session-stage-at-point)
-    ("f" "a file / region you name (agent reads it)" sprig-session-stage-file)
-    ("s" "let the agent suggest what to edit" sprig-session-stage-suggested)]])
-
 (transient-define-prefix sprig-session-start-dispatch ()
   "Start or fork a session from the session buffer.
 `c' steers the conversation this buffer already owns; `s' is where a
@@ -3466,7 +3220,6 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-session-mode-map (kbd "c")   #'sprig-session-dispatch)
 (define-key sprig-session-mode-map (kbd "s")   #'sprig-session-start-dispatch)
 (define-key sprig-session-mode-map (kbd "P")   #'sprig-session-permission-mode)
-(define-key sprig-session-mode-map (kbd "e")   #'sprig-session-stage-dispatch)
 (define-key sprig-session-mode-map (kbd "k")   #'sprig-session-reject)
 ;; `a' answers the agent's structured dialog; the yes/no reply to a plain
 ;; prose question is `c y' / `c n' (not top-level: `n' is section motion).

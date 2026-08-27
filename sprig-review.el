@@ -1322,7 +1322,7 @@ composed with the rest of the review rather than sent on its own."
     (sprig-review--open-stage file text line)))
 
 (define-obsolete-function-alias 'sprig-review-stage-hunk
-  'sprig-review-stage "0.6.0")
+  'sprig-review-stage "0.52.0")
 
 ;;;; Visiting and refreshing
 
