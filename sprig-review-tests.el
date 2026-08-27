@@ -1267,5 +1267,16 @@ caller falls back to the indentation rule."
             (should (equal (nth 2 seeded) 4))))
       (kill-buffer session))))
 
+(ert-deftest sprig-review-test-reloading-reaches-the-keys ()
+  "Re-loading the file must reach an open review's keys.  A `defvar' does
+nothing to a variable that is already bound, so the bindings live outside
+it and mutate the map every open review is already using: same object,
+new keys."
+  (let ((map sprig-review-mode-map))
+    (load (locate-library "sprig-review") nil t)
+    (should (eq map sprig-review-mode-map))
+    (should (eq (lookup-key sprig-review-mode-map (kbd "e"))
+                'sprig-review-stage-dispatch))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here
