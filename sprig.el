@@ -6234,7 +6234,7 @@ cover remote hosts too."
 
 (defvar sprig--source-files
   '("sprig-change" "sprig-render" "sprig-session" "sprig-review" "sprig"
-    "sprig-session-mode")
+    "sprig-quiz" "sprig-session-mode")
   "Sprig's own source files, in dependency load order, for `sprig-reload'.")
 
 (defun sprig--undefine-faces ()
