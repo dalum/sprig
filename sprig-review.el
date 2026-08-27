@@ -1290,6 +1290,42 @@ less of it than there is."
         (setq end (1- end)))
       (list start end (not (and open-found close-found))))))
 
+(defun sprig-review--attached-doc-start ()
+  "Line number where the doc attached above the line at point begins.
+Point must be on the defun's own first line.  Walks back over the run of
+comment and string lines directly above it, stopping at the first blank
+line or line of code, so a `\"\"\"' docstring or a block of `#' comments
+comes away with the function it documents rather than being left behind.
+`beginning-of-defun\=' stops at the `function\=' line, and in every language
+that writes its documentation above the definition that is half the thing
+you meant to edit.
+
+A line counts as doc when its *first* non-blank character opens or sits
+inside a comment or a string.  Testing the end of the line instead would
+take `x = 1  # note\=' for a comment and walk on up through code.  What it
+does not know is the attribute or decorator (Rust\='s `#[derive]\=',
+Python\='s `@foo\='), which is structure rather than prose and reads as
+code here."
+  (let ((start (line-number-at-pos)))
+    (save-excursion
+      (catch 'done
+        (while (> (line-number-at-pos) 1)
+          (forward-line -1)
+          (let ((bol (line-beginning-position))
+                (p (save-excursion (back-to-indentation) (point))))
+            (cond
+             ;; Already inside a string that opened further up: doc, blank or
+             ;; not.  A docstring with a paragraph break in it is still one
+             ;; docstring, and stopping at that blank would take half of it.
+             ((nth 3 (syntax-ppss bol)) (setq start (line-number-at-pos)))
+             ((string-blank-p (buffer-substring bol (line-end-position)))
+              (throw 'done start))
+             ;; Opens a comment or a string at its first non-blank character.
+             ((or (nth 4 (syntax-ppss (1+ p))) (nth 3 (syntax-ppss (1+ p))))
+              (setq start (line-number-at-pos)))
+             (t (throw 'done start)))))
+        start))))
+
 (defun sprig-review--defun-bounds (texts i file)
   "Return (START . END), indices into TEXTS, for the defun around line I.
 Nil when FILE's major mode has no notion of one, or when the defun it
@@ -1315,7 +1351,9 @@ delayed and file-local variables off: this is a measurement, not a visit."
           ;; `end-of-defun' lands on the line after; step back off it.
           (setq end (line-number-at-pos (if (bolp) (max 1 (1- (point))) (point))))
           (beginning-of-defun)
-          (setq start (line-number-at-pos)))
+          ;; The docstring or comment block above is part of the function as
+          ;; far as anyone editing it is concerned.
+          (setq start (sprig-review--attached-doc-start)))
         (when (and start end (<= start (1+ i)) (>= end (1+ i)))
           (cons (1- start) (1- end)))))))
 
@@ -1623,7 +1661,12 @@ bottom, raise `sprig-review-block-context'."
 Like `e b', but the file's own major mode decides where the function
 starts and ends, so a docstring or a comment at column zero does not
 mislead it the way indentation alone does.  Falls back to `e b'\='s rule
-when the mode has no notion of a defun."
+when the mode has no notion of a defun.
+
+It takes the doc written above the definition with it: the run of comment
+or string lines directly above, up to the first blank line.  A function
+and the docstring explaining it are one thing to edit, and every mode's
+`beginning-of-defun\=' stops below the prose."
   (interactive)
   (sprig-review--stage-guard)
   (pcase-let ((`(,file ,text ,line ,edge)

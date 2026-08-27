@@ -1321,5 +1321,54 @@ quietly reviewing a scope that is not the one asked for."
   (sprig-review-tests--decorated "main" '("HEAD -> main, origin/main" "" "")
     (should-not (sprig-review--parent-branch nil "/tmp"))))
 
+(defconst sprig-review-tests--documented
+  '("import os"
+    ""
+    "def other():"
+    "    pass"
+    ""
+    "\"\"\""
+    "Build one operation."
+    ""
+    "The prose runs to a second paragraph."
+    "\"\"\""
+    "def route(a, b):"
+    "    x = 1  # a trailing comment"
+    "    return x"
+    ""
+    "def after():"
+    "    pass")
+  "A file whose function carries a docstring with a blank line in it.")
+
+(ert-deftest sprig-review-test-defun-takes-its-docstring ()
+  "`e d' hands you the function and the prose explaining it, since those are
+one thing to edit and `beginning-of-defun' stops below the prose."
+  (should (equal '(5 . 12)
+                 (sprig-review--defun-bounds
+                  sprig-review-tests--documented 12 "/tmp/x.py"))))
+
+(ert-deftest sprig-review-test-a-docstring-may-hold-a-blank-line ()
+  "A paragraph break inside the docstring is not the end of it.  Stopping
+at the first blank line would hand over half a docstring."
+  (let ((bounds (sprig-review--defun-bounds
+                 sprig-review-tests--documented 11 "/tmp/x.py")))
+    (should (equal "\"\"\"" (nth (car bounds) sprig-review-tests--documented)))))
+
+(ert-deftest sprig-review-test-a-trailing-comment-is-not-doc ()
+  "Doc is decided from a line's first character, not its last: `x = 1  #
+note' is code, and testing the end of the line would walk on up through it."
+  ;; Point on `def after()', whose only neighbour above is code with a
+  ;; trailing comment two lines up; nothing is taken with it.
+  (should (equal '(14 . 15)
+                 (sprig-review--defun-bounds
+                  sprig-review-tests--documented 15 "/tmp/x.py"))))
+
+(ert-deftest sprig-review-test-comment-block-counts-as-doc ()
+  "A run of comment lines above a defun is the same case as a docstring,
+which is what every Lisp and every C-like language writes instead."
+  (let ((el '("(require 'x)" "" ";; What foo is for." ";; And why."
+              "(defun foo ()" "  (bar))")))
+    (should (equal '(2 . 5) (sprig-review--defun-bounds el 5 "/tmp/x.el")))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

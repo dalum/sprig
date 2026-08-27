@@ -217,11 +217,13 @@ Two things it will not do. A selection spanning two hunks is refused rather than
 | `e e` | region, marked hunk, else the line | the diff |
 | `e h` | the whole hunk | the diff |
 | `e b` | the block around point | indentation, over a wider read |
-| `e d` | the whole function around point | the file's own major mode, over a wider read |
+| `e d` | the whole function around point, with the doc above it | the file's own major mode, over a wider read |
 
 **Wider means asking git again, not reading the file.** `e b` and `e d` re-run `git diff` for that one file with `sprig-review-block-context` lines of context (400 by default) and find the block in the result. It is the same read the review already does, over the same transport, so it needs nothing new to work on a remote tree, and it comes back through the same parser with the same line numbers, so nothing downstream can tell the difference. One round trip per file, memoised for as long as the diff stands, and dropped on `g`.
 
 **What bounds it, and how honestly.** `e b` reads indentation and nothing else: the nearest line indented less than point, down to the next line back at that indentation, keeping a closing brace that sits at the opening line's column. No mode, no parser, so it works the same in any language that indents conventionally. Indentation measures *nesting*, though, so in a deeply nested language the block is the innermost form rather than the function; `C-u N e b` climbs N levels out. `e d` is the answer when you want the function as such: it runs the file's own major mode over the same text and asks it, which is the one way to tell a docstring at column zero from the start of a block. It falls back to `e b`'s rule when the mode has no notion of a defun. Either way you are told how many lines you were handed, and told when the block ran to the end of what was read rather than to a line of code.
+
+**`e d` takes the doc written above the definition with it.** Every mode's `beginning-of-defun` stops at the `def` or `function` line, so a `"""` docstring or a block of `#` comments above it would be left behind, and in a language that documents above the definition that is half the thing you meant to edit. So the walk carries on up over the run of comment and string lines directly above, stopping at the first blank line or line of code. A blank line *inside* a docstring does not stop it, since a paragraph break is not the end of the prose. Whether a line is doc is decided from its first character rather than its last, so `x = 1  # note` reads as the code it is. It does not know about attributes and decorators (`#[derive]`, `@foo`), which are structure rather than prose.
 
 `c m` is the other escape hatch: a plain message about the marked hunks, for feedback about the change as a whole rather than a line of it.
 
