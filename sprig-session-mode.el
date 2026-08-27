@@ -32,6 +32,7 @@
 (require 'sprig-change)
 (require 'sprig-render)
 (require 'sprig-review)
+(require 'sprig-quiz)
 (require 'sprig-session)
 (require 'subr-x)
 (require 'eieio)

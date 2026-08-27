@@ -81,7 +81,7 @@ With `use-package` and a local checkout:
 2. `RET` (or `o`) on a row opens that session's session buffer, replaying its full history, on the host that row came from. `s n` starts a fresh session on the host of the group point is in, prompting for its working directory. That prompt suggests the directories the host's existing sessions already run in (no configuration, drawn from the same scan the navigator uses) and completes deeper paths live: on the local filesystem, or over SSH for a remote host. A prefix argument (`C-u s n`, or `C-u M-x sprig-session-open`) forces that one session onto the local machine wherever point sits. `s c` starts a fresh session and drops you straight into a prompt for its first message (`s p` the same but in plan mode), and `s f` forks the session at point into one of its own. `M-x sprig-session-open` does the same directly. You can also steer a session without opening it: `c` and `a` in the navigator are the session buffer's own steering transients, acting on the session under point, so `c c` composes for it and `a a` answers its waiting question from the list.
 3. In the session buffer, review the agent's work: prose reads as prose, and every tool call folds to a one-line heading naming what it touched. Move with `n` / `p`, and `TAB` on an edit to unfold its diff.
 4. Steer it: mark sections with `SPC`, then use a verb (below). `c c` composes a message and sends it; the session starts or resumes automatically on the first send.
-5. `d` opens the **changeset review**: `d d` for the uncommitted changes, `d m` for the whole branch against main. Navigate the changed files, `c c` to comment on a line or a marked region, `c p` to publish every comment to the agent in one turn. See [Changeset review](#changeset-review).
+5. `d` opens the **changeset review**: `d d` for the uncommitted changes, `d m` for the whole branch against main. Navigate the changed files, `c c` to comment on a line or a marked region, `c p` to publish every comment to the agent in one turn, and `Q` to quiz yourself on the change before you sign it off. See [Changeset review](#changeset-review) and [Quiz yourself](#quiz-yourself-q).
 6. `c i` interrupts a streaming turn (in the navigator too, on the session at point). The CLI ends the turn cleanly and the session stays live, so the next send continues it with no resume; if the CLI does not honour the request within `sprig-interrupt-timeout`, Sprig falls back to killing the turn and the session resumes on the next send.
 
 The session lives on past the buffer: reopen it any time from the navigator, or resume it with `c o` there. Nothing is saved by you, because the CLI's log already is the record.
@@ -95,6 +95,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `sprig-session-connect` | `M-x` | Start or resume the session owned by the current session buffer |
 | `sprig-session-open-file` | `M-x` | Replay a session-log `.jsonl` file directly (offline, read-only) |
 | `sprig-session-review` | `d d` | Open the changeset review over the session's working tree |
+| `sprig-quiz` | `Q` | Quiz yourself on the changeset under review |
 | `sprig-login` | `M-x` | Log the CLI in for `sprig-config-directory`, in your local browser (once per host) |
 
 ### Navigator
@@ -228,6 +229,33 @@ Two things it will not do. A selection spanning two hunks is refused rather than
 `b` inside the review changes the scope in place and re-reads. Prefer it to reopening: the drafts come across, re-anchored by their recorded text the way `g` re-anchors them, so widening the scope halfway through a review keeps the comments you have already written. The base is buffer-local, so two reviews of one session can sit at different scopes.
 
 `sprig-review-base` sets the default (`"HEAD"`). A plain branch name there gets the `--merge-base` treatment above; anything containing `..` is passed to `git diff` verbatim, so `"main...HEAD"` still means exactly what git says it means. Untracked files are never shown, since `git diff` omits them.
+
+### Quiz yourself (`Q`)
+
+`Q` in the review sets a short comprehension quiz about the change you are looking at, and opens it as a worksheet you answer from memory before anything answers back. It exists for the failure the rest of the review cannot reach. Hand-authoring fights rubber-stamping at the moment of writing, and the diff fights it at the moment of reading, but neither catches the case where you reviewed carefully at the time and the model has since quietly gone. Only being asked catches that, because retrieval is the one thing you cannot fake to yourself.
+
+**The answer has to be entailed by the code, not contained in it.** A question you can answer by looking at any single location tests whether you can read, which was never in doubt, and trivia is what a model reaches for by default. So the questions are consequences, invariants, blast radius, rejected alternatives, and where a described symptom would come from: *"what breaks if this were a hash table?"*, *"callers are seeing the wrong route, where do you look first?"*. One bad quiz discredits the practice for good, so most of the generation prompt is spent ruling the lookup questions out.
+
+**It aims at what you never opened.** The review already records which files you unfolded, so the questions are weighted towards the ones you accepted without looking. That signal is used in one direction only: unfolding a file is weak evidence you read it, but never unfolding it is proof you did not.
+
+**You are compared against a cold reader, not against the author.** `C-c C-c` hands the worksheet in and fires two one-shots at once. The first has no conversation history at all and answers only from the working tree, so it holds exactly what you hold; that is the peer, and its answer sits under yours. The second forks the session, so it answers from having written the code rather than from reading it. That one cannot be wrong in the interesting way, and disagreeing with it is disagreeing with an authority rather than a peer, so it is folded away as the adjudicator you unfold (`TAB`) once you and the cold reader differ. Neither is shown what you wrote: they answer independently, or the comparison is not one.
+
+The four cases are the point of the whole thing:
+
+| you | cold reader | what it means |
+|---|---|---|
+| right | right | fine, move on |
+| wrong | right | your gap: the code says it and you did not read it |
+| right | wrong | the code is misleading |
+| wrong | wrong | **the intent is not recoverable from the code** |
+
+That last row is a documentation gap, located precisely and found rather than guessed at.
+
+**It is never scored and never unprompted.** No grade, no history, no streak, nothing on a timer, and no way to launch one except by asking. An agent grading a human is the exact posture that erodes ownership, dressed up as the cure for it. Nor is there any defence against peeking at the code first: the only person a peeked answer fools is the one who asked for the question.
+
+The one honest limit is the cold reader's reach. Like a side question, its one-shot routes no permission prompts back to Emacs (there is no buffer to answer them in), so a `Read` its own CLI configuration does not already allow simply auto-denies. The changeset itself always rides along in the prompt, so it answers from the diff rather than failing, but a question needing a file outside the change may get "the code does not say" where a reader with the tree in front of them would have known. That is a soft failure and a visible one.
+
+The whole exchange rides the side-question transport, so a quiz writes no log, opens no turn, and leaves the session untouched. Your homework does not belong in the record the next agent reads. `sprig-quiz-questions` sets how many (3), and `sprig-quiz-cold-read` turns the peer off, which leaves you with the author alone and reads much more like being marked.
 
 **Why the line numbers come from git.** An `Edit` payload knows the bytes it replaced but never the line they sat on, so line-anchored review can only ride the working-tree diff. Sprig reads that diff by running `git diff` itself, which is a read, not a change, so it keeps to the instruction invariant: every *write*, publish included, still goes through the agent. For a remote session the diff is read over the same SSH transport the navigator reads logs over, not TRAMP; only an optional `RET` file visit uses TRAMP.
 

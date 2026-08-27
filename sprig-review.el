@@ -19,6 +19,7 @@
 ;;   c c        comment on the line at point, or on the region
 ;;   e          hand-author the line, region, or hunk, rather than describe it
 ;;   c p        publish: every draft, comments and edits, in one turn
+;;   Q          quiz yourself on the change before you sign it off
 ;;
 ;; Three things make that more than a diff viewer.
 ;;
@@ -63,6 +64,7 @@
                   (target context &optional plan queue format label))
 (declare-function sprig-session--open-stage-buffer "sprig-session-mode"
                   (review file anchor &optional line apply))
+(declare-function sprig-quiz "sprig-quiz" ())
 
 ;;;; Options
 
@@ -1365,6 +1367,7 @@ composed with the rest of the review rather than sent on its own."
     (define-key map (kbd "k")       #'sprig-review-comment-delete)
     (define-key map (kbd "e")       #'sprig-review-stage)
     (define-key map (kbd "b")       #'sprig-review-set-base)
+    (define-key map (kbd "Q")       #'sprig-quiz)
     (define-key map (kbd "g")       #'sprig-review-refresh)
     (define-key map (kbd "RET")     #'sprig-review-visit)
     (define-key map (kbd "q")       #'quit-window)

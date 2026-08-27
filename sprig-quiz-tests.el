@@ -1,0 +1,372 @@
+;;; sprig-quiz-tests.el --- ERT tests for the changeset quiz -*- lexical-binding: t; -*-
+
+;;; Commentary:
+
+;; Covers the quiz: which files it aims at, the one structured contract
+;; (numbered headings, parsed in both directions), the worksheet's
+;; read-only/editable split, and the slot machinery that keeps the cold
+;; read above the author's answer however the two forks race.  Runs
+;; offline: every fork is stubbed and no process is started.
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'sprig-change)
+(require 'sprig-review)
+(require 'sprig-quiz)
+
+(defconst sprig-quiz-tests--diff
+  "diff --git a/foo.el b/foo.el
+--- a/foo.el
++++ b/foo.el
+@@ -1,3 +1,3 @@ defun foo ()
+ (defun foo ()
+-  (bar))
++  (baz))
+diff --git a/new.txt b/new.txt
+new file mode 100644
+--- /dev/null
++++ b/new.txt
+@@ -0,0 +1,1 @@
++hello
+"
+  "A two-file unified diff: one edit and one new file.")
+
+(defvar sprig-quiz-tests--asked nil
+  "Every `sprig-quiz--ask' the body made, newest last.
+Each is a plist (:name NAME :prompt PROMPT :callback FN).")
+
+(defmacro sprig-quiz-tests--with-forks (&rest body)
+  "Run BODY with every quiz fork stubbed.
+Each call is recorded in `sprig-quiz-tests--asked' instead of spawning."
+  (declare (indent 0))
+  `(let ((sprig-quiz-tests--asked nil))
+     (cl-letf (((symbol-function 'sprig-quiz--ask)
+                (lambda (_command _dir _remote name prompt callback)
+                  (setq sprig-quiz-tests--asked
+                        (append sprig-quiz-tests--asked
+                                (list (list :name name :prompt prompt
+                                            :callback callback))))
+                  nil)))
+       ,@body)))
+
+(defmacro sprig-quiz-tests--echoing (&rest body)
+  "Run BODY and return the last line it passed to `message'.
+`current-message' is nil under batch, so the function itself is captured."
+  (declare (indent 0))
+  `(let (said)
+     (cl-letf (((symbol-function 'message)
+                (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+       ,@body)
+     said))
+
+(defun sprig-quiz-tests--fork (name)
+  "The recorded fork called NAME, or nil."
+  (seq-find (lambda (f) (equal (plist-get f :name) name))
+            sprig-quiz-tests--asked))
+
+(defmacro sprig-quiz-tests--worksheet (questions &rest body)
+  "Run BODY in a worksheet buffer holding QUESTIONS, forks stubbed."
+  (declare (indent 1))
+  `(let ((buf (generate-new-buffer "*sprig-quiz-test*")))
+     (unwind-protect
+         (sprig-quiz-tests--with-forks
+           (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+             (sprig-quiz--start buf ,questions "DIFF" "sid" "/tmp" nil))
+           (with-current-buffer buf ,@body))
+       (kill-buffer buf))))
+
+;;;; The one structured contract
+
+(ert-deftest sprig-quiz-test-split-reads-numbered-headings ()
+  "Questions and answers travel as `## N.' headings, and nothing else."
+  (should (equal (sprig-quiz--split "## 1. First?\n## 2. Second?")
+                 '((1 . "First?") (2 . "Second?")))))
+
+(ert-deftest sprig-quiz-test-split-is-loose-about-the-markup ()
+  "A chatty preamble, another heading level, and other punctuation all parse.
+The contract is deliberately loose: a strict parser would turn a model's
+stylistic drift into a failed quiz."
+  (let ((got (sprig-quiz--split
+              "Here you go:\n\n### 1) First?\n\n#2: Second?\n more\n")))
+    (should (equal (mapcar #'car got) '(1 2)))
+    (should (equal (alist-get 1 got) "First?"))
+    (should (equal (alist-get 2 got) "Second?\n more"))))
+
+(ert-deftest sprig-quiz-test-split-survives-a-bare-heading-and-a-long-body ()
+  "The shape a real reply actually has: a bare `## N.' with the answer
+starting on the next line.  Regression for reading the heading number out of
+the match data *after* `string-trim' had already overwritten it, which lost
+every heading past the first and took the whole delivery down with it."
+  (let ((got (sprig-quiz--split
+              (concat "## 1.\n\nFirst answer, over\nseveral lines.\n\n"
+                      "## 2.\n\nSecond answer.\n\n"
+                      "## 3.\n\nThird answer."))))
+    (should (equal (mapcar #'car got) '(1 2 3)))
+    (should (equal (alist-get 1 got) "First answer, over\nseveral lines."))
+    (should (equal (alist-get 3 got) "Third answer."))))
+
+(ert-deftest sprig-quiz-test-split-of-nothing-is-nothing ()
+  "No headings means no questions, which the caller reports rather than
+opening an empty worksheet."
+  (should-not (sprig-quiz--split "I would rather not."))
+  (should-not (sprig-quiz--split nil)))
+
+;;;; Aiming at what went unread
+
+(ert-deftest sprig-quiz-test-unread-is-what-was-never-unfolded ()
+  "A file you never opened is unread; one you did is not.
+The signal is used in this direction only: never unfolding proves you did
+not read it, unfolding proves rather little."
+  (let ((changes (sprig-parse-diff sprig-quiz-tests--diff)))
+    (should (equal (sprig-quiz--unread changes nil) '("foo.el" "new.txt")))
+    (should (equal (sprig-quiz--unread changes '("foo.el")) '("new.txt")))
+    (should-not (sprig-quiz--unread changes '("foo.el" "new.txt")))))
+
+(ert-deftest sprig-quiz-test-diff-text-flags-the-unopened-files ()
+  "The prompt says which hunks were accepted without being opened, since
+that is where the reader's model is thinnest."
+  (let* ((changes (sprig-parse-diff sprig-quiz-tests--diff))
+         (text (sprig-quiz--diff-text changes '("new.txt"))))
+    (should (string-match-p "--- foo.el$" text))
+    (should (string-match-p "--- new.txt   \\[ACCEPTED WITHOUT OPENING\\]"
+                            text))
+    ;; And the diff itself is there to ask about.
+    (should (string-match-p "^-  (bar))$" text))
+    (should (string-match-p "^\\+  (baz))$" text))))
+
+(ert-deftest sprig-quiz-test-diff-text-says-what-it-dropped ()
+  "A capped diff reports the omission rather than reading as the whole change."
+  (let* ((changes (sprig-parse-diff sprig-quiz-tests--diff))
+         (sprig-quiz-max-diff-lines 3)
+         (text (sprig-quiz--diff-text changes nil)))
+    (should (string-match-p "further diff lines omitted" text))))
+
+;;;; The generation prompt
+
+(ert-deftest sprig-quiz-test-generate-prompt-rules-out-trivia ()
+  "The prompt spends itself ruling out lookup questions, which is the
+default a model reaches for and the failure that discredits the practice."
+  (let ((p (sprig-quiz--generate-prompt "DIFF" '("new.txt") 3)))
+    (should (string-match-p "Ask exactly 3 questions" p))
+    (should (string-match-p "ENTAILED by the code, not CONTAINED" p))
+    (should (string-match-p "What does function F return" p))
+    (should (string-match-p "new.txt" p))
+    (should (string-match-p "DIFF" p))))
+
+;;;; The worksheet
+
+(ert-deftest sprig-quiz-test-worksheet-questions-are-read-only ()
+  "You cannot edit the question, and you can type under it.  The split is
+the staging buffer's own: read-only headers, editable bodies."
+  (sprig-quiz-tests--worksheet '((1 . "What breaks if it were a Dict?"))
+    (goto-char (point-min))
+    (search-forward "What breaks")
+    (should (get-text-property (match-beginning 0) 'read-only))
+    (should-error (save-excursion (goto-char (match-beginning 0))
+                                  (insert "x"))
+                  :type 'text-read-only)
+    ;; The gap under it takes text.
+    (goto-char (point-max))
+    (insert "Ordering is lost.")
+    (should (string-match-p "Ordering is lost" (buffer-string)))))
+
+(ert-deftest sprig-quiz-test-worksheet-sends-nothing-until-you-hand-it-in ()
+  "Opening the worksheet fires the generator and nothing else: the other
+two answers are the reward for having answered first."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (should-not (sprig-quiz-tests--fork "sprig-quiz-cold"))
+    (should-not (sprig-quiz-tests--fork "sprig-quiz-author"))))
+
+;;;; Handing it in
+
+(ert-deftest sprig-quiz-test-submit-asks-both-and-shows-neither-your-answer ()
+  "Submitting fires a cold reader and the author at once, and neither is
+shown what you wrote: they answer independently or it is not a comparison."
+  (sprig-quiz-tests--worksheet '((1 . "Why not a Dict?"))
+    (goto-char (point-max))
+    (insert "Because ordering is load-bearing.")
+    (sprig-quiz-submit)
+    (let ((cold (sprig-quiz-tests--fork "sprig-quiz-cold"))
+          (author (sprig-quiz-tests--fork "sprig-quiz-author")))
+      (should cold)
+      (should author)
+      (should (string-match-p "Why not a Dict?" (plist-get cold :prompt)))
+      (should (string-match-p "reading the code cold"
+                              (plist-get cold :prompt)))
+      (should-not (string-match-p "load-bearing" (plist-get cold :prompt)))
+      (should-not (string-match-p "load-bearing" (plist-get author :prompt))))))
+
+(ert-deftest sprig-quiz-test-submit-is-once ()
+  "A handed-in worksheet cannot be handed in again, which would fire a
+second pair of forks into slots already filled."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (sprig-quiz-submit)
+    (should-error (sprig-quiz-submit) :type 'user-error)))
+
+(ert-deftest sprig-quiz-test-cold-read-sits-above-the-author ()
+  "Whichever fork lands first, the cold read is above the author's answer:
+the peer is the comparison, the author only the adjudicator."
+  (sprig-quiz-tests--worksheet '((1 . "Why?") (2 . "And?"))
+    (sprig-quiz-submit)
+    ;; The author answers first, to prove the order is not arrival order.
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-author") :callback)
+             "## 1. Intent one.\n## 2. Intent two.")
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-cold") :callback)
+             "## 1. Cold one.\n## 2. Cold two.")
+    (let ((s (buffer-string)))
+      (should (< (string-match "cold read" s)
+                 (string-match "what the author says" s)))
+      (should (string-match-p "Cold one" s))
+      (should (string-match-p "Intent one" s)))))
+
+(ert-deftest sprig-quiz-test-each-answer-lands-under-its-own-question ()
+  "The heading number is what routes an answer, not its position."
+  (sprig-quiz-tests--worksheet '((1 . "First?") (2 . "Second?"))
+    (sprig-quiz-submit)
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-cold") :callback)
+             "## 2. Answer to the second.\n## 1. Answer to the first.")
+    (let ((s (buffer-string)))
+      (should (< (string-match "Answer to the first" s)
+                 (string-match "Answer to the second" s))))))
+
+(ert-deftest sprig-quiz-test-an-echoed-question-is-dropped ()
+  "Asked for a numbered heading, a model restates the question under it.
+Left in, every answer is half quotation, under a heading that already says
+it."
+  (should (equal "Because ordering is load-bearing."
+                 (sprig-quiz--strip-echo
+                  "Why not a Dict?\n\nBecause ordering is load-bearing."
+                  "Why not a Dict?")))
+  ;; An answer that merely opens on similar words is left alone.
+  (should (equal "Why not a Dict? Good question."
+                 (sprig-quiz--strip-echo "Why not a Dict? Good question."
+                                         "Why not a Dict?")))
+  (should (equal "Plain." (sprig-quiz--strip-echo "Plain." "Why?")))
+  (should (equal "" (sprig-quiz--strip-echo nil "Why?"))))
+
+(ert-deftest sprig-quiz-test-a-slot-starts-on-its-own-line ()
+  "The last question's body ends wherever you stopped typing, so the slot
+label must not weld itself to the end of your own answer."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (goto-char (point-max))
+    (insert "I have no idea, honestly.")
+    (sprig-quiz-submit)
+    (should (string-match-p "I have no idea, honestly\\.\n" (buffer-string)))
+    (should-not (string-match-p "honestly\\. *cold read" (buffer-string)))))
+
+(ert-deftest sprig-quiz-test-the-author-is-folded-until-you-ask ()
+  "The author's answer is inserted hidden: it is the adjudicator you reach
+for once you and the cold reader differ, not a verdict handed down."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (sprig-quiz-submit)
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-author") :callback)
+             "## 1. Because of the ordering.")
+    (goto-char (point-min))
+    (should (search-forward "▸ what the author says" nil t))
+    (goto-char (line-beginning-position))
+    (let ((ov (sprig-quiz--fold-at-point)))
+      (should (overlayp ov))
+      (should (overlay-get ov 'invisible))
+      ;; TAB opens it and turns the arrow, and again shuts it.
+      (sprig-quiz-toggle)
+      (should-not (overlay-get ov 'invisible))
+      (should (string-match-p "▾ what the author says" (buffer-string)))
+      (sprig-quiz-toggle)
+      (should (overlay-get ov 'invisible))
+      (should (string-match-p "▸ what the author says" (buffer-string))))))
+
+(ert-deftest sprig-quiz-test-toggling-does-not-drag-the-slots ()
+  "Flipping the arrow must leave the slot markers on their own text, or a
+second answer lands in the middle of the first."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (sprig-quiz-submit)
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-author") :callback)
+             "## 1. Intent.")
+    (goto-char (point-min))
+    (search-forward "▸ what the author says")
+    (goto-char (line-beginning-position))
+    (sprig-quiz-toggle)
+    (sprig-quiz-toggle)
+    ;; The cold read lands afterwards and still finds its own slot.
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-cold") :callback)
+             "## 1. Cold.")
+    (let ((s (buffer-string)))
+      (should (string-match-p "    Cold\\." s))
+      (should (string-match-p "    Intent\\." s))
+      (should (< (string-match "Cold\\." s) (string-match "Intent\\." s))))))
+
+(ert-deftest sprig-quiz-test-a-failed-fork-says-so-in-place ()
+  "A fork that dies marks its own slots rather than leaving an ellipsis
+that never resolves."
+  (sprig-quiz-tests--worksheet '((1 . "Why?"))
+    (sprig-quiz-submit)
+    (funcall (plist-get (sprig-quiz-tests--fork "sprig-quiz-cold") :callback)
+             nil)
+    (should (string-match-p "this one failed" (buffer-string)))))
+
+(ert-deftest sprig-quiz-test-a-sessionless-review-still-quizzes ()
+  "With no session there is no author to adjudicate, and the cold reader
+carries the whole comparison rather than the quiz refusing to open."
+  (let ((buf (generate-new-buffer "*sprig-quiz-test*")))
+    (unwind-protect
+        (sprig-quiz-tests--with-forks
+          (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+            (sprig-quiz--start buf '((1 . "Why?")) "DIFF" nil "/tmp" nil))
+          (with-current-buffer buf
+            (sprig-quiz-submit)
+            (should (sprig-quiz-tests--fork "sprig-quiz-cold"))
+            (should-not (sprig-quiz-tests--fork "sprig-quiz-author"))
+            (should-not (string-match-p "the author says" (buffer-string)))))
+      (kill-buffer buf))))
+
+;;;; Entry
+
+(ert-deftest sprig-quiz-test-nothing-to-compare-against-says-so ()
+  "With the cold reader off and no session there is no answer coming, and
+the line says that rather than naming someone who is not answering.  The
+retrieval still happened, which was most of the value."
+  (let ((buf (generate-new-buffer "*sprig-quiz-test*"))
+        (sprig-quiz-cold-read nil))
+    (unwind-protect
+        (sprig-quiz-tests--with-forks
+          (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+            (sprig-quiz--start buf '((1 . "Why?")) "DIFF" nil "/tmp" nil))
+          (with-current-buffer buf
+            (should (equal "sprig: handed in; nothing to compare against"
+                           (sprig-quiz-tests--echoing (sprig-quiz-submit))))
+            (should-not sprig-quiz-tests--asked)))
+      (kill-buffer buf))))
+
+(ert-deftest sprig-quiz-test-refuses-outside-a-review ()
+  "`Q' is a verb of the review buffer, and says so rather than guessing."
+  (with-temp-buffer
+    (should-error (sprig-quiz) :type 'user-error)))
+
+(ert-deftest sprig-quiz-test-refuses-an-empty-changeset ()
+  "Nothing changed is nothing to be quizzed on."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig-review--changes nil)
+    (should-error (sprig-quiz) :type 'user-error)))
+
+(ert-deftest sprig-quiz-test-generator-reads-the-live-fold-state ()
+  "The fold record is only refreshed on a redraw, so `Q' asks the sections
+where they stand: a file you unfolded a moment ago must not be quizzed as
+one you never opened."
+  (with-temp-buffer
+    (sprig-review-mode)
+    (setq sprig-review--changes (sprig-parse-diff sprig-quiz-tests--diff))
+    (sprig-review--render)
+    ;; Rendered folded, so nothing is expanded and both files are unread.
+    (setq sprig-review--expanded '("stale.el"))
+    (sprig-quiz-tests--with-forks
+      (sprig-quiz)
+      (let ((p (plist-get (sprig-quiz-tests--fork "sprig-quiz-set") :prompt)))
+        (should p)
+        (should (string-match-p "foo.el, new.txt" p))
+        (should-not (string-match-p "stale.el" p))))))
+
+(provide 'sprig-quiz-tests)
+;;; sprig-quiz-tests.el ends here
