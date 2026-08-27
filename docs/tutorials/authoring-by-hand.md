@@ -68,10 +68,19 @@ by a file, so a stray `C-x C-s` writes nothing.
 When you are happy, press **`C-c C-c`** to send your edit, or **`C-c C-k`** to
 throw it away.
 
+From the **changeset review** this files the edit as a draft rather than sending
+it: it appears inline under the lines it replaces, next to your comments, and
+goes out with them on `c p`. That is the whole point of a review being composed
+as a whole. `c e` on it re-opens the staging buffer seeded with what you wrote,
+and `k` takes it back. Because a draft is local, you can write one before the
+session has even started. From the session buffer, `C-c C-c` sends there and
+then, as below.
+
 ### 4. The agent applies it
 
-On `C-c C-c`, Sprig sends the agent your exact text and asks it to make that one
-edit, verbatim. Your change lands in the working tree as a normal diff.
+On sending (or on publishing the review), Sprig gives the agent your exact text
+and asks it to make that one edit, verbatim. Your change lands in the working
+tree as a normal diff.
 
 Because the agent does the write, glance at the resulting diff to confirm it
 matches what you typed. If you want a stronger guarantee, set
@@ -112,7 +121,12 @@ a guard clause, and you want to write it yourself.
   from the session buffer cannot say: an `Edit` payload knows the bytes it
   replaced but never the line they sat on.
 - **One edit per send.** A single `C-c C-c` asks for exactly one edit, your text
-  applied verbatim. Nothing else is touched.
+  applied verbatim. Nothing else is touched. A published review asks for one
+  `Edit` per staged block, which is the same rule counted differently.
+- **A staged edit re-anchors.** In the review, a draft edit records the lines it
+  was written against, so if the agent moves them before you publish, it is
+  flagged as orphaned and published asking to be checked rather than applied
+  blind.
 - **Check the diff.** The agent does the write, so it could in principle drift
   from your bytes. The resulting diff is your check; if it does not match, send
   again. For a hard guarantee instead of a check, see the courier option below.

@@ -737,8 +737,9 @@ escape hatch for feedback that is about the change and not about a line."
 SEEDED reads (FILE TEXT LINE), which is the whole of what `e' decides."
   (declare (indent 0))
   `(cl-letf (((symbol-function 'sprig-session--open-stage-buffer)
-              (lambda (_review file anchor &optional line)
-                (setq seeded (list file anchor line)))))
+              (lambda (_review file anchor &optional line _apply)
+                (setq seeded (list file anchor line))
+                (current-buffer))))
      ,@body))
 
 (defmacro sprig-review-tests--with-region (from to &rest body)
@@ -879,6 +880,120 @@ not one to guess at."
           (setq sprig-review--session session)
           (sprig-review-tests--goto "gap.el")
           (should-error (sprig-review-stage) :type 'user-error))
+      (kill-buffer session))))
+
+(defmacro sprig-review-tests--staged (needle new &rest body)
+  "Stage the line holding NEEDLE, edit it to NEW, `C-c C-c', then run BODY.
+Runs the real staging buffer, so it covers the whole `e' round trip."
+  (declare (indent 2))
+  `(unwind-protect
+       (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                 ((symbol-function 'quit-window) #'ignore))
+         (sprig-review-tests--goto ,needle)
+         (sprig-review-stage)
+         (with-current-buffer "*sprig-stage*"
+           (erase-buffer)
+           (insert ,new)
+           (sprig-session-stage-apply))
+         ,@body)
+     (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
+
+(ert-deftest sprig-review-test-stage-files-a-draft-rather-than-sending ()
+  "`C-c C-c' in the staging buffer files the edit as a draft next to the
+comments.  Nothing is sent: a review is composed as a whole."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        sent)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (cl-letf (((symbol-function 'sprig-session--send)
+                     (lambda (&rest _) (setq sent t))))
+            (sprig-review-tests--staged "(baz))" "  (qux))"
+              (should-not sent)
+              (should (= 1 (length sprig-review--drafts)))
+              (let ((d (car sprig-review--drafts)))
+                (should (equal (plist-get d :edit) "  (qux))"))
+                (should (equal (plist-get d :anchor) '("  (baz))")))
+                (should (equal (plist-get d :file) "foo.el"))
+                (should (eq (plist-get d :side) 'new))
+                (should (= (plist-get d :start) 2))
+                (should (= (plist-get d :end) 2)))
+              ;; And it is on screen, as what it is.
+              (should (string-match-p "your edit (line 2)" (buffer-string)))
+              (should (string-match-p "(qux))" (buffer-string))))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-staged-edit-publishes-with-the-comments ()
+  "Publishing sends both blocks of every edit, in full, alongside the
+comments, and tells the agent the edits are not up for interpretation."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (progn
+          (with-current-buffer session (sprig-session-mode))
+          (sprig-review-tests--with
+            (setq sprig-review--session session)
+            (sprig-review-tests--staged "(baz))" "  (qux))"
+              (let ((body (sprig-review--publish-text sprig-review--drafts)))
+                (should (string-match-p "## foo.el" body))
+                (should (string-match-p "an edit I wrote by hand" body))
+                (should (string-match-p "(baz))" body))
+                (should (string-match-p "(qux))" body))
+                (should (string-match-p
+                         "character for character"
+                         (sprig-review--publish-format "note" body 1)))))))
+      (kill-buffer session)
+      (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
+
+(ert-deftest sprig-review-test-staged-edit-re-edits-and-is-taken-back ()
+  "`c e' on an edit re-opens it seeded with what you wrote, and re-files
+it as the same draft rather than a second one; `k' takes it back."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--staged "(baz))" "  (qux))"
+            (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                      ((symbol-function 'quit-window) #'ignore))
+              (sprig-review-tests--goto "your edit")
+              (sprig-review-comment-edit)
+              (with-current-buffer "*sprig-stage*"
+                (should (equal (buffer-substring-no-properties
+                                (point-min) (point-max))
+                               "  (qux))"))
+                (erase-buffer)
+                (insert "  (quux))")
+                (sprig-session-stage-apply))
+              (should (= 1 (length sprig-review--drafts)))
+              (should (equal (plist-get (car sprig-review--drafts) :edit)
+                             "  (quux))"))
+              (sprig-review-tests--goto "your edit")
+              (sprig-review-comment-delete)
+              (should (null sprig-review--drafts)))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-staged-edit-orphans-when-its-lines-go ()
+  "An edit re-anchors like a comment, so one whose lines the agent has
+since changed floats as orphaned instead of being applied blind."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--staged "(baz))" "  (qux))"
+            (setq sprig-review--drafts
+                  (sprig-review--reanchor
+                   sprig-review--drafts
+                   (sprig-parse-diff "diff --git a/foo.el b/foo.el
+--- a/foo.el
++++ b/foo.el
+@@ -1,3 +1,3 @@
+ (defun foo ()
+-  (bar))
++  (elsewhere))
+")))
+            (should (plist-get (car sprig-review--drafts) :orphan))
+            (should (string-match-p
+                     "check where it belongs"
+                     (sprig-review--publish-text sprig-review--drafts)))))
       (kill-buffer session))))
 
 (provide 'sprig-review-tests)

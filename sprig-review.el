@@ -18,7 +18,7 @@
 ;;   n / p      walk the changed files; TAB folds one away
 ;;   c c        comment on the line at point, or on the region
 ;;   e          hand-author the line, region, or hunk, rather than describe it
-;;   c p        publish: every draft comment, in one turn, to the agent
+;;   c p        publish: every draft, comments and edits, in one turn
 ;;
 ;; Three things make that more than a diff viewer.
 ;;
@@ -62,7 +62,7 @@
 (declare-function sprig-session--compose "sprig-session-mode"
                   (target context &optional plan queue format label))
 (declare-function sprig-session--open-stage-buffer "sprig-session-mode"
-                  (review file anchor &optional line))
+                  (review file anchor &optional line apply))
 
 ;;;; Options
 
@@ -153,6 +153,10 @@ A long region is truncated to this many with an ellipsis."
   "Face for a draft comment's heading line."
   :group 'sprig)
 
+(defface sprig-review-edit-body '((t :inherit sprig-diff-added))
+  "Face for the replacement text of a hand-authored edit draft."
+  :group 'sprig)
+
 (defface sprig-review-orphan '((t :inherit warning :weight bold))
   "Face for a draft comment whose lines no longer exist in the diff."
   :group 'sprig)
@@ -176,11 +180,16 @@ A long region is truncated to this many with an ellipsis."
 Each is a plist
 
   (:id N :file PATH :side new|old :start N :end N :text S
-   :anchor LINES :orphan BOOL)
+   :edit S :anchor LINES :orphan BOOL)
 
 where :start and :end are line numbers on :side, :anchor the text of
-those lines when the comment was written, and :orphan non-nil once a
-refresh could no longer find that text (see `sprig-review--reanchor').")
+those lines when the draft was written, and :orphan non-nil once a
+refresh could no longer find that text (see `sprig-review--reanchor').
+
+A draft carries either :text, a comment you wrote about those lines, or
+:edit, the replacement you wrote for them by hand (`e').  Both are drafts
+in the same store for the same reason: a review is composed as a whole,
+and an edit is a comment you were too impatient to phrase.")
 
 (defvar-local sprig-review--next-id 1
   "Counter handing each draft comment an id unique within the buffer.")
@@ -561,21 +570,29 @@ The base alone does not say: `main' means something quite different from
   (sprig--face (format "%5s" (or n "")) 'sprig-review-lineno))
 
 (defun sprig-review--insert-draft (draft)
-  "Insert DRAFT as its own foldable section under the line it annotates."
+  "Insert DRAFT as its own foldable section under the line it annotates.
+A hand-authored edit renders as what it is, the replacement text itself,
+under a heading that says so: unpublished either way, and both taken back
+with `k'."
   (magit-insert-section (sprig-review-draft draft)
     (let* ((orphan (plist-get draft :orphan))
+           (edit (plist-get draft :edit))
            (start (plist-get draft :start))
            (end (plist-get draft :end))
            (where (if (= start end) (format "line %d" start)
                     (format "lines %d-%d" start end))))
       (magit-insert-heading
         (concat "      "
-                (sprig--face (format "↳ comment (%s%s)"
+                (sprig--face (format "↳ %s (%s%s)"
+                                     (if edit "your edit" "comment")
                                      (if orphan "orphaned, was " "") where)
                              (if orphan 'sprig-review-orphan
                                'sprig-review-comment-heading))))
-      (dolist (l (split-string (plist-get draft :text) "\n"))
-        (insert "        " (sprig--face l 'sprig-review-comment-body) "\n")))))
+      (dolist (l (split-string (or edit (plist-get draft :text)) "\n"))
+        (insert "        "
+                (sprig--face l (if edit 'sprig-review-edit-body
+                                 'sprig-review-comment-body))
+                "\n")))))
 
 (defun sprig-review--insert-uline (file line text)
   "Insert one unified diff LINE of FILE, whose code reads TEXT.
@@ -910,32 +927,43 @@ moved things.  It goes nowhere until you publish."
            :text nil :anchor anchor :orphan nil))))
 
 (defun sprig-review-comment-edit ()
-  "Re-open the draft comment at point for editing (`c e')."
+  "Re-open the draft at point for editing (`c e').
+A comment re-opens in the comment buffer, an edit in the staging buffer
+it was written in, seeded with what you wrote last time."
   (interactive)
   (let ((draft (or (sprig-review--draft-at-point)
-                   (user-error "Point is not on a draft comment"))))
-    (sprig-review--edit-comment (copy-sequence draft) t)))
+                   (user-error "Point is not on a draft"))))
+    (if (plist-get draft :edit)
+        (sprig-review--open-stage
+         (plist-get draft :file)
+         (mapconcat #'identity (plist-get draft :anchor) "\n")
+         (plist-get draft :start)
+         (plist-get draft :id)
+         (plist-get draft :edit))
+      (sprig-review--edit-comment (copy-sequence draft) t))))
 
 (defun sprig-review-comment-delete ()
-  "Take back the draft comment at point (`k').
+  "Take back the draft at point, comment or edit (`k').
 The same take-it-back gesture that unstages a queued message: a draft is
 another thing point can sit on, and nothing has been sent."
   (interactive)
   (let ((draft (or (sprig-review--draft-at-point)
-                   (user-error "Point is not on a draft comment"))))
+                   (user-error "Point is not on a draft"))))
     (setq sprig-review--drafts
           (seq-remove (lambda (d) (eq (plist-get d :id) (plist-get draft :id)))
                       sprig-review--drafts))
     (sprig-review--render-in-place)
-    (message "sprig: comment taken back")))
+    (message "sprig: %s taken back"
+             (if (plist-get draft :edit) "edit" "comment"))))
 
 (defun sprig-review-discard-drafts ()
-  "Discard every draft comment in this review (`c Q')."
+  "Discard every draft in this review, comments and edits alike (`c Q')."
   (interactive)
   (let ((n (length sprig-review--drafts)))
-    (when (zerop n) (user-error "No draft comments to discard"))
-    (when (yes-or-no-p (format "Discard %d draft comment%s? "
-                               n (if (= n 1) "" "s")))
+    (when (zerop n) (user-error "No drafts to discard"))
+    (when (yes-or-no-p (format "Discard %s? "
+                               (sprig-review--count-label
+                                sprig-review--drafts)))
       (setq sprig-review--drafts nil)
       (sprig-review--render-in-place)
       (message "sprig: %d draft%s discarded" n (if (= n 1) "" "s")))))
@@ -952,6 +980,31 @@ another thing point can sit on, and nothing has been sent."
                                    more (if (= more 1) "" "s"))
               ""))))
 
+(defun sprig-review--publish-blocks (d)
+  "Return D's old and new text as two fenced blocks, for an edit to apply.
+The old block is the anchor in full, never the elided quote a comment
+gets: it is what the agent has to match, so eliding it would break it."
+  (format "Replace these lines, exactly as they stand:
+
+```
+%s
+```
+
+with mine, character for character:
+
+```
+%s
+```
+"
+          (mapconcat #'identity (plist-get d :anchor) "\n")
+          (plist-get d :edit)))
+
+(defun sprig-review--publish-draft (d)
+  "Return the published body of draft D: a comment, or an edit to apply."
+  (if (plist-get d :edit)
+      (sprig-review--publish-blocks d)
+    (format "%s\n\n%s\n" (sprig-review--quote d) (plist-get d :text))))
+
 (defun sprig-review--publish-file (file drafts)
   "Return the published section for FILE's DRAFTS."
   (concat
@@ -959,14 +1012,14 @@ another thing point can sit on, and nothing has been sent."
    (mapconcat
     (lambda (d)
       (let ((start (plist-get d :start)) (end (plist-get d :end)))
-        (format "\n### %s%s\n\n%s\n\n%s\n"
+        (format "\n### %s%s\n\n%s"
                 (if (= start end) (format "Line %d" start)
                   (format "Lines %d-%d" start end))
-                (pcase (plist-get d :side)
-                  ('old " (a removed line, numbered in the pre-image)")
-                  (_ ""))
-                (sprig-review--quote d)
-                (plist-get d :text))))
+                (cond ((plist-get d :edit) " (an edit I wrote by hand)")
+                      ((eq (plist-get d :side) 'old)
+                       " (a removed line, numbered in the pre-image)")
+                      (t ""))
+                (sprig-review--publish-draft d))))
     drafts "")))
 
 (defun sprig-review--publish-text (drafts)
@@ -991,40 +1044,69 @@ but should not claim a line number it no longer owns."
         "These were written against text that is no longer where it was, so "
         "they carry the text rather than a line number:\n"
         (mapconcat (lambda (d)
-                     (format "\n- In `%s`:\n\n%s\n\n%s\n"
+                     (format "\n- In `%s`%s:\n\n%s\n"
                              (plist-get d :file)
-                             (sprig-review--quote d)
-                             (plist-get d :text)))
+                             (if (plist-get d :edit)
+                                 ", an edit of mine whose lines have gone; \
+check where it belongs before applying it, or tell me it no longer fits"
+                               "")
+                             (sprig-review--publish-draft d)))
                    orphans ""))))))
 
-(defun sprig-review--publish-format (text body)
-  "Frame a published review: covering note TEXT over the comment BODY."
-  (format "I have reviewed the current changes and left comments on \
-specific lines. Address each one, then tell me briefly what you changed \
-for each. Where you disagree with a comment, say so rather than changing \
-the code.
+(defun sprig-review--publish-format (text body &optional edits)
+  "Frame a published review: covering note TEXT over the draft BODY.
+EDITS, when it counts any, says some entries are text I wrote myself, so
+the framing asks for those verbatim rather than for a judgement about
+them."
+  (format "I have reviewed the current changes and left %s on specific \
+lines. Address each one, then tell me briefly what you changed for each. \
+Where you disagree with a comment, say so rather than changing the code.%s
 
 %s
 
 ---
 
-%s" text body))
+%s"
+          (if (and edits (> edits 0)) "comments and edits" "comments")
+          (if (and edits (> edits 0))
+              "
+
+The entries marked as an edit I wrote by hand are not suggestions to \
+interpret: apply each with a single Edit on that file, reproducing my \
+text character for character, and do not reformat, re-indent, correct, \
+or improve any of it. Where one no longer matches the file, say so \
+rather than guessing where it should go."
+            "")
+          text body))
+
+(defun sprig-review--count-label (drafts)
+  "Return a phrase counting DRAFTS, telling comments and edits apart."
+  (let* ((edits (seq-count (lambda (d) (plist-get d :edit)) drafts))
+         (comments (- (length drafts) edits))
+         (say (lambda (n word)
+                (and (> n 0) (format "%d %s%s" n word (if (= n 1) "" "s"))))))
+    (string-join (delq nil (list (funcall say comments "comment")
+                                 (funcall say edits "edit")))
+                 " and ")))
 
 (defun sprig-review-publish ()
-  "Publish this review: every draft comment, in one turn, to the session (`c p').
-Opens the ordinary compose buffer with the comments attached, so you write
-the covering note and see exactly what goes out before it does.  Sending
-clears the drafts, since they are then the agent's problem rather than
-yours."
+  "Publish this review: every draft, in one turn, to the session (`c p').
+The comments you wrote and the edits you wrote by hand go out together,
+since they are one review.  Opens the ordinary compose buffer with them
+attached, so you write the covering note and see exactly what goes out
+before it does.  Sending clears the drafts, since they are then the
+agent's problem rather than yours."
   (interactive)
   (unless (derived-mode-p 'sprig-review-mode)
     (user-error "Not in a sprig review buffer"))
   (unless sprig-review--drafts
-    (user-error "No draft comments; `c c' writes one, `c m' sends a plain message"))
+    (user-error "No drafts; `c c' comments on a line, `e' writes the code \
+yourself, `c m' sends a plain message"))
   (unless (buffer-live-p sprig-review--session)
     (user-error "The session this review belongs to is gone"))
   (let* ((drafts sprig-review--drafts)
-         (n (length drafts))
+         (edits (seq-count (lambda (d) (plist-get d :edit)) drafts))
+         (label (sprig-review--count-label drafts))
          (body (sprig-review--publish-text drafts))
          (review (current-buffer)))
     (sprig-session--compose
@@ -1036,12 +1118,11 @@ yours."
          (with-current-buffer review
            (setq sprig-review--drafts nil)
            (sprig-review--render-in-place)))
-       (sprig-review--publish-format text ctx))
-     (format "%d comment%s" n (if (= n 1) "" "s")))
+       (sprig-review--publish-format text ctx edits))
+     label)
     (with-current-buffer "*sprig-message*"
       (when (= (buffer-size) 0)
-        (insert (format "%d comment%s on the changes below."
-                        n (if (= n 1) "" "s")))))))
+        (insert (format "%s on the changes below." label))))))
 
 ;;;; Plain messages, and hand-authoring
 
@@ -1179,6 +1260,45 @@ mark just the one (`U' clears them)" (length marked)))
       (or (and (null marked) (sprig-review--stage-line-target))
           (sprig-review--stage-hunk-target section)))))
 
+(defun sprig-review--file-edit (review id file line anchor new)
+  "File NEW as a draft edit of FILE on REVIEW, replacing ANCHOR at LINE.
+ID re-files an existing draft, so re-editing one does not leave two; nil
+takes a fresh id.  The draft records ANCHOR the way a comment records the
+lines it was written against, and re-anchors with them, so an edit whose
+lines the agent has since moved is floated as orphaned rather than
+applied somewhere it no longer fits."
+  (unless (buffer-live-p review) (user-error "The review buffer is gone"))
+  (with-current-buffer review
+    (let* ((lines (split-string anchor "\n"))
+           (draft (list :id (or id (prog1 sprig-review--next-id
+                                     (cl-incf sprig-review--next-id)))
+                        :file file :side 'new
+                        :start line :end (+ line (1- (length lines)))
+                        :text nil :edit new :anchor lines :orphan nil)))
+      (setq sprig-review--drafts
+            (append (seq-remove (lambda (d) (eq (plist-get d :id)
+                                                (plist-get draft :id)))
+                                sprig-review--drafts)
+                    (list draft)))
+      (sprig-review--render-in-place)))
+  (message "sprig: edit filed as a draft; `c p' publishes the review"))
+
+(defun sprig-review--open-stage (file anchor line &optional id seed)
+  "Open the staging buffer on ANCHOR of FILE at LINE, filing back as draft ID.
+SEED, when given, is put in the buffer instead of ANCHOR: re-editing a
+draft starts from what you wrote last time, not from the file again."
+  (let* ((review (current-buffer))
+         (buf (sprig-session--open-stage-buffer
+               sprig-review--session file anchor line
+               (lambda (new)
+                 (sprig-review--file-edit review id file line anchor new)))))
+    (when seed
+      (with-current-buffer buf
+        (erase-buffer)
+        (insert seed)
+        (goto-char (point-min))))
+    buf))
+
 (defun sprig-review-stage ()
   "Hand-author the code you are looking at instead of describing it (`e').
 Opens the staging buffer in the file's own major mode, so you edit with
@@ -1188,16 +1308,18 @@ your edit replaces exactly that.  It takes the region when one is active,
 else the hunk you marked with \\`SPC', else the one line point is on, and
 failing those the hunk around point.
 
-`C-c C-c' there asks the agent to write your bytes back verbatim and
-`C-c C-k' throws them away.  You edit locally and the agent writes it, as
-ever."
+`C-c C-c' files what you wrote as a draft, next to your comments, and
+`C-c C-k' throws it away.  Nothing reaches the agent until you publish:
+an edit is a review comment you were too impatient to phrase, so it is
+composed with the rest of the review rather than sent on its own."
   (interactive)
   (unless (derived-mode-p 'sprig-review-mode)
     (user-error "Not in a sprig review buffer"))
   (unless (buffer-live-p sprig-review--session)
     (user-error "The session this review belongs to is gone"))
   (pcase-let ((`(,file ,text ,line) (sprig-review--stage-target)))
-    (sprig-session--open-stage-buffer sprig-review--session file text line)))
+    (when (use-region-p) (deactivate-mark))
+    (sprig-review--open-stage file text line)))
 
 (define-obsolete-function-alias 'sprig-review-stage-hunk
   'sprig-review-stage "0.6.0")
@@ -1261,7 +1383,7 @@ Move with \\`n' / \\`p', \\`g' re-reads the diff, and
 \\`c' transient:
 
   c c   comment on the line at point, or on the region
-  c e   re-edit the draft comment at point (\\`k' takes it back)
+  c e   re-edit the draft at point, comment or edit (\\`k' takes it back)
   c p   publish every draft to the session, as one turn
   c Q   discard every draft
   c m   plain message about the marked hunks (\\`SPC' marks)
@@ -1270,7 +1392,8 @@ Move with \\`n' / \\`p', \\`g' re-reads the diff, and
 
 \\`e' hand-authors the code instead of describing it: the region, the
 hunk you marked, or the line point is on, opened in the file's own major
-mode.  \\`C-c C-c' publishes, the way it sends everywhere else in sprig.
+mode and filed as a draft like a comment.  \\`C-c C-c' publishes, the way
+it sends everywhere else in sprig.
 
 Nothing here writes to the repository: publishing is an instruction to the
 agent, like every other sprig verb."
@@ -1284,10 +1407,10 @@ agent, like every other sprig verb."
   "Review the changes, then hand the whole review back in one turn."
   [["Comment"
     ("c" "on the line or region" sprig-review-comment)
-    ("e" "edit the draft at point" sprig-review-comment-edit)
+    ("e" "re-edit the draft at point" sprig-review-comment-edit)
     ("k" "take back the draft at point" sprig-review-comment-delete)]
    ["Publish"
-    ("p" "publish the review (all drafts)" sprig-review-publish)
+    ("p" "publish the review (comments and edits)" sprig-review-publish)
     ("Q" "discard every draft" sprig-review-discard-drafts)]
    ["Plain message"
     ("m" "about the marked hunks" sprig-review-message)

@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.35.0
+;; Version: 0.36.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2812,6 +2812,11 @@ needs the edit to prompt, so it refuses the auto-approve modes
   "Path of the file a staging buffer edits, as the change model records it.")
 (defvar-local sprig-session--stage-anchor nil
   "The staged region's original text: the `old_string' the courier edit matches.")
+(defvar-local sprig-session--stage-apply nil
+  "Function `C-c C-c' hands the staged text to, instead of sending it.
+The changeset review sets it, so an edit written there is filed as a
+draft alongside the comments and goes out when the review is published;
+with no function, staging sends its own turn there and then.")
 (defvar-local sprig-session--stage-line nil
   "Line the staged region starts at in the file, or nil when nothing knows.
 The changeset review reads its diff from git, so it can say; a payload
@@ -2832,13 +2837,15 @@ else returns nil, the caller's cue to seed from a fresh `Read' instead."
              (t (car hunks)))))
     (_ nil)))
 
-(defun sprig-session--open-stage-buffer (review file anchor &optional line)
+(defun sprig-session--open-stage-buffer (review file anchor &optional line apply)
   "Open the staging buffer for FILE, seeded with ANCHOR, couriering to REVIEW.
 ANCHOR is the region's current text and the `old_string' the courier edit
 will match; the buffer opens in FILE's own major mode but visits nothing,
 so a stray save writes no file.  LINE, when the caller knows it, is where
 ANCHOR starts in FILE, and says which occurrence to change if the anchor
-turns out not to be unique."
+turns out not to be unique.  APPLY, when given, takes the edited text on
+`C-c C-c' instead of it being sent (see `sprig-session--stage-apply').
+Returns the buffer."
   (let ((buf (get-buffer-create "*sprig-stage*")))
     (with-current-buffer buf
       (erase-buffer)
@@ -2848,14 +2855,17 @@ turns out not to be unique."
       (setq-local sprig-session--stage-target review
                   sprig-session--stage-file file
                   sprig-session--stage-anchor anchor
-                  sprig-session--stage-line line)
+                  sprig-session--stage-line line
+                  sprig-session--stage-apply apply)
       (use-local-map (copy-keymap (or (current-local-map) (make-sparse-keymap))))
       (local-set-key (kbd "C-c C-c") #'sprig-session-stage-apply)
       (local-set-key (kbd "C-c C-k") #'sprig-session-stage-abort)
       (goto-char (point-min)))
     (pop-to-buffer buf)
-    (message "Edit %s, then C-c C-c to stage, C-c C-k to cancel"
-             (file-name-nondirectory file))))
+    (message "Edit %s, then C-c C-c to %s, C-c C-k to cancel"
+             (file-name-nondirectory file)
+             (if apply "file it as a draft" "stage"))
+    buf))
 
 (defun sprig-session--stage-guard ()
   "Signal a `user-error' unless there is a live session to stage on.
@@ -2985,25 +2995,33 @@ Clears the pending seed either way, and reports when no usable read came back."
        (sprig-session--strip-read-numbers (cdr hit))))))
 
 (defun sprig-session-stage-apply ()
-  "Send this buffer's hand-authored edit to the session to apply.
-Sent to the agent directly, or couriered when `sprig-courier-edits' is
-set (see that variable for the trade-off)."
+  "Hand this buffer's edit on: to a review as a draft, else to the session.
+A review takes it as a draft, published with the comments in one turn
+\(`sprig-session--stage-apply').  Otherwise it goes out now, sent to the
+agent directly or couriered when `sprig-courier-edits' is set (see that
+variable for the trade-off)."
   (interactive)
   (let ((review sprig-session--stage-target)
         (file sprig-session--stage-file)
         (anchor sprig-session--stage-anchor)
         (line sprig-session--stage-line)
+        (apply sprig-session--stage-apply)
         (new (buffer-substring-no-properties (point-min) (point-max))))
     (unless (buffer-live-p review) (user-error "The session buffer is gone"))
     (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
-    (with-current-buffer review
-      (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
-        (user-error "No live session to send to; send a message first"))
-      (if sprig-courier-edits
-          (sprig-session--stage-courier file anchor new)
-        (sprig-session--stage-direct file anchor new line)))
-    (quit-window t)
-    (message "sprig: sent your edit to %s to apply" (file-name-nondirectory file))))
+    (if apply
+        ;; A draft is local, so it needs no live session: you can write one
+        ;; before the session has ever been started.
+        (progn (quit-window t) (funcall apply new))
+      (with-current-buffer review
+        (unless (and (boundp 'sprig--process) (process-live-p sprig--process))
+          (user-error "No live session to send to; send a message first"))
+        (if sprig-courier-edits
+            (sprig-session--stage-courier file anchor new)
+          (sprig-session--stage-direct file anchor new line)))
+      (quit-window t)
+      (message "sprig: sent your edit to %s to apply"
+               (file-name-nondirectory file)))))
 
 (defun sprig-session--stage-direct (file anchor new &optional line)
   "Ask the agent to apply a hand-authored edit of FILE directly.
