@@ -121,17 +121,20 @@ alone, and can be run again for them later, so nothing is spent unattempted."
   :type '(cons integer integer)
   :group 'sprig)
 
-(defcustom sprig-quiz-lines-per-question 200
+(defcustom sprig-quiz-lines-per-question 100
   "Changed diff lines that earn one more question, up to the ceiling.
 A crude measure, and deliberately only ever a *ceiling*: line count is a
 poor proxy for how much there is to understand, since a thousand-line
 mechanical rename holds one idea and a forty-line change to a lock
-ordering holds several.  The default spreads the band over the sizes real
-reviews come in: a tighter one pins every review of a whole branch at the
-ceiling, which is a constant wearing a formula's clothes.  Scaling the cap
-on size and letting the generator ask fewer where there is less to ask
-about gets the useful half of scaling without asking twelve questions
-about a rename."
+ordering holds several.  Scaling the cap on size and letting the generator
+ask fewer where there is less to ask about gets the useful half of scaling
+without asking twelve questions about a rename.
+
+The default is set against the sizes real changes come in, so that the
+band is reached rather than admired: with `sprig-quiz-questions' at
+\(3 . 10) a six-hundred-line change earns seven and a fourteen-hundred-line
+one the lot.  Raise it and the floor swallows everything an ordinary review
+contains, which is a constant wearing a formula\='s clothes."
   :type 'integer
   :group 'sprig)
 

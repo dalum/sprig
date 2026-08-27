@@ -138,7 +138,18 @@ on a big one, so the ceiling grows with the changed lines."
       (should (= 4 (n 350)))
       (should (= 6 (n 600)))
       ;; And it never runs past the ceiling, however big the change.
-      (should (= 6 (n 50000))))))
+      (should (= 6 (n 50000)))))
+  ;; The band has to be reachable at the sizes real changes come in, or the
+  ;; floor swallows every ordinary review and the ceiling is decoration.
+  (let ((sprig-quiz-questions sprig-quiz-questions)
+        (sprig-quiz-lines-per-question sprig-quiz-lines-per-question))
+    (cl-flet ((n (lines) (sprig-quiz--count
+                          (list (list :file "f" :unified
+                                      (list (list :lines
+                                                  (make-list lines
+                                                             '(:kind add)))))))))
+      (should (> (n 600) (car sprig-quiz-questions)))
+      (should (= (n 1400) (cdr sprig-quiz-questions))))))
 
 (ert-deftest sprig-quiz-test-context-lines-are-not-the-change ()
   "Context is what the change is written against, not the change, so it
