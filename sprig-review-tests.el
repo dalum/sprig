@@ -753,15 +753,41 @@ SEEDED reads (FILE TEXT LINE), which is the whole of what `e' decides."
      (activate-mark)
      ,@body))
 
-(ert-deftest sprig-review-test-stage-seeds-the-new-side-of-a-hunk ()
-  "`e' hand-authors the hunk at point, seeded with what is on disk now:
-its context and added lines, never the removed ones, and where they start."
+(ert-deftest sprig-review-test-stage-takes-the-line-at-point ()
+  "`e' on a line hands you that line and no more: the grain most
+hand-authored feedback wants, anchored at the line it sits on."
   (let ((session (get-buffer-create "*sprig-review-test-session*"))
         seeded)
     (unwind-protect
         (sprig-review-tests--with
           (setq sprig-review--session session)
           (sprig-review-tests--goto "(baz))")
+          (sprig-review-tests--staging (sprig-review-stage))
+          (should (equal seeded '("foo.el" "  (baz))" 2))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-widens-from-a-hunk-heading ()
+  "The `@@' heading is not a line of the file, so `e' there means the
+whole hunk: its context and added lines, never the removed ones."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "@@ -1,3")
+          (sprig-review-tests--staging (sprig-review-stage))
+          (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-widens-from-a-removed-line ()
+  "A removed line is not in the file, so there is nothing there to
+hand-author; `e' widens to the hunk rather than refusing."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "(bar))")
           (sprig-review-tests--staging (sprig-review-stage))
           (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))
       (kill-buffer session))))
@@ -812,6 +838,7 @@ not one `old_string' and `e' says so rather than staging a lie."
           (setq sprig-review--session session)
           (sprig-review-tests--goto "@@ -1,3")
           (setq sprig--marks (list (magit-section-ident (magit-current-section))))
+          ;; Point rests on a line of its own, which the mark outranks.
           (sprig-review-tests--goto "hello")
           (sprig-review-tests--staging (sprig-review-stage))
           (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))

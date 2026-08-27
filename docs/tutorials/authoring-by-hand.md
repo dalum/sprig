@@ -43,11 +43,12 @@ comes back (you will see a brief "…to seed a staging buffer" message meanwhile
 
 In the **changeset review** (`d`), `e` needs no menu: the review already has the
 whole diff with its line numbers, so `e` stages what you are looking at straight
-away. It takes the region when one is active, so you can pull out three lines
-rather than the whole hunk; else the hunk you marked with `SPC`, so `e` reaches
-a chunk point has since wandered off; else the hunk point is in, or a file's one
-hunk from its heading. Either way you land in the same staging buffer, and the
-rest of the loop below is the same.
+away, and no more than that. It takes the region when one is active; else the
+hunk you marked with `SPC`, since marking a chunk is naming it; else just the
+one line point is on. It widens to the whole hunk only where there is no line to
+take: the `@@` heading, a file heading, or a removed line, which is not in the
+file to begin with. Either way you land in the same staging buffer, and the rest
+of the loop below is the same.
 
 Two selections it refuses, because neither is a block the agent could match.
 One spanning two hunks: git showed you neither the lines between them nor how
@@ -106,7 +107,8 @@ a guard clause, and you want to write it yourself.
   first.
 - **It knows where your block sits.** From the changeset review, the
   instruction names the line the block starts at, so a one-line edit whose text
-  appears elsewhere in the file still lands in the right place. A hunk staged
+  appears elsewhere in the file still lands in the right place. That is what
+  makes taking a single line the sane default there. A hunk staged
   from the session buffer cannot say: an `Edit` payload knows the bytes it
   replaced but never the line they sat on.
 - **One edit per send.** A single `C-c C-c` asks for exactly one edit, your text
