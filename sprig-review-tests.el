@@ -1278,5 +1278,48 @@ new keys."
     (should (eq (lookup-key sprig-review-mode-map (kbd "e"))
                 'sprig-review-stage-dispatch))))
 
+(defmacro sprig-review-tests--decorated (head decorations &rest body)
+  "Run BODY with git stubbed to report HEAD and DECORATIONS."
+  (declare (indent 2))
+  `(cl-letf (((symbol-function 'sprig-review--run-git)
+              (lambda (_remote _root args)
+                (cond ((equal args '("rev-parse" "--abbrev-ref" "HEAD")) ,head)
+                      ((equal (car args) "log")
+                       (string-join ,decorations "\n"))
+                      (t "")))))
+     ,@body))
+
+(ert-deftest sprig-review-test-parent-is-the-branch-below ()
+  "On a stack the parent is the first branch met walking back, which is the
+branch immediately below rather than main at the bottom of it."
+  (sprig-review-tests--decorated "feature/c"
+      '("HEAD -> feature/c, origin/feature/c" "" "feature/b, origin/feature/b"
+        "" "feature/a" "main, origin/main")
+    (should (equal "feature/b" (sprig-review--parent-branch nil "/tmp")))))
+
+(ert-deftest sprig-review-test-parent-prefers-the-local-branch ()
+  "A commit usually carries both `foo' and `origin/foo'.  The local one is
+what you would type and diffs without a fetch, so it wins; a remote-tracking
+ref on its own is still a perfectly good base."
+  (sprig-review-tests--decorated "feature/c"
+      '("HEAD -> feature/c" "origin/feature/b, feature/b")
+    (should (equal "feature/b" (sprig-review--parent-branch nil "/tmp"))))
+  (sprig-review-tests--decorated "feature/c"
+      '("HEAD -> feature/c" "origin/feature/b")
+    (should (equal "origin/feature/b"
+                   (sprig-review--parent-branch nil "/tmp")))))
+
+(ert-deftest sprig-review-test-parent-ignores-tags-and-its-own-refs ()
+  "A tag is not a branch, and neither side of this branch counts as below it."
+  (sprig-review-tests--decorated "feature/c"
+      '("HEAD -> feature/c, origin/feature/c, tag: v2" "tag: v1" "main")
+    (should (equal "main" (sprig-review--parent-branch nil "/tmp")))))
+
+(ert-deftest sprig-review-test-parent-of-an-unstacked-branch-is-nothing ()
+  "Nothing below means nothing to report, and `d p' says so rather than
+quietly reviewing a scope that is not the one asked for."
+  (sprig-review-tests--decorated "main" '("HEAD -> main, origin/main" "" "")
+    (should-not (sprig-review--parent-branch nil "/tmp"))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

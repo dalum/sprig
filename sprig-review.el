@@ -1819,13 +1819,69 @@ made."
       (sprig-session-review (sprig-review--read-base remote root
                                                      sprig-review-base)))))
 
+(defun sprig-review--decorations (remote root)
+  "Ref names decorating each first-parent commit from HEAD, newest first.
+One line per commit, `%D\=' style, blanks kept so an undecorated commit is
+not silently merged into its neighbour."
+  (split-string
+   (sprig-review--run-git remote root
+                          '("log" "--first-parent" "--format=%D" "HEAD"))
+   "\n"))
+
+(defun sprig-review--parent-branch (remote root)
+  "The branch this one was branched off at ROOT on REMOTE, or nil.
+
+Git records no parent branch, so this reads the one thing that does say:
+walk back along first-parent history and take the first commit carrying a
+branch other than this one.  On a stack of branches, each sitting on the
+last, that is the branch immediately below, which is what `d m\=' cannot
+tell you (it goes all the way to main and shows you the whole stack).
+
+It is inference, not a record.  A parent that has been merged and deleted
+leaves its commits with no ref on them, so the walk carries on past it to
+whatever is next, and a branch taken straight off main answers `main\=',
+which is correct and makes `d p\=' the same view as `d m\='."
+  (let* ((current (string-trim
+                   (sprig-review--run-git
+                    remote root '("rev-parse" "--abbrev-ref" "HEAD"))))
+         (mine (concat "/" current)))
+    (catch 'found
+      (dolist (line (sprig-review--decorations remote root))
+        (let ((cands
+               (seq-remove
+                (lambda (ref)
+                  (or (string-prefix-p "tag: " ref)
+                      (equal ref "HEAD")
+                      (equal ref current)
+                      ;; The remote-tracking side of this same branch.
+                      (string-suffix-p mine ref)))
+                (mapcar (lambda (ref)
+                          ;; "HEAD -> foo" names the checked-out branch.
+                          (replace-regexp-in-string "\\`HEAD -> " "" ref))
+                        (split-string line ", " t "[ \t]+")))))
+          (when cands
+            ;; A commit usually carries both `foo\=' and `origin/foo\='; take the
+            ;; local one, which is what you would type and what diffs without
+            ;; a fetch (`sprig-review--default-branch\=' prefers it for the same
+            ;; reason).  A remote-tracking ref alone is a perfectly good base.
+            (throw 'found
+                   (or (seq-find
+                        (lambda (c)
+                          (seq-some (lambda (o) (string-suffix-p
+                                                 (concat "/" c) o))
+                                    cands))
+                        cands)
+                       (car cands))))))
+      nil)))
+
 (defun sprig-review--read-base (remote root current)
   "Read a review base for the repo at ROOT on REMOTE, defaulting to CURRENT.
 Offers the default branch first, since reviewing the whole branch is the
 common reason to want anything but HEAD."
   (let* ((branch (sprig-review--default-branch remote root))
+         (parent (ignore-errors (sprig-review--parent-branch remote root)))
          (cands (delete-dups
-                 (delq nil (list branch "HEAD" current
+                 (delq nil (list branch parent "HEAD" current
                                  (and branch (format "%s...HEAD" branch)))))))
     (completing-read
      (format "Review against (currently %s): " current)
@@ -1840,11 +1896,29 @@ reviews from where it and HEAD diverged (see `sprig-review--diff-args')."
      (list (sprig-review--read-base remote root sprig-review-base))))
   (sprig-session-review base))
 
+(defun sprig-session-review-parent ()
+  "Review against the branch this one was branched off (`d p').
+The scope for a stacked branch: what *this* branch adds, rather than what
+the whole stack beneath it does, which is what `d m' would show.  See
+`sprig-review--parent-branch' for how the parent is found, and for why it
+is inference rather than something git records."
+  (interactive)
+  (pcase-let ((`(,remote . ,root) (sprig-review--session-root)))
+    (if-let ((parent (sprig-review--parent-branch remote root)))
+        (progn (message "sprig: reviewing against %s" parent)
+               (sprig-session-review parent))
+      ;; Nothing below but main, or a parent that has been deleted: say so
+      ;; rather than quietly reviewing a scope that is not the one asked for.
+      (message "sprig: no branch below this one; `d m' reviews the branch")
+      (sprig-session-review (sprig-review--read-base remote root
+                                                     sprig-review-base)))))
+
 (transient-define-prefix sprig-session-review-dispatch ()
   "Review the changes in this session's working tree."
   [["Review"
     ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
     ("m" "the whole branch (against main, master, …)" sprig-session-review-branch)
+    ("p" "against the branch this one was branched off" sprig-session-review-parent)
     ("b" "against a base you name" sprig-session-review-base)]])
 
 (defun sprig-review-set-base (base)
