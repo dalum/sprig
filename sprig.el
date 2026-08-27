@@ -5860,13 +5860,13 @@ click does as well); filter also stays top-level on `/', being frequent."
     ("s" "sort by column" sprig-status-sort)
     ("/" "filter by project or title" sprig-status-filter)]])
 
-(defvar sprig-roots-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "RET") #'sprig-roots-visit)
-    (define-key map (kbd "o")   #'sprig-roots-visit)
-    map)
-  "Keymap for `sprig-roots-mode'.")
+(defvar sprig-roots-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-roots-mode'.
+Bound below, for the reason `sprig-review-mode-map' gives.")
+
+(set-keymap-parent sprig-roots-mode-map special-mode-map)
+(define-key sprig-roots-mode-map (kbd "RET") #'sprig-roots-visit)
+(define-key sprig-roots-mode-map (kbd "o")   #'sprig-roots-visit)
 
 (define-derived-mode sprig-roots-mode special-mode "Sprig-Roots"
   "Major mode for the session-roots view (see `sprig-status-roots').

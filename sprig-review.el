@@ -875,12 +875,14 @@ line under point, and the same files open (see `sprig-review--expanded\=')."
 (defvar-local sprig-review--comment-draft nil
   "The draft plist being written, complete but for its `:text'.")
 
-(defvar sprig-review-comment-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'sprig-review-comment-save)
-    (define-key map (kbd "C-c C-k") #'sprig-review-comment-abort)
-    map)
-  "Keymap for `sprig-review-comment-mode'.")
+(defvar sprig-review-comment-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-review-comment-mode'.
+Bound below, for the reason `sprig-review-mode-map' gives.")
+
+(define-key sprig-review-comment-mode-map (kbd "C-c C-c")
+            #'sprig-review-comment-save)
+(define-key sprig-review-comment-mode-map (kbd "C-c C-k")
+            #'sprig-review-comment-abort)
 
 (define-derived-mode sprig-review-comment-mode text-mode "Sprig-Comment"
   "Major mode for writing one draft review comment.
@@ -1673,23 +1675,28 @@ comments.  They differ only in how much they hand you."
 
 ;;;; The mode
 
-(defvar sprig-review-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map magit-section-mode-map)
-    (define-key map (kbd "SPC")     #'sprig-toggle-mark)
-    (define-key map (kbd "m")       #'sprig-toggle-mark)
-    (define-key map (kbd "U")       #'sprig-unmark-all)
-    (define-key map (kbd "c")       #'sprig-review-dispatch)
-    (define-key map (kbd "C-c C-c") #'sprig-review-publish)
-    (define-key map (kbd "k")       #'sprig-review-comment-delete)
-    (define-key map (kbd "e")       #'sprig-review-stage-dispatch)
-    (define-key map (kbd "b")       #'sprig-review-set-base)
-    (define-key map (kbd "Q")       #'sprig-quiz)
-    (define-key map (kbd "g")       #'sprig-review-refresh)
-    (define-key map (kbd "RET")     #'sprig-review-visit)
-    (define-key map (kbd "q")       #'quit-window)
-    map)
-  "Keymap for `sprig-review-mode'.")
+(defvar sprig-review-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-review-mode'.
+
+Bound below rather than inside this form, so `sprig-reload' can reach it:
+a `defvar' whose variable is already bound does nothing, which would
+leave a buffer on the keys it started with.  The `define-key' calls below
+mutate the very map those buffers use, so an edited binding takes effect
+on the next reload without reopening anything.")
+
+(set-keymap-parent sprig-review-mode-map magit-section-mode-map)
+(define-key sprig-review-mode-map (kbd "SPC")     #'sprig-toggle-mark)
+(define-key sprig-review-mode-map (kbd "m")       #'sprig-toggle-mark)
+(define-key sprig-review-mode-map (kbd "U")       #'sprig-unmark-all)
+(define-key sprig-review-mode-map (kbd "c")       #'sprig-review-dispatch)
+(define-key sprig-review-mode-map (kbd "C-c C-c") #'sprig-review-publish)
+(define-key sprig-review-mode-map (kbd "k")       #'sprig-review-comment-delete)
+(define-key sprig-review-mode-map (kbd "e")       #'sprig-review-stage-dispatch)
+(define-key sprig-review-mode-map (kbd "b")       #'sprig-review-set-base)
+(define-key sprig-review-mode-map (kbd "Q")       #'sprig-quiz)
+(define-key sprig-review-mode-map (kbd "g")       #'sprig-review-refresh)
+(define-key sprig-review-mode-map (kbd "RET")     #'sprig-review-visit)
+(define-key sprig-review-mode-map (kbd "q")       #'quit-window)
 
 (define-derived-mode sprig-review-mode magit-section-mode "Sprig-Review"
   "Major mode for reviewing a changeset and annotating it line by line.

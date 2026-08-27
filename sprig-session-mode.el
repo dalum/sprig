@@ -2587,12 +2587,14 @@ first under a `Regarding:' heading.")
 Sent as a throwaway one-shot that leaves the turn and the log alone, rather
 than as a turn in the conversation.")
 
-(defvar sprig-session-compose-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'sprig-session-compose-send)
-    (define-key map (kbd "C-c C-k") #'sprig-session-compose-abort)
-    map)
-  "Keymap for `sprig-session-compose-mode'.")
+(defvar sprig-session-compose-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-session-compose-mode'.
+Bound below, for the reason `sprig-review-mode-map' gives.")
+
+(define-key sprig-session-compose-mode-map (kbd "C-c C-c")
+            #'sprig-session-compose-send)
+(define-key sprig-session-compose-mode-map (kbd "C-c C-k")
+            #'sprig-session-compose-abort)
 
 (define-derived-mode sprig-session-compose-mode text-mode "Sprig-Msg"
   "Compose a message to send to a sprig conversation.
@@ -2960,20 +2962,21 @@ wrong thing to make easy."
 ;; rather than one wall.  `a r' skips the buffer entirely for the common
 ;; case of going with what was recommended.
 
-(defvar sprig-answer-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map special-mode-map)
-    (define-key map (kbd "RET") #'sprig-answer-pick)
-    (define-key map (kbd "SPC") #'sprig-answer-pick)
-    (define-key map (kbd "n")   #'next-line)
-    (define-key map (kbd "p")   #'previous-line)
-    (define-key map (kbd "o")   #'sprig-answer-other)
-    (define-key map (kbd "C-c C-c") #'sprig-answer-confirm)
-    (define-key map (kbd "C-c C-k") #'sprig-answer-cancel)
-    (dotimes (i 9)
-      (define-key map (kbd (number-to-string (1+ i))) #'sprig-answer-pick-number))
-    map)
-  "Keymap for `sprig-answer-mode'.")
+(defvar sprig-answer-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-answer-mode'.
+Bound below, for the reason `sprig-review-mode-map' gives.")
+
+(set-keymap-parent sprig-answer-mode-map special-mode-map)
+(define-key sprig-answer-mode-map (kbd "RET") #'sprig-answer-pick)
+(define-key sprig-answer-mode-map (kbd "SPC") #'sprig-answer-pick)
+(define-key sprig-answer-mode-map (kbd "n")   #'next-line)
+(define-key sprig-answer-mode-map (kbd "p")   #'previous-line)
+(define-key sprig-answer-mode-map (kbd "o")   #'sprig-answer-other)
+(define-key sprig-answer-mode-map (kbd "C-c C-c") #'sprig-answer-confirm)
+(define-key sprig-answer-mode-map (kbd "C-c C-k") #'sprig-answer-cancel)
+(dotimes (i 9)
+  (define-key sprig-answer-mode-map (kbd (number-to-string (1+ i)))
+              #'sprig-answer-pick-number))
 
 (define-derived-mode sprig-answer-mode special-mode "Sprig-Answer"
   "Answer one of the agent's questions.

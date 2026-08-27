@@ -89,6 +89,8 @@
 (declare-function sprig--wrap-command "sprig" (args dir remote-host))
 (declare-function sprig--directory "sprig" ())
 (declare-function sprig-session--fontify-markdown "sprig-session-mode" (text))
+(declare-function sprig-session--compose "sprig-session-mode"
+                  (target context &optional plan queue format label))
 
 (defvar sprig-program)
 (defvar sprig-model)
@@ -99,16 +101,23 @@
 
 ;;;; Options
 
-(defcustom sprig-quiz-questions '(3 . 6)
+(defcustom sprig-quiz-questions '(3 . 10)
   "How many questions a quiz asks, as (FEWEST . MOST).
 The ceiling scales with the size of the change (see
 `sprig-quiz-lines-per-question'), because three questions is a thorough
 pass over a forty-line change and a spot check on a two-thousand-line one,
 and passing a spot check is worth knowing you have not done.
 
-MOST is deliberately low.  A quiz you abandon halfway teaches nothing and
-teaches you that the whole idea is a chore, which is the failure mode that
-would kill it.  Past six the buffer is longer than anyone finishes."
+MOST binds only where a change genuinely holds that many distinct things
+worth understanding, because the generator is told to ask fewer where there
+is less to ask about and does (a 150-file rename is asked one question, not
+its permitted three).  So a generous ceiling costs nothing on an ordinary
+change and buys a real pass over a large one, and question count costs no
+extra round trips either: each fork answers the whole set in one call.
+
+A long worksheet is answered in the sittings you have.  `C-c C-c' hands in
+only the questions you have actually written under, leaves the blanks
+alone, and can be run again for them later, so nothing is spent unattempted."
   :type '(cons integer integer)
   :group 'sprig)
 
@@ -159,6 +168,10 @@ Tinted is you, untinted is an agent, exactly as in the session buffer."
   "Face for the label naming who an answer came from."
   :group 'sprig)
 
+(defface sprig-quiz-finding '((t :inherit warning))
+  "Face for the label on a question flagged as a finding."
+  :group 'sprig)
+
 (defface sprig-quiz-hint '((t :inherit shadow :slant italic))
   "Face for the worksheet's own instructions."
   :group 'sprig)
@@ -190,8 +203,24 @@ the two races.")
 (defvar-local sprig-quiz--pending 0
   "How many answering forks are still out.")
 
+(defvar-local sprig-quiz--answers nil
+  "What you wrote, as an alist of (N . TEXT), snapshotted on hand-in.
+Kept rather than re-read, because once the answers land the question's body
+holds them too and there is no longer a boundary to read your own back
+from.  It is frozen at hand-in anyway, so a snapshot is the truth.")
+
+(defvar-local sprig-quiz--findings nil
+  "Questions flagged as findings, as plists (:n N :beg MARKER :end MARKER).
+BEG and END bracket the editable note you wrote about what the exchange
+showed.  A quiz that only tells you what you did not know is half of it:
+often the answer is that the code does not say, and that is a defect in
+the code rather than in the reader.")
+
 (defvar-local sprig-quiz--submitted nil
-  "Non-nil once the worksheet has been handed in.")
+  "Question numbers already handed in, so a resubmit only takes the rest.
+A worksheet is a buffer, not a form: a long one is answered in the sittings
+you have, and a question is spent the moment its answers appear, so
+handing in what you have written must not spend what you have not.")
 
 ;;;; The fork transport
 ;;
@@ -434,19 +463,26 @@ or trailing punctuation is accepted."
 
 ;;;; The worksheet buffer
 
-(defvar sprig-quiz-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c C-c") #'sprig-quiz-submit)
-    (define-key map (kbd "C-c C-k") #'sprig-quiz-abort)
-    (define-key map (kbd "TAB")     #'sprig-quiz-toggle)
-    map)
-  "Keymap for `sprig-quiz-mode'.")
+(defvar sprig-quiz-mode-map (make-sparse-keymap)
+  "Keymap for `sprig-quiz-mode'.
+Bound below, for the reason `sprig-review-mode-map' gives.")
+
+(define-key sprig-quiz-mode-map (kbd "C-c C-c") #'sprig-quiz-submit)
+(define-key sprig-quiz-mode-map (kbd "C-c C-k") #'sprig-quiz-abort)
+(define-key sprig-quiz-mode-map (kbd "TAB")     #'sprig-quiz-toggle)
+(define-key sprig-quiz-mode-map (kbd "C-c C-f") #'sprig-quiz-flag)
+(define-key sprig-quiz-mode-map (kbd "C-c C-p") #'sprig-quiz-publish)
 
 (define-derived-mode sprig-quiz-mode text-mode "sprig-quiz"
   "Worksheet for a quiz about the changeset under review.
-Questions are read-only; you type in the gap under each, then hand the lot
-in with \\[sprig-quiz-submit].  After that the buffer is read-only, and
-\\[sprig-quiz-toggle] unfolds the author's answer."
+Questions are read-only; you type in the gap under each and hand in what
+you have written with \\[sprig-quiz-submit], which leaves the blanks alone
+and can be run again for them.  An answer freezes once handed in, and
+\\[sprig-quiz-toggle] unfolds the author's.
+
+Where the exchange says something about the *code* rather than about you,
+\\[sprig-quiz-flag] flags it and \\[sprig-quiz-publish] hands the set back
+to the agent in one turn."
   ;; Render the forks' markdown the way `*sprig-btw*' does: its markup
   ;; carries `invisible markdown-markup' and its colours ride `font-lock-face'.
   (add-to-invisibility-spec 'markdown-markup)
@@ -466,10 +502,14 @@ in with \\[sprig-quiz-submit].  After that the buffer is read-only, and
     (erase-buffer)
     (insert (propertize
              (concat "Answer from memory, in the gap under each question.\n"
-                     "C-c C-c hands it in and asks for the other answers; "
-                     "C-c C-k walks away.\n"
+                     "C-c C-c hands in what you have written and asks for "
+                     "the other answers; blanks are\nleft alone, so you can "
+                     "run it again for them later.  C-c C-k walks away.\n"
                      "Nothing is sent until you do, and nothing is written "
-                     "to the session log.\n\n")
+                     "to the session log.\n"
+                     "C-c C-f flags a question the quiz found something out "
+                     "through; C-c C-p sends\nthose findings back to the "
+                     "agent in one turn.\n\n")
              'face 'sprig-quiz-hint 'read-only t))
     (dolist (q questions)
       (let ((beg (point)))
@@ -530,14 +570,29 @@ author's was inserted after it."
                   :arrow arrow :beg beg
                   :end (copy-marker (point) nil))))))))
 
-(defun sprig-quiz--tint-answers ()
+(defun sprig-quiz--answered-p (n)
+  "Whether you have written anything under question N."
+  (when-let* ((b (sprig-quiz--question-bounds n)))
+    (not (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))))
+
+(defun sprig-quiz--outstanding ()
+  "The questions answered but not yet handed in, in order."
+  (seq-filter (lambda (q) (and (sprig-quiz--answered-p (car q))
+                               (not (memq (car q) sprig-quiz--submitted))))
+              sprig-quiz--questions))
+
+(defun sprig-quiz--tint-answers (questions)
   "Tint what you wrote under each question as yours."
   (let ((inhibit-read-only t))
-    (dolist (q sprig-quiz--questions)
+    (dolist (q questions)
       (when-let* ((b (sprig-quiz--question-bounds (car q))))
-        (unless (string-blank-p (buffer-substring-no-properties
-                                 (car b) (cdr b)))
-          (add-face-text-property (car b) (cdr b) 'sprig-quiz-answer))))))
+        (push (cons (car q) (string-trim (buffer-substring-no-properties
+                                          (car b) (cdr b))))
+              sprig-quiz--answers)
+        (add-face-text-property (car b) (cdr b) 'sprig-quiz-answer)
+        ;; Handed in is handed in: freeze this answer, but leave the rest of
+        ;; the buffer editable so the blanks can still be filled.
+        (put-text-property (car b) (cdr b) 'read-only t)))))
 
 (defun sprig-quiz--fill (slot text)
   "Put TEXT into SLOT, folding it away when it is the author's."
@@ -549,9 +604,18 @@ author's was inserted after it."
       (save-excursion
         (delete-region beg end)
         (goto-char beg)
-        (insert (replace-regexp-in-string
-                 "^" "    " (sprig-quiz--fontify (string-trim text)))
-                "\n\n")
+        (let ((from (point)))
+          (insert (replace-regexp-in-string
+                   "^" "    " (sprig-quiz--fontify (string-trim text)))
+                  "\n\n")
+          ;; The buffer stays editable for the still-blank questions, so an
+          ;; answer has to protect itself rather than lean on a global freeze.
+          (put-text-property from (point) 'read-only t)
+          ;; END does not advance on insertion (see `sprig-quiz--reserve'), so
+          ;; the delete-and-insert above left it sitting on BEG.  Put it back
+          ;; on the end of what was written, or the slot reads back empty when
+          ;; a finding quotes it.
+          (set-marker end (point)))
         (when (eq (plist-get slot :source) 'author)
           (let ((ov (make-overlay beg (point))))
             (overlay-put ov 'invisible t)
@@ -621,75 +685,222 @@ under a heading that already says it."
     (when slot
       (sprig-quiz--fill slot (or body "(no answer for this question)")))))
 
-(defun sprig-quiz--receive (source text)
-  "Distribute a fork's whole answer TEXT from SOURCE across the worksheet."
-  (if (null text)
-      (dolist (q sprig-quiz--questions)
-        (sprig-quiz--landed (car q) source "(this one failed)"))
-    (dolist (q sprig-quiz--questions)
-      (sprig-quiz--landed (car q) source text)))
+(defun sprig-quiz--receive (source text asked)
+  "Spread a fork's whole answer TEXT from SOURCE over the ASKED questions."
+  (dolist (q asked)
+    (sprig-quiz--landed (car q) source (or text "(this one failed)")))
   (cl-decf sprig-quiz--pending)
   (when (<= sprig-quiz--pending 0)
-    (message "sprig: quiz answered.  TAB on a ▸ line for what the author says")))
+    (message "sprig: answered.  TAB on a ▸ line for what the author says")))
 
 (defun sprig-quiz-submit ()
-  "Hand the worksheet in and ask the other two (C-c C-c).
+  "Hand in the questions you have answered, and ask the other two (C-c C-c).
 Fires both forks at once and reserves their slots first, so the cold read
 sits above the author's answer however the two race.  Neither fork is shown
-what you wrote: they answer independently, or the comparison is not one."
+what you wrote: they answer independently, or the comparison is not one.
+
+A question is spent the moment its answers appear, so only the questions
+you have actually written under are handed in.  Blanks are left alone and
+`C-c C-c' can be run again for them, which is what makes a long worksheet
+answerable across two sittings rather than a form you fill or waste."
   (interactive)
   (unless (derived-mode-p 'sprig-quiz-mode)
     (user-error "Not in a quiz buffer"))
-  (when sprig-quiz--submitted
-    (user-error "This worksheet is already handed in"))
-  (setq sprig-quiz--submitted t)
-  (sprig-quiz--tint-answers)
-  ;; Reserve every slot before anything can land in one.
-  ;; Cold first, then the author: each is inserted at the end of the
-  ;; question's body, so the one reserved first ends up above.
-  (let ((slots nil))
-    (dolist (q sprig-quiz--questions)
+  (let ((asked (sprig-quiz--outstanding)))
+    (unless asked
+      (user-error (if sprig-quiz--submitted
+                      "Nothing new answered; write under a blank question first"
+                    "Nothing answered yet; write under a question first")))
+    (setq sprig-quiz--submitted
+          (append sprig-quiz--submitted (mapcar #'car asked)))
+    (sprig-quiz--tint-answers asked)
+    ;; Reserve every slot before anything can land in one.
+    ;; Cold first, then the author: each is inserted at the end of the
+    ;; question's body, so the one reserved first ends up above.
+    (dolist (q asked)
       (when sprig-quiz-cold-read
-        (push (sprig-quiz--reserve (car q) 'cold "cold read") slots))
+        (push (sprig-quiz--reserve (car q) 'cold "cold read")
+              sprig-quiz--slots))
       (when sprig-quiz--id
         (push (sprig-quiz--reserve (car q) 'author "what the author says")
-              slots)))
-    (setq sprig-quiz--slots (delq nil slots)))
-  (setq buffer-read-only t)
-  (let ((buf (current-buffer))
-        (dir sprig-quiz--dir)
-        (remote sprig-quiz--remote)
-        (id sprig-quiz--id)
-        (questions sprig-quiz--questions)
-        (diff sprig-quiz--diff))
-    (setq sprig-quiz--pending 0)
-    (cl-flet ((receive (source)
-                (lambda (text)
-                  (when (buffer-live-p buf)
-                    (with-current-buffer buf
-                      (sprig-quiz--receive source text))))))
-      (when sprig-quiz-cold-read
-        (cl-incf sprig-quiz--pending)
-        (sprig-quiz--ask (sprig-quiz--cold-command dir remote)
-                         dir remote "sprig-quiz-cold"
-                         (sprig-quiz--cold-prompt questions diff)
-                         (receive 'cold)))
-      (when id
-        (cl-incf sprig-quiz--pending)
-        (sprig-quiz--ask (sprig--btw-command id dir remote)
-                         dir remote "sprig-quiz-author"
-                         (sprig-quiz--author-prompt questions)
-                         (receive 'author)))))
-  (message "sprig: %s"
-           (cond ((and sprig-quiz-cold-read sprig-quiz--id)
-                  "handed in; a cold reader and the author are answering…")
-                 (sprig-quiz-cold-read
-                  "handed in; a cold reader is answering…")
-                 (sprig-quiz--id "handed in; the author is answering…")
-                 ;; No peer and no author: the retrieval still happened, which
-                 ;; was most of the value, but nothing is coming back and the
-                 ;; line must not name someone who is not answering.
-                 (t "handed in; nothing to compare against"))))
+              sprig-quiz--slots)))
+    (setq sprig-quiz--slots (delq nil sprig-quiz--slots))
+    (let ((buf (current-buffer))
+          (dir sprig-quiz--dir)
+          (remote sprig-quiz--remote)
+          (id sprig-quiz--id)
+          (diff sprig-quiz--diff))
+      (cl-flet ((receive (source)
+                  (lambda (text)
+                    (when (buffer-live-p buf)
+                      (with-current-buffer buf
+                        ;; Only this batch's questions: a later batch's slots
+                        ;; are not this fork's to fill, and it was never asked
+                        ;; about them.
+                        (sprig-quiz--receive source text asked))))))
+        (when sprig-quiz-cold-read
+          (cl-incf sprig-quiz--pending)
+          (sprig-quiz--ask (sprig-quiz--cold-command dir remote)
+                           dir remote "sprig-quiz-cold"
+                           (sprig-quiz--cold-prompt asked diff)
+                           (receive 'cold)))
+        (when id
+          (cl-incf sprig-quiz--pending)
+          (sprig-quiz--ask (sprig--btw-command id dir remote)
+                           dir remote "sprig-quiz-author"
+                           (sprig-quiz--author-prompt asked)
+                           (receive 'author)))))
+    (message "sprig: %s"
+             (let ((left (- (length sprig-quiz--questions)
+                            (length sprig-quiz--submitted))))
+               (concat
+                (format "handed in %d" (length asked))
+                (if (> left 0) (format ", %d still blank" left) "")
+                (cond ((and sprig-quiz-cold-read sprig-quiz--id)
+                       "; a cold reader and the author are answering…")
+                      (sprig-quiz-cold-read "; a cold reader is answering…")
+                      (sprig-quiz--id "; the author is answering…")
+                      ;; No peer and no author: the retrieval still happened,
+                      ;; which was most of the value, but nothing is coming
+                      ;; back and the line must not name someone who is not.
+                      (t "; nothing to compare against")))))))
+
+;;;; Findings: handing back what the quiz found out about the code
+;;
+;; The four-way outcome the comparison produces is not symmetric.  You wrong
+;; and the cold reader right is your gap and nobody else's business.  But you
+;; right and the cold reader wrong says the code misleads, and both of you
+;; wrong says the intent is not recoverable from what is written: those are
+;; defects, located precisely, and the whole exchange that found them is the
+;; evidence.  Flagging one and publishing the set is the review's own
+;; drafts-then-publish gesture, for the same reason: a finding is worth
+;; sending as part of a considered set rather than one blurted message at a
+;; time.
+
+(defun sprig-quiz--question-at-point ()
+  "The number of the question point is under, or nil."
+  (save-excursion
+    (end-of-line)
+    (when (re-search-backward "^## \\([0-9]+\\)\\." nil t)
+      (string-to-number (match-string 1)))))
+
+(defun sprig-quiz--finding (n)
+  "The finding flagged on question N, or nil."
+  (seq-find (lambda (f) (= (plist-get f :n) n)) sprig-quiz--findings))
+
+(defun sprig-quiz-flag ()
+  "Flag the question at point as a finding, or unflag it (C-c C-f).
+Opens an editable note under the exchange for what it showed, which is the
+part the agent cannot work out for itself: the question and the answers say
+where the gap is, and you say what it means."
+  (interactive)
+  (unless (derived-mode-p 'sprig-quiz-mode)
+    (user-error "Not in a quiz buffer"))
+  (let* ((n (or (sprig-quiz--question-at-point)
+                (user-error "Point is not under a question")))
+         (found (sprig-quiz--finding n))
+         (inhibit-read-only t))
+    (if found
+        (progn
+          (delete-region (plist-get found :label) (plist-get found :end))
+          (setq sprig-quiz--findings (delq found sprig-quiz--findings))
+          (message "sprig: question %d is no longer a finding" n))
+      (when-let* ((bounds (sprig-quiz--question-bounds n)))
+        (save-excursion
+          (goto-char (cdr bounds))
+          (unless (bolp) (insert "\n\n"))
+          (let ((label (copy-marker (point) nil)))
+            (insert (propertize "  \u2691 what this shows\n"
+                                'face 'sprig-quiz-finding 'read-only t))
+            (let ((beg (copy-marker (point) nil)))
+              (insert "    \n\n")
+              (push (list :n n :label label :beg beg
+                          :end (copy-marker (point) nil))
+                    sprig-quiz--findings))))
+        ;; Land in the note, since flagging is the start of writing one.
+        (goto-char (+ 4 (plist-get (sprig-quiz--finding n) :beg)))
+        (message "sprig: question %d flagged; say what it shows, then C-c C-p"
+                 n)))))
+
+(defun sprig-quiz--note (finding)
+  "The note written under FINDING, trimmed, or nil when it is blank."
+  (let ((text (string-trim (buffer-substring-no-properties
+                            (plist-get finding :beg)
+                            (plist-get finding :end)))))
+    (unless (string-empty-p text) text)))
+
+(defun sprig-quiz--slot-text (n source)
+  "What SOURCE answered under question N, un-indented, or nil."
+  (when-let* ((slot (seq-find (lambda (s)
+                                (and (= (plist-get s :n) n)
+                                     (eq (plist-get s :source) source)))
+                              sprig-quiz--slots)))
+    (let ((text (string-trim
+                 (replace-regexp-in-string
+                  "^    " ""
+                  (buffer-substring-no-properties (plist-get slot :beg)
+                                                  (plist-get slot :end))))))
+      (unless (or (string-empty-p text) (equal text "\u2026")) text))))
+
+(defun sprig-quiz--findings-text (findings)
+  "Render FINDINGS as the body of a message back to the agent.
+Carries the whole exchange, because what the gap is cannot be read off the
+note alone.  The author's own answer is left out: the session being sent to
+already has it, and quoting an agent to itself is noise."
+  (mapconcat
+   (lambda (f)
+     (let* ((n (plist-get f :n))
+            (cold (sprig-quiz--slot-text n 'cold)))
+       (string-join
+        (delq nil
+              (list (format "### %s" (alist-get n sprig-quiz--questions))
+                    (when-let* ((mine (alist-get n sprig-quiz--answers)))
+                      (format "What I said:\n\n%s" mine))
+                    (when cold
+                      (format "What a cold read of the code said:\n\n%s"
+                              cold))
+                    (when-let* ((note (sprig-quiz--note f)))
+                      (format "What I take from that:\n\n%s" note))))
+        "\n\n")))
+   (reverse findings) "\n\n"))
+
+(defun sprig-quiz--publish-format (text body)
+  "Frame the published findings BODY under the covering note TEXT."
+  (concat
+   "I ran a comprehension quiz on this change and it turned up the \
+following. Each one is a question I got wrong, or answered differently from \
+a cold read of the code.\n\n"
+   "Where the gap is mine, say so plainly and correct me. Where it is the \
+code's, that is a defect: either the intent is not recoverable from what is \
+written, or the code actively misleads a careful reader. Fix those rather \
+than explaining them to me, and say which of the two each one was.\n\n"
+   (if (string-blank-p text) "" (concat text "\n\n"))
+   body))
+
+(defun sprig-quiz-publish ()
+  "Send the flagged findings back to the session in one turn (C-c C-p).
+Composed as a set, the way a review publishes its drafts: a finding is
+worth handing over alongside the others rather than blurted one message at
+a time."
+  (interactive)
+  (unless (derived-mode-p 'sprig-quiz-mode)
+    (user-error "Not in a quiz buffer"))
+  (unless sprig-quiz--findings
+    (user-error "Nothing flagged; C-c C-f on a question the quiz found \
+something out through"))
+  (let ((session (seq-find
+                  (lambda (b) (with-current-buffer b
+                                (and (derived-mode-p 'sprig-session-mode)
+                                     (equal sprig--session-id sprig-quiz--id))))
+                  (buffer-list))))
+    (unless (and sprig-quiz--id session)
+      (user-error "No session to send this to"))
+    (let ((body (sprig-quiz--findings-text sprig-quiz--findings))
+          (n (length sprig-quiz--findings)))
+      (sprig-session--compose
+       session body nil nil
+       (lambda (text ctx) (sprig-quiz--publish-format text ctx))
+       (format "%d quiz finding(s)" n)))))
 
 (defun sprig-quiz-abort ()
   "Walk away from the worksheet (C-c C-k).
