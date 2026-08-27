@@ -996,5 +996,37 @@ since changed floats as orphaned instead of being applied blind."
                      (sprig-review--publish-text sprig-review--drafts)))))
       (kill-buffer session))))
 
+(ert-deftest sprig-review-test-d-reopens-the-review-you-left ()
+  "`d' on a review already open shows it as it stands, drafts and all,
+and re-reads the tree only when it is fresh or the scope has changed."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        (review "*sprig-review: *sprig-review-test-session**")
+        (reads 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'sprig-review--session-root)
+                   (lambda () (cons nil "/repo")))
+                  ((symbol-function 'sprig-review--git)
+                   (lambda (&rest _) (cl-incf reads) sprig-review-tests--diff))
+                  ((symbol-function 'pop-to-buffer) #'ignore))
+          (with-current-buffer session (sprig-session-mode))
+          (with-current-buffer session (sprig-session-review "HEAD"))
+          (should (= reads 1))
+          (with-current-buffer review
+            (setq sprig-review--drafts
+                  (list (list :id 1 :file "foo.el" :side 'new :start 2 :end 2
+                              :text "mine" :anchor '("  (baz))") :orphan nil))))
+          ;; Same scope: the review comes back untouched, no git call.
+          (with-current-buffer session (sprig-session-review "HEAD"))
+          (should (= reads 1))
+          (with-current-buffer review
+            (should (= 1 (length sprig-review--drafts))))
+          ;; A different scope is a different review, so it must read.
+          (with-current-buffer session (sprig-session-review "main"))
+          (should (= reads 2))
+          (with-current-buffer review
+            (should (equal sprig-review-base "main"))))
+      (kill-buffer session)
+      (when (get-buffer review) (kill-buffer review)))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

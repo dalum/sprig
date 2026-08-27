@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.7.0
+;; Version: 0.8.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1438,14 +1438,22 @@ navigable diff you annotate line by line and publish in a single turn.
 BASE is held buffer-locally, so two reviews of the same session can sit at
 different scopes and `g' keeps each where you put it.  Reads the diff
 itself, which the invariant permits, over the session's own SSH transport
-when the tree is remote."
+when the tree is remote.
+
+A review you already have open is shown as you left it: the same folds,
+the same place, the same drafts, and no re-read.  `d' is how you get back
+to a review, and getting back to one should not cost you your position in
+it; `g' is the key that means re-read.  Only a fresh buffer, or a `d' that
+changes the scope, reads the tree."
   (interactive)
   (pcase-let* ((`(,remote . ,root) (sprig-review--session-root))
                (session (current-buffer))
                (buf (get-buffer-create
-                     (format "*sprig-review: %s*" (buffer-name session)))))
+                     (format "*sprig-review: %s*" (buffer-name session))))
+               (fresh (with-current-buffer buf
+                        (not (derived-mode-p 'sprig-review-mode)))))
     (with-current-buffer buf
-      (unless (derived-mode-p 'sprig-review-mode) (sprig-review-mode))
+      (when fresh (sprig-review-mode))
       (setq sprig-review--session session
             sprig-review--remote remote
             sprig-review--root root
@@ -1454,8 +1462,11 @@ when the tree is remote."
             ;; The bulk diff read does not use it.
             default-directory (file-name-as-directory
                                (if remote (format "/ssh:%s:%s" remote root) root)))
-      (when base (setq-local sprig-review-base base))
-      (sprig-review--reload))
+      (let ((rescope (and base (not (equal base sprig-review-base)))))
+        (when base (setq-local sprig-review-base base))
+        (cond ((or fresh rescope) (sprig-review--reload))
+              (t (message "sprig: the review you left, against %s; `g' \
+re-reads the tree" sprig-review-base)))))
     (pop-to-buffer buf)))
 
 (defun sprig-session-review-uncommitted ()
