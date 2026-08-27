@@ -46,14 +46,29 @@
 ;; The last one is a documentation gap, located precisely, found rather than
 ;; guessed at.
 ;;
+;; *It aims at what is consequential, not at what you skipped.*  An earlier
+;; cut weighted the questions towards the files `sprig-review--expanded' said
+;; you never unfolded.  That was wrong three times over.  The signal is weaker
+;; than it looks, since it only knows this buffer: you may have read the file
+;; in your editor, in the transcript's inline diff, or written it yourself.
+;; Skipping is often correct, so aiming there aims at the generated file and
+;; the lockfile, which is the opposite of spending attention where it matters.
+;; And it is Goodhart: once the quiz targets unopened files you unfold files to
+;; avoid being asked about them, which corrupts the one attention signal the
+;; review had.  It also bought nothing, because 300 lines you waved through
+;; fail their questions whether or not the selector knew you waved them
+;; through.
+;;
+;; *The count is a ceiling that scales with the change, not a quota.*  Three
+;; questions is a thorough pass over forty lines and a spot check on two
+;; thousand.  But line count is a poor proxy for how much there is to
+;; understand: a thousand-line rename holds one idea and a forty-line change
+;; to a lock ordering holds several.  So size sets the *cap* and the generator
+;; is told outright to ask fewer where there is less to ask about.
+;;
 ;; *It is never a score, and never unprompted.*  No grade, no history, no
 ;; streak, nothing on a timer.  An agent grading a human is the exact posture
-;; that erodes ownership, dressed up as the cure for it.  Questions are
-;; weighted towards the files you never unfolded (`sprig-review--expanded'),
-;; because "accepted without opening" is the one attention signal the review
-;; already keeps and is a strictly correct negative: unfolding is weak
-;; evidence that you read a file, but never unfolding is proof that you did
-;; not.
+;; that erodes ownership, dressed up as the cure for it.
 ;;
 ;; Everything rides the side-question transport (`sprig--btw-command'), so a
 ;; quiz writes no log, opens no turn, and leaves the session untouched.  Your
@@ -84,11 +99,30 @@
 
 ;;;; Options
 
-(defcustom sprig-quiz-questions 3
-  "How many questions a quiz asks.
-Three is enough to find a gap and few enough to answer in one sitting.  A
-quiz you do not finish teaches nothing, and the failure mode of this whole
-idea is that it becomes a chore."
+(defcustom sprig-quiz-questions '(3 . 6)
+  "How many questions a quiz asks, as (FEWEST . MOST).
+The ceiling scales with the size of the change (see
+`sprig-quiz-lines-per-question'), because three questions is a thorough
+pass over a forty-line change and a spot check on a two-thousand-line one,
+and passing a spot check is worth knowing you have not done.
+
+MOST is deliberately low.  A quiz you abandon halfway teaches nothing and
+teaches you that the whole idea is a chore, which is the failure mode that
+would kill it.  Past six the buffer is longer than anyone finishes."
+  :type '(cons integer integer)
+  :group 'sprig)
+
+(defcustom sprig-quiz-lines-per-question 200
+  "Changed diff lines that earn one more question, up to the ceiling.
+A crude measure, and deliberately only ever a *ceiling*: line count is a
+poor proxy for how much there is to understand, since a thousand-line
+mechanical rename holds one idea and a forty-line change to a lock
+ordering holds several.  The default spreads the band over the sizes real
+reviews come in: a tighter one pins every review of a whole branch at the
+ceiling, which is a constant wearing a formula's clothes.  Scaling the cap
+on size and letting the generator ask fewer where there is less to ask
+about gets the useful half of scaling without asking twelve questions
+about a rename."
   :type 'integer
   :group 'sprig)
 
@@ -237,53 +271,70 @@ at once on purpose, and each owns its own buffer and callback."
 
 ;;;; The diff the questions are drawn from
 
-(defun sprig-quiz--diff-text (changes unread)
-  "Render CHANGES back to diff text for a prompt, flagging files in UNREAD.
-UNREAD is the files whose section the reader never unfolded; they are marked
-so the generator can aim at them.  Capped at `sprig-quiz-max-diff-lines',
-with what was dropped stated in the text rather than silently cut."
+(defun sprig-quiz--changed-lines (changes)
+  "Count the added and removed lines across CHANGES.
+Context lines do not count: they are what the change is written against,
+not the change."
+  (let ((n 0))
+    (dolist (c changes n)
+      (dolist (u (plist-get c :unified))
+        (dolist (l (plist-get u :lines))
+          (when (memq (plist-get l :kind) '(add del)) (cl-incf n)))))))
+
+(defun sprig-quiz--count (changes)
+  "How many questions to allow for CHANGES, within `sprig-quiz-questions'."
+  (let ((fewest (car sprig-quiz-questions))
+        (most (cdr sprig-quiz-questions))
+        (lines (sprig-quiz--changed-lines changes)))
+    (max fewest
+         (min most (ceiling lines (max 1 sprig-quiz-lines-per-question))))))
+
+(defun sprig-quiz--diff-text (changes)
+  "Render CHANGES back to diff text for a prompt.
+Capped at `sprig-quiz-max-diff-lines', with what was dropped stated in the
+text rather than silently cut."
   (let ((lines nil) (count 0) (dropped 0))
     (cl-flet ((emit (s) (if (< count sprig-quiz-max-diff-lines)
                             (progn (push s lines) (cl-incf count))
                           (cl-incf dropped))))
       (dolist (c changes)
-        (let ((file (plist-get c :file)))
-          (emit (format "--- %s%s" file
-                        (if (member file unread)
-                            "   [ACCEPTED WITHOUT OPENING]" "")))
-          (dolist (u (plist-get c :unified))
-            (emit (format "@@ -%d,%d +%d,%d @@%s"
-                          (plist-get u :old-start) (plist-get u :old-count)
-                          (plist-get u :new-start) (plist-get u :new-count)
-                          (if (plist-get u :heading)
-                              (concat " " (plist-get u :heading)) "")))
-            (dolist (l (plist-get u :lines))
-              (emit (concat (pcase (plist-get l :kind)
-                              ('add "+") ('del "-") (_ " "))
-                            (plist-get l :text)))))
-          (emit ""))))
+        (emit (format "--- %s" (plist-get c :file)))
+        (dolist (u (plist-get c :unified))
+          (emit (format "@@ -%d,%d +%d,%d @@%s"
+                        (plist-get u :old-start) (plist-get u :old-count)
+                        (plist-get u :new-start) (plist-get u :new-count)
+                        (if (plist-get u :heading)
+                            (concat " " (plist-get u :heading)) "")))
+          (dolist (l (plist-get u :lines))
+            (emit (concat (pcase (plist-get l :kind)
+                            ('add "+") ('del "-") (_ " "))
+                          (plist-get l :text)))))
+        (emit "")))
     (concat (string-join (nreverse lines) "\n")
             (when (> dropped 0)
               (format "\n[%d further diff lines omitted; ask only about \
 what is shown]" dropped)))))
 
-(defun sprig-quiz--unread (changes expanded)
-  "Files in CHANGES whose section is not among EXPANDED.
-Never unfolding a file is proof it went unread; unfolding one is only weak
-evidence that it did not, so the signal is used in this direction alone."
-  (seq-remove (lambda (f) (member f expanded))
-              (mapcar (lambda (c) (plist-get c :file)) changes)))
-
 ;;;; Prompts
 
-(defun sprig-quiz--generate-prompt (diff unread n)
-  "Ask for N questions about DIFF, aimed at the files in UNREAD."
+(defun sprig-quiz--generate-prompt (diff n)
+  "Ask for at most N questions about DIFF."
   (concat
    (format "Set a short comprehension quiz for the person who just reviewed \
 the changeset below. You are finding out whether they understand the change, \
 not whether they can read.
 
-Ask exactly %d questions. Every one must satisfy all of:
+Ask AT MOST %d questions. That is a ceiling, not a quota: ask one question per \
+distinct thing in this change that is worth understanding, and stop. A large \
+mechanical change (a rename, a reformat, generated output) may honestly \
+deserve one question, and padding it out to %d with weaker ones is worse than \
+asking one good one.
+
+Aim at whatever is most consequential: the decisions someone will have to \
+live with, the parts that are load-bearing, the places a later change is \
+most likely to go wrong. Not the parts that are merely large.
+
+Every question must satisfy all of:
 
 - Its answer is ENTAILED by the code, not CONTAINED in it. If it can be \
 answered by looking at any single location, it is worthless. Ask about \
@@ -303,20 +354,16 @@ Shapes that work:
 Shapes to never ask:
   \"What does function F return?\"  \"Which file defines T?\"  \"How many \
 arguments does F take?\"
-" n)
-   (when unread
-     (format "\nAim at these files first. They were accepted without being \
-opened, so that is where the reader's model is thinnest: %s\n"
-             (string-join unread ", ")))
-   "\nReply with the questions alone, as markdown headings numbered from 1, \
-and nothing else. No preamble, no answers, no commentary.
+
+Reply with the questions alone, as markdown headings numbered from 1, and \
+nothing else. No preamble, no answers, no commentary.
 
 ## 1. <question>
 ## 2. <question>
 
 The changeset:
 
-"
+" n n)
    diff))
 
 (defun sprig-quiz--questions-text (questions)
@@ -673,10 +720,11 @@ Nothing was sent, so there is nothing to take back."
 ;;;###autoload
 (defun sprig-quiz ()
   "Quiz yourself on the changeset under review (`Q').
-Asks `sprig-quiz-questions' questions about this review, weighted towards
-the files you never unfolded, and opens them as a worksheet.  You answer
-from memory; only on `C-c C-c' does a cold reader answer beside you, with
-the author's own account folded away as the adjudicator.
+Asks about the most consequential parts of this change, up to a ceiling
+that scales with its size (`sprig-quiz-questions'), and opens them as a
+worksheet.  You answer from memory; only on `C-c C-c' does a cold reader
+answer beside you, with the author's own account folded away as the
+adjudicator.
 
 Nothing here is scored, kept, or sent to the session: the whole exchange
 rides the side-question transport, which writes no log."
@@ -685,12 +733,9 @@ rides the side-question transport, which writes no log."
     (user-error "Not in a sprig review buffer"))
   (unless sprig-review--changes
     (user-error "Nothing changed to quiz you on"))
-  ;; The fold record is only refreshed on a redraw, so ask the live sections
-  ;; where they stand rather than trusting the last render's answer.
-  (sprig-review--note-expansion)
   (let* ((changes sprig-review--changes)
-         (unread (sprig-quiz--unread changes sprig-review--expanded))
-         (diff (sprig-quiz--diff-text changes unread))
+         (n (sprig-quiz--count changes))
+         (diff (sprig-quiz--diff-text changes))
          (session sprig-review--session)
          (remote sprig-review--remote)
          (id (and (buffer-live-p session)
@@ -706,16 +751,14 @@ rides the side-question transport, which writes no log."
      (if id (sprig--btw-command id dir remote)
        (sprig-quiz--cold-command dir remote))
      dir remote "sprig-quiz-set"
-     (sprig-quiz--generate-prompt diff unread sprig-quiz-questions)
+     (sprig-quiz--generate-prompt diff n)
      (lambda (text)
        (let ((questions (and text (sprig-quiz--split text))))
          (if (null questions)
              (message "sprig: the quiz came back empty; try again")
            (sprig-quiz--start buf questions diff id dir remote)))))
-    (message "sprig: setting %d questions%s…" sprig-quiz-questions
-             (if unread (format " (%d file(s) you never opened)"
-                                (length unread))
-               ""))))
+    (message "sprig: setting up to %d question(s) on %d changed line(s)…"
+             n (sprig-quiz--changed-lines changes))))
 
 (provide 'sprig-quiz)
 ;;; sprig-quiz.el ends here

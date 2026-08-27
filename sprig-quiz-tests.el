@@ -113,34 +113,49 @@ opening an empty worksheet."
   (should-not (sprig-quiz--split "I would rather not."))
   (should-not (sprig-quiz--split nil)))
 
-;;;; Aiming at what went unread
+;;;; How many questions
 
-(ert-deftest sprig-quiz-test-unread-is-what-was-never-unfolded ()
-  "A file you never opened is unread; one you did is not.
-The signal is used in this direction only: never unfolding proves you did
-not read it, unfolding proves rather little."
+(ert-deftest sprig-quiz-test-count-scales-with-the-change ()
+  "Three questions is a thorough pass over a small change and a spot check
+on a big one, so the ceiling grows with the changed lines."
+  (let ((sprig-quiz-questions '(3 . 6))
+        (sprig-quiz-lines-per-question 100))
+    (cl-flet ((n (lines) (sprig-quiz--count
+                          (list (list :file "f" :unified
+                                      (list (list :lines
+                                                  (make-list lines
+                                                             '(:kind add)))))))))
+      (should (= 3 (n 1)))
+      (should (= 3 (n 250)))
+      (should (= 4 (n 350)))
+      (should (= 6 (n 600)))
+      ;; And it never runs past the ceiling, however big the change.
+      (should (= 6 (n 50000))))))
+
+(ert-deftest sprig-quiz-test-context-lines-are-not-the-change ()
+  "Context is what the change is written against, not the change, so it
+does not earn questions.  A one-line edit in a large hunk is a one-line
+edit."
   (let ((changes (sprig-parse-diff sprig-quiz-tests--diff)))
-    (should (equal (sprig-quiz--unread changes nil) '("foo.el" "new.txt")))
-    (should (equal (sprig-quiz--unread changes '("foo.el")) '("new.txt")))
-    (should-not (sprig-quiz--unread changes '("foo.el" "new.txt")))))
+    ;; The fixture changes three lines: -bar +baz, and +hello.
+    (should (= 3 (sprig-quiz--changed-lines changes)))))
 
-(ert-deftest sprig-quiz-test-diff-text-flags-the-unopened-files ()
-  "The prompt says which hunks were accepted without being opened, since
-that is where the reader's model is thinnest."
-  (let* ((changes (sprig-parse-diff sprig-quiz-tests--diff))
-         (text (sprig-quiz--diff-text changes '("new.txt"))))
+(ert-deftest sprig-quiz-test-diff-text-carries-the-change ()
+  "The prompt gets the files and both sides of every hunk."
+  (let ((text (sprig-quiz--diff-text (sprig-parse-diff sprig-quiz-tests--diff))))
     (should (string-match-p "--- foo.el$" text))
-    (should (string-match-p "--- new.txt   \\[ACCEPTED WITHOUT OPENING\\]"
-                            text))
-    ;; And the diff itself is there to ask about.
+    (should (string-match-p "--- new.txt$" text))
     (should (string-match-p "^-  (bar))$" text))
-    (should (string-match-p "^\\+  (baz))$" text))))
+    (should (string-match-p "^\\+  (baz))$" text))
+    ;; Nothing tells the generator what the reader did or did not open: that
+    ;; weighting was Goodhart, and the reader could game it by unfolding.
+    (should-not (string-match-p "OPENING\\|unread\\|never opened" text))))
 
 (ert-deftest sprig-quiz-test-diff-text-says-what-it-dropped ()
   "A capped diff reports the omission rather than reading as the whole change."
   (let* ((changes (sprig-parse-diff sprig-quiz-tests--diff))
          (sprig-quiz-max-diff-lines 3)
-         (text (sprig-quiz--diff-text changes nil)))
+         (text (sprig-quiz--diff-text changes)))
     (should (string-match-p "further diff lines omitted" text))))
 
 ;;;; The generation prompt
@@ -148,12 +163,19 @@ that is where the reader's model is thinnest."
 (ert-deftest sprig-quiz-test-generate-prompt-rules-out-trivia ()
   "The prompt spends itself ruling out lookup questions, which is the
 default a model reaches for and the failure that discredits the practice."
-  (let ((p (sprig-quiz--generate-prompt "DIFF" '("new.txt") 3)))
-    (should (string-match-p "Ask exactly 3 questions" p))
+  (let ((p (sprig-quiz--generate-prompt "DIFF" 4)))
     (should (string-match-p "ENTAILED by the code, not CONTAINED" p))
     (should (string-match-p "What does function F return" p))
-    (should (string-match-p "new.txt" p))
     (should (string-match-p "DIFF" p))))
+
+(ert-deftest sprig-quiz-test-the-count-is-a-ceiling-not-a-quota ()
+  "Told to ask N, a model pads to N.  A thousand-line rename holds one
+idea, so the prompt has to say outright that fewer is a right answer."
+  (let ((p (sprig-quiz--generate-prompt "DIFF" 6)))
+    (should (string-match-p "AT MOST 6 questions" p))
+    (should (string-match-p "ceiling, not a quota" p))
+    (should (string-match-p "may honestly deserve one question" p))
+    (should (string-match-p "most consequential" p))))
 
 ;;;; The worksheet
 
@@ -351,22 +373,23 @@ retrieval still happened, which was most of the value."
     (setq sprig-review--changes nil)
     (should-error (sprig-quiz) :type 'user-error)))
 
-(ert-deftest sprig-quiz-test-generator-reads-the-live-fold-state ()
-  "The fold record is only refreshed on a redraw, so `Q' asks the sections
-where they stand: a file you unfolded a moment ago must not be quizzed as
-one you never opened."
+(ert-deftest sprig-quiz-test-entry-scales-the-ask-to-the-diff ()
+  "`Q' sizes the ask from the change in front of it, and asks about the
+change rather than about the reader."
   (with-temp-buffer
     (sprig-review-mode)
     (setq sprig-review--changes (sprig-parse-diff sprig-quiz-tests--diff))
-    (sprig-review--render)
-    ;; Rendered folded, so nothing is expanded and both files are unread.
-    (setq sprig-review--expanded '("stale.el"))
-    (sprig-quiz-tests--with-forks
-      (sprig-quiz)
-      (let ((p (plist-get (sprig-quiz-tests--fork "sprig-quiz-set") :prompt)))
-        (should p)
-        (should (string-match-p "foo.el, new.txt" p))
-        (should-not (string-match-p "stale.el" p))))))
+    (setq sprig-review--expanded '("foo.el"))
+    (let ((sprig-quiz-questions '(2 . 5))
+          (sprig-quiz-lines-per-question 1))
+      (sprig-quiz-tests--with-forks
+        (sprig-quiz)
+        (let ((p (plist-get (sprig-quiz-tests--fork "sprig-quiz-set") :prompt)))
+          (should p)
+          ;; Three changed lines, one question each, floor 2 and ceiling 5.
+          (should (string-match-p "AT MOST 3 questions" p))
+          ;; Which files were unfolded is none of the generator's business.
+          (should-not (string-match-p "foo.el is\\|never opened\\|OPENING" p)))))))
 
 (provide 'sprig-quiz-tests)
 ;;; sprig-quiz-tests.el ends here
