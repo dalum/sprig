@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.5.0
+;; Version: 0.6.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -17,7 +17,7 @@
 ;;   d          open the review over the session's working tree
 ;;   n / p      walk the changed files; TAB folds one away
 ;;   c c        comment on the line at point, or on the region
-;;   e          hand-author a hunk instead of describing it
+;;   e          hand-author the region, or the hunk, instead of describing it
 ;;   c p        publish: every draft comment, in one turn, to the agent
 ;;
 ;; Three things make that more than a diff viewer.
@@ -62,7 +62,7 @@
 (declare-function sprig-session--compose "sprig-session-mode"
                   (target context &optional plan queue format label))
 (declare-function sprig-session--open-stage-buffer "sprig-session-mode"
-                  (review file anchor))
+                  (review file anchor &optional line))
 
 ;;;; Options
 
@@ -405,16 +405,12 @@ property when it was drawn."
                                      (line-beginning-position))
                      'sprig-review-line))
 
-(defun sprig-review--region-lines ()
-  "Return (FILE SIDE START END ANCHOR) for the line at point or the region.
-With an active region, the span it covers; otherwise the single line at
-point.  SIDE is `old' only when every covered line is a removal, since a
-deletion exists on no other side; anything else anchors to `new', the
-post-image, which is what the file on disk actually reads.  Signals a
-`user-error' when the selection covers no diff line."
-  (let* ((beg (if (use-region-p) (region-beginning) (point)))
-         (end (if (use-region-p) (region-end) (point)))
-         (lines nil))
+(defun sprig-review--lines-between (beg end)
+  "Return the diff-line plists rendered from BEG to END, in order.
+Only the diff\='s own lines count: a hunk heading, a file heading, or an
+inline draft carries no line plist, so it is skipped rather than ending
+the run."
+  (let ((lines nil))
     (save-excursion
       (goto-char beg)
       (beginning-of-line)
@@ -422,7 +418,18 @@ post-image, which is what the file on disk actually reads.  Signals a
         (while (and (not done) (<= (point) end))
           (when-let ((l (sprig-review--line-at))) (push l lines))
           (when (or (eobp) (/= 0 (forward-line 1))) (setq done t)))))
-    (setq lines (nreverse lines))
+    (nreverse lines)))
+
+(defun sprig-review--region-lines ()
+  "Return (FILE SIDE START END ANCHOR) for the line at point or the region.
+With an active region, the span it covers; otherwise the single line at
+point.  SIDE is `old' only when every covered line is a removal, since a
+deletion exists on no other side; anything else anchors to `new', the
+post-image, which is what the file on disk actually reads.  Signals a
+`user-error' when the selection covers no diff line."
+  (let ((lines (sprig-review--lines-between
+                (if (use-region-p) (region-beginning) (point))
+                (if (use-region-p) (region-end) (point)))))
     (unless lines
       (user-error "Point is not on a line of the diff"))
     (let* ((file (plist-get (car lines) :file))
@@ -1061,29 +1068,120 @@ the running turn ends."
     (or (sprig-review--line-at)
         (progn (forward-line 1) (sprig-review--line-at)))))
 
-(defun sprig-review-stage-hunk ()
-  "Hand-author the hunk at point instead of describing it (`e').
-Seeds the staging buffer with the hunk's *new* side, the context and
-added lines as they now stand on disk, so your edit replaces exactly
-that.  You edit locally and the agent writes it, as ever."
+(defun sprig-review--stage-anchor (lines)
+  "Return (TEXT . LINE) for the disk-side text of LINES, or nil when it has none.
+Only the lines the file still holds count, the context and added ones, so
+a removal contributes nothing: the anchor has to be bytes an `Edit' can
+match.  LINE is where the run starts in the new file, which is what tells
+the agent which occurrence to change when the text is not unique.  Signals
+a `user-error' when the kept lines are not one contiguous run, since two
+spans with a gap between them are not one `old_string'."
+  (let* ((kept (seq-filter (lambda (l)
+                             (and (memq (plist-get l :kind) '(context add))
+                                  (plist-get l :new)))
+                           lines))
+         (ns (mapcar (lambda (l) (plist-get l :new)) kept)))
+    (when kept
+      (unless (equal ns (number-sequence (car ns) (car (last ns))))
+        (user-error "That selection skips a gap in the file; \
+take one hunk at a time"))
+      (cons (mapconcat (lambda (l) (plist-get l :text)) kept "\n")
+            (car ns)))))
+
+(defun sprig-review--hunk-of (section)
+  "Return the unified hunk SECTION stands for, or nil when it stands for none.
+A hunk section is its own hunk; a file section is its hunk when it has
+exactly one, since a file of several has not said which."
+  (pcase (and section (oref section type))
+    ('sprig-review-hunk (oref section value))
+    ('sprig-change
+     (let ((us (plist-get (oref section value) :unified)))
+       (cond ((null us) (user-error "This file has no hunk to edit"))
+             ((cdr us)
+              (user-error "%s has %d hunks; open it with TAB and put point on one"
+                          (plist-get (oref section value) :file) (length us)))
+             (t (car us)))))
+    (_ nil)))
+
+(defun sprig-review--hunk-at (section)
+  "Return the hunk SECTION is in, walking out through its parents, or nil."
+  (let ((hunk nil))
+    (while (and section (not (setq hunk (sprig-review--hunk-of section))))
+      (setq section (oref section parent)))
+    hunk))
+
+(defun sprig-review--file-of (section)
+  "Return the path of the file SECTION sits under, or nil."
+  (while (and section (not (eq (oref section type) 'sprig-change)))
+    (setq section (oref section parent)))
+  (and section (plist-get (oref section value) :file)))
+
+(defun sprig-review--marked-hunk-sections ()
+  "Return the marked hunk and file sections, with no section-at-point fallback.
+Only real marks: `e' falls back to point itself, and it needs to know the
+difference."
+  (when sprig--marks
+    (seq-filter (lambda (s)
+                  (memq (oref s type) '(sprig-review-hunk sprig-change)))
+                (sprig--marked-sections))))
+
+(defun sprig-review--stage-target ()
+  "Return (FILE TEXT LINE) naming what `e' hands you to edit.
+The active region when there is one, so you can take a few lines rather
+than the whole hunk; else the one hunk you marked, so `e' reaches a chunk
+point has since wandered off; else the hunk point is in.  TEXT is always
+the new side, the bytes the file holds now."
+  (if (use-region-p)
+      (let* ((lines (sprig-review--lines-between
+                     (region-beginning) (region-end)))
+             (file (plist-get (car lines) :file))
+             (lines (seq-filter (lambda (l) (equal (plist-get l :file) file))
+                                lines))
+             (anchor (and lines (sprig-review--stage-anchor lines))))
+        (unless lines (user-error "That region covers no line of the diff"))
+        (unless anchor
+          (user-error "That region is all removals; there is nothing on disk \
+to edit"))
+        (list file (car anchor) (cdr anchor)))
+    (let* ((marked (sprig-review--marked-hunk-sections))
+           (section
+            (cond ((cdr marked)
+                   (user-error "%d sections are marked; `e' edits one, so \
+mark just the one (`U' clears them)" (length marked)))
+                  (marked (car marked))
+                  (t (magit-current-section))))
+           (hunk (or (sprig-review--hunk-at section)
+                     (user-error "Point is not on a hunk; open a file with \
+TAB, or mark the hunk you mean with SPC")))
+           (file (or (sprig-review--file-of section)
+                     (plist-get (sprig-review--line-at-first section) :file)
+                     (user-error "No file here to edit")))
+           (anchor (or (sprig-review--stage-anchor (plist-get hunk :lines))
+                       (user-error "This hunk is a pure deletion; there is \
+nothing to edit"))))
+      (list file (car anchor) (cdr anchor)))))
+
+(defun sprig-review-stage ()
+  "Hand-author the code you are looking at instead of describing it (`e').
+Opens the staging buffer in the file's own major mode, so you edit with
+the highlighting and the keys you write that language in, seeded with the
+*new* side: the context and added lines exactly as they stand on disk, so
+your edit replaces exactly that.  It takes the region when one is active,
+else the hunk you marked with \\`SPC', else the hunk point is in.
+
+`C-c C-c' there asks the agent to write your bytes back verbatim and
+`C-c C-k' throws them away.  You edit locally and the agent writes it, as
+ever."
   (interactive)
-  (let ((sec (magit-current-section)))
-    (while (and sec (not (eq (oref sec type) 'sprig-review-hunk)))
-      (setq sec (oref sec parent)))
-    (unless sec (user-error "Point is not on a hunk"))
-    (unless (buffer-live-p sprig-review--session)
-      (user-error "The session this review belongs to is gone"))
-    (let* ((uhunk (oref sec value))
-           (file (plist-get (sprig-review--line-at-first sec) :file))
-           (text (mapconcat (lambda (l) (plist-get l :text))
-                            (seq-filter (lambda (l)
-                                          (memq (plist-get l :kind)
-                                                '(context add)))
-                                        (plist-get uhunk :lines))
-                            "\n")))
-      (when (string-empty-p text)
-        (user-error "This hunk is a pure deletion; there is nothing to edit"))
-      (sprig-session--open-stage-buffer sprig-review--session file text))))
+  (unless (derived-mode-p 'sprig-review-mode)
+    (user-error "Not in a sprig review buffer"))
+  (unless (buffer-live-p sprig-review--session)
+    (user-error "The session this review belongs to is gone"))
+  (pcase-let ((`(,file ,text ,line) (sprig-review--stage-target)))
+    (sprig-session--open-stage-buffer sprig-review--session file text line)))
+
+(define-obsolete-function-alias 'sprig-review-stage-hunk
+  'sprig-review-stage "0.6.0")
 
 ;;;; Visiting and refreshing
 
@@ -1124,7 +1222,7 @@ that.  You edit locally and the agent writes it, as ever."
     (define-key map (kbd "c")       #'sprig-review-dispatch)
     (define-key map (kbd "C-c C-c") #'sprig-review-publish)
     (define-key map (kbd "k")       #'sprig-review-comment-delete)
-    (define-key map (kbd "e")       #'sprig-review-stage-hunk)
+    (define-key map (kbd "e")       #'sprig-review-stage)
     (define-key map (kbd "b")       #'sprig-review-set-base)
     (define-key map (kbd "g")       #'sprig-review-refresh)
     (define-key map (kbd "RET")     #'sprig-review-visit)
@@ -1151,8 +1249,9 @@ Move with \\`n' / \\`p', \\`g' re-reads the diff, and
 
 \\`b' changes what the review diffs against, carrying the drafts across.
 
-\\`e' hand-authors the hunk at point instead of describing it, and
-\\`C-c C-c' publishes, the way it sends everywhere else in sprig.
+\\`e' hand-authors the code instead of describing it: the region, the
+hunk you marked, or the hunk point is in, opened in the file's own major
+mode.  \\`C-c C-c' publishes, the way it sends everywhere else in sprig.
 
 Nothing here writes to the repository: publishing is an instruction to the
 agent, like every other sprig verb."

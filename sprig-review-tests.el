@@ -33,14 +33,34 @@ new file mode 100644
 "
   "A two-file unified diff: one edit and one new file.")
 
+(defconst sprig-review-tests--two-hunk-diff
+  "diff --git a/gap.el b/gap.el
+--- a/gap.el
++++ b/gap.el
+@@ -1,2 +1,2 @@
+ one
+-two
++TWO
+@@ -10,2 +10,2 @@
+ ten
+-eleven
++ELEVEN
+"
+  "One file changed in two places, with unshown lines between them.")
+
+(defmacro sprig-review-tests--with-diff (diff &rest body)
+  "Run BODY in a review buffer rendered from DIFF."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (sprig-review-mode)
+     (setq sprig-review--changes (sprig-parse-diff ,diff))
+     (sprig-review--render)
+     ,@body))
+
 (defmacro sprig-review-tests--with (&rest body)
   "Run BODY in a review buffer rendered from `sprig-review-tests--diff'."
   (declare (indent 0))
-  `(with-temp-buffer
-     (sprig-review-mode)
-     (setq sprig-review--changes (sprig-parse-diff sprig-review-tests--diff))
-     (sprig-review--render)
-     ,@body))
+  `(sprig-review-tests--with-diff sprig-review-tests--diff ,@body))
 
 (defun sprig-review-tests--goto (needle)
   "Move point to the start of the rendered line containing NEEDLE."
@@ -712,20 +732,126 @@ escape hatch for feedback that is about the change and not about a line."
       (kill-buffer session)
       (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
 
+(defmacro sprig-review-tests--staging (&rest body)
+  "Run BODY with `sprig-session--open-stage-buffer' recording into SEEDED.
+SEEDED reads (FILE TEXT LINE), which is the whole of what `e' decides."
+  (declare (indent 0))
+  `(cl-letf (((symbol-function 'sprig-session--open-stage-buffer)
+              (lambda (_review file anchor &optional line)
+                (setq seeded (list file anchor line)))))
+     ,@body))
+
+(defmacro sprig-review-tests--with-region (from to &rest body)
+  "Run BODY with the region covering the lines holding FROM and TO."
+  (declare (indent 2))
+  `(progn
+     (transient-mark-mode 1)
+     (sprig-review-tests--goto ,from)
+     (set-mark (point))
+     (sprig-review-tests--goto ,to)
+     (end-of-line)
+     (activate-mark)
+     ,@body))
+
 (ert-deftest sprig-review-test-stage-seeds-the-new-side-of-a-hunk ()
   "`e' hand-authors the hunk at point, seeded with what is on disk now:
-its context and added lines, never the removed ones."
+its context and added lines, never the removed ones, and where they start."
   (let ((session (get-buffer-create "*sprig-review-test-session*"))
         seeded)
     (unwind-protect
         (sprig-review-tests--with
           (setq sprig-review--session session)
           (sprig-review-tests--goto "(baz))")
-          (cl-letf (((symbol-function 'sprig-session--open-stage-buffer)
-                     (lambda (_review file anchor) (setq seeded (cons file anchor)))))
-            (sprig-review-stage-hunk))
-          (should (equal (car seeded) "foo.el"))
-          (should (equal (cdr seeded) "(defun foo ()\n  (baz))")))
+          (sprig-review-tests--staging (sprig-review-stage))
+          (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-takes-the-region-when-there-is-one ()
+  "A region narrows `e' to the lines you selected rather than the whole
+hunk, anchored at the line they start on."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--with-region "(baz))" "(baz))"
+            (sprig-review-tests--staging (sprig-review-stage)))
+          (should (equal seeded '("foo.el" "  (baz))" 2))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-region-drops-the-removed-lines ()
+  "A region over both sides of a change stages only what the file holds
+now: the removed line is not on disk, so it cannot anchor an edit."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--with-region "(bar))" "(baz))"
+            (sprig-review-tests--staging (sprig-review-stage)))
+          (should (equal seeded '("foo.el" "  (baz))" 2))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-refuses-a-region-with-a-gap ()
+  "Two hunks have unshown file between them, so a region across both is
+not one `old_string' and `e' says so rather than staging a lie."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--two-hunk-diff
+          (setq sprig-review--session session)
+          (sprig-review-tests--with-region "one" "ELEVEN"
+            (should-error (sprig-review-stage) :type 'user-error)))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-takes-the-marked-hunk ()
+  "A marked hunk is what `e' edits, wherever point has wandered to since."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "@@ -1,3")
+          (setq sprig--marks (list (magit-section-ident (magit-current-section))))
+          (sprig-review-tests--goto "hello")
+          (sprig-review-tests--staging (sprig-review-stage))
+          (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-refuses-several-marks ()
+  "`e' writes one block, so two marked hunks are an ambiguity to raise,
+not one to guess at."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--two-hunk-diff
+          (setq sprig-review--session session)
+          (setq sprig--marks
+                (mapcar (lambda (needle)
+                          (sprig-review-tests--goto needle)
+                          (magit-section-ident (magit-current-section)))
+                        '("@@ -1,2" "@@ -10,2")))
+          (should-error (sprig-review-stage) :type 'user-error))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-from-a-file-with-one-hunk ()
+  "On a file heading, a file changed in one place has named its hunk."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "new.txt")
+          (sprig-review-tests--staging (sprig-review-stage))
+          (should (equal seeded '("new.txt" "hello" 1))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-from-a-file-with-several-hunks ()
+  "A file changed in two places has not, so it asks for one."
+  (let ((session (get-buffer-create "*sprig-review-test-session*")))
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--two-hunk-diff
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "gap.el")
+          (should-error (sprig-review-stage) :type 'user-error))
       (kill-buffer session))))
 
 (provide 'sprig-review-tests)

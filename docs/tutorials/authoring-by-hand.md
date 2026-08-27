@@ -22,8 +22,8 @@ let the agent apply it.
 
 ### 1. Open a staging buffer with `e`
 
-Press **`e`** to open the staging menu. It offers three ways to fill the buffer,
-differing only in how the region is chosen:
+In the **session buffer**, press **`e`** to open the staging menu. It offers
+three ways to fill the buffer, differing only in how the region is chosen:
 
 - **`e e` — the hunk at point.** With point on a `+`/`-` line of a change
   already shown in the buffer, the staging buffer opens straight away, seeded
@@ -40,6 +40,20 @@ differing only in how the region is chosen:
 
 `e f` and `e s` involve the agent reading, so the buffer opens once that read
 comes back (you will see a brief "…to seed a staging buffer" message meanwhile).
+
+In the **changeset review** (`d`), `e` needs no menu: the review already has the
+whole diff with its line numbers, so `e` stages what you are looking at straight
+away. It takes the region when one is active, so you can pull out three lines
+rather than the whole hunk; else the hunk you marked with `SPC`, so `e` reaches
+a chunk point has since wandered off; else the hunk point is in, or a file's one
+hunk from its heading. Either way you land in the same staging buffer, and the
+rest of the loop below is the same.
+
+Two selections it refuses, because neither is a block the agent could match.
+One spanning two hunks: git showed you neither the lines between them nor how
+many, so the two spans are not one block. And one of pure removals: those lines
+are not on disk, so there is nothing to anchor an edit to. Both say so rather
+than staging something that would fail later.
 
 ### 2. Edit it
 
@@ -87,8 +101,14 @@ a guard clause, and you want to write it yourself.
 
 ## Good to know
 
-- **No mode to enter.** `e` works from the ordinary review flow. You do not
-  switch the agent into anything first.
+- **No mode to enter.** `e` works from the ordinary review flow, in the session
+  buffer or the changeset review. You do not switch the agent into anything
+  first.
+- **It knows where your block sits.** From the changeset review, the
+  instruction names the line the block starts at, so a one-line edit whose text
+  appears elsewhere in the file still lands in the right place. A hunk staged
+  from the session buffer cannot say: an `Edit` payload knows the bytes it
+  replaced but never the line they sat on.
 - **One edit per send.** A single `C-c C-c` asks for exactly one edit, your text
   applied verbatim. Nothing else is touched.
 - **Check the diff.** The agent does the write, so it could in principle drift

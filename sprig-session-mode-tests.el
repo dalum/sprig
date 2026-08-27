@@ -2272,6 +2272,35 @@ the fold learns the id from the result rather than from the call."
         (should (string-match-p "NEW-REGION" sent))
         (should (string-match-p "character for character" sent))))))
 
+(ert-deftest sprig-session-mode-test-stage-direct-names-the-line ()
+  "When the caller knows where the block starts, the instruction says so,
+which is what saves an edit whose text is not unique in the file."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (let (sent)
+      (cl-letf (((symbol-function 'sprig-session--send)
+                 (lambda (text &rest _) (setq sent text))))
+        (sprig-session--stage-direct "app/x.py" "OLD" "NEW" 42)
+        (should (string-match-p "starts at line 42" sent))
+        (sprig-session--stage-direct "app/x.py" "OLD" "NEW")
+        (should-not (string-match-p "starts at line" sent))))))
+
+(ert-deftest sprig-session-mode-test-stage-buffer-opens-in-the-file-mode ()
+  "The staging buffer is the file's own major mode, so you edit code with
+the highlighting you read it in; it visits nothing, so a save writes no file."
+  (unwind-protect
+      (with-temp-buffer
+        (sprig-session-mode)
+        (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+          (sprig-session--open-stage-buffer (current-buffer) "lib/foo.el"
+                                            "(defun foo ())" 12))
+        (with-current-buffer "*sprig-stage*"
+          (should (eq major-mode 'emacs-lisp-mode))
+          (should (null buffer-file-name))
+          (should (equal sprig-session--stage-line 12))
+          (should (equal sprig-session--stage-anchor "(defun foo ())"))))
+    (when (get-buffer "*sprig-stage*") (kill-buffer "*sprig-stage*"))))
+
 (ert-deftest sprig-session-mode-test-stage-courier-records-and-asks ()
   "Courier staging records the bytes and asks for the placeholder Edit."
   (with-temp-buffer

@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.34.0
+;; Version: 0.35.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2812,6 +2812,11 @@ needs the edit to prompt, so it refuses the auto-approve modes
   "Path of the file a staging buffer edits, as the change model records it.")
 (defvar-local sprig-session--stage-anchor nil
   "The staged region's original text: the `old_string' the courier edit matches.")
+(defvar-local sprig-session--stage-line nil
+  "Line the staged region starts at in the file, or nil when nothing knows.
+The changeset review reads its diff from git, so it can say; a payload
+hunk cannot, since an `Edit' knows the bytes it replaced but never where
+they sat.  It rides along to break a tie when the anchor is not unique.")
 
 (defun sprig-session--stage-hunk (section)
   "Return the hunk plist to stage from SECTION, or nil when there is none.
@@ -2827,11 +2832,13 @@ else returns nil, the caller's cue to seed from a fresh `Read' instead."
              (t (car hunks)))))
     (_ nil)))
 
-(defun sprig-session--open-stage-buffer (review file anchor)
+(defun sprig-session--open-stage-buffer (review file anchor &optional line)
   "Open the staging buffer for FILE, seeded with ANCHOR, couriering to REVIEW.
 ANCHOR is the region's current text and the `old_string' the courier edit
 will match; the buffer opens in FILE's own major mode but visits nothing,
-so a stray save writes no file."
+so a stray save writes no file.  LINE, when the caller knows it, is where
+ANCHOR starts in FILE, and says which occurrence to change if the anchor
+turns out not to be unique."
   (let ((buf (get-buffer-create "*sprig-stage*")))
     (with-current-buffer buf
       (erase-buffer)
@@ -2840,7 +2847,8 @@ so a stray save writes no file."
       (setq buffer-file-name nil)
       (setq-local sprig-session--stage-target review
                   sprig-session--stage-file file
-                  sprig-session--stage-anchor anchor)
+                  sprig-session--stage-anchor anchor
+                  sprig-session--stage-line line)
       (use-local-map (copy-keymap (or (current-local-map) (make-sparse-keymap))))
       (local-set-key (kbd "C-c C-c") #'sprig-session-stage-apply)
       (local-set-key (kbd "C-c C-k") #'sprig-session-stage-abort)
@@ -2984,6 +2992,7 @@ set (see that variable for the trade-off)."
   (let ((review sprig-session--stage-target)
         (file sprig-session--stage-file)
         (anchor sprig-session--stage-anchor)
+        (line sprig-session--stage-line)
         (new (buffer-substring-no-properties (point-min) (point-max))))
     (unless (buffer-live-p review) (user-error "The session buffer is gone"))
     (when (equal new anchor) (user-error "Nothing changed; edit before staging"))
@@ -2992,16 +3001,18 @@ set (see that variable for the trade-off)."
         (user-error "No live session to send to; send a message first"))
       (if sprig-courier-edits
           (sprig-session--stage-courier file anchor new)
-        (sprig-session--stage-direct file anchor new)))
+        (sprig-session--stage-direct file anchor new line)))
     (quit-window t)
     (message "sprig: sent your edit to %s to apply" (file-name-nondirectory file))))
 
-(defun sprig-session--stage-direct (file anchor new)
+(defun sprig-session--stage-direct (file anchor new &optional line)
   "Ask the agent to apply a hand-authored edit of FILE directly.
 ANCHOR is the region's original text and NEW your edited version; both
 ride in the instruction so the agent writes them with one Edit, in any
-permission mode.  The agent generates the write, so it could drift from
-NEW: the resulting diff is the check.  Run in the session buffer."
+permission mode.  LINE, where the caller knows it, says where ANCHOR
+starts, which is what saves a one-line edit whose text appears elsewhere
+in the file.  The agent generates the write, so it could drift from NEW:
+the resulting diff is the check.  Run in the session buffer."
   (sprig-session--send
    (format "I have hand-authored an edit to `%s' and want it applied exactly \
 as written.  With a single Edit on that file, replace this block verbatim:
@@ -3016,9 +3027,13 @@ with this block verbatim:
 %s
 ```
 
-Reproduce my text character for character: do not reformat, re-indent, \
+%sReproduce my text character for character: do not reformat, re-indent, \
 correct, or improve any of it.  Make only this one edit and nothing else."
-           file anchor new)))
+           file anchor new
+           (if line
+               (format "The block to replace starts at line %d of the file; \
+if that text appears more than once, that is the occurrence I mean.\n\n" line)
+             ""))))
 
 (defun sprig-session--stage-courier (file anchor new)
   "Stage a hand-authored edit of FILE for the tamper-proof courier apply.
