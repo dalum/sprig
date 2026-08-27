@@ -1028,5 +1028,244 @@ and re-reads the tree only when it is fresh or the scope has changed."
       (kill-buffer session)
       (when (get-buffer review) (kill-buffer review)))))
 
+(defconst sprig-review-tests--narrow-diff
+  "diff --git a/blk.py b/blk.py
+--- a/blk.py
++++ b/blk.py
+@@ -10,3 +10,3 @@ def f(a):
+     x = 1
+-    y = 2
++    y = 3
+     return x
+"
+  "What the review renders: three lines of context round one change.")
+
+(defconst sprig-review-tests--wide-diff
+  "diff --git a/blk.py b/blk.py
+--- a/blk.py
++++ b/blk.py
+@@ -8,7 +8,7 @@
+ def f(a):
+     \"doc\"
+     x = 1
+-    y = 2
++    y = 3
+     return x
+ 
+ def g(b):
+"
+  "The same file re-read wide: the whole of `f' and the start of `g'.")
+
+;;;; The block around point
+
+(ert-deftest sprig-review-test-indent-counts-tabs-as-eight ()
+  "Indentation is measured in columns, so a tab-indented file compares
+with a space-indented one; a blank line has no indentation at all."
+  (should (equal (sprig-review--indent "  x") 2))
+  (should (equal (sprig-review--indent "\tx") 8))
+  (should (equal (sprig-review--indent "    \tx") 8))
+  (should (equal (sprig-review--indent "x") 0))
+  (should (null (sprig-review--indent "")))
+  (should (null (sprig-review--indent "   "))))
+
+(ert-deftest sprig-review-test-closer-lines ()
+  "A line of nothing but closing delimiters ends the block it shuts,
+even though it sits back at the opening line's indentation."
+  (should (sprig-review--closer-p "}"))
+  (should (sprig-review--closer-p "  });"))
+  (should (sprig-review--closer-p "end"))
+  (should-not (sprig-review--closer-p "    return 1;"))
+  (should-not (sprig-review--closer-p "} else {")))
+
+(ert-deftest sprig-review-test-block-bounds-lisp ()
+  "In the body of a defun, the block is the defun; on its opening line,
+the block is still the defun and not whatever encloses it."
+  (let ((texts (vconcat '("(defun foo ()"
+                          "  (bar)"
+                          "  (baz))"
+                          ""
+                          "(defun qux ()"
+                          "  (quux))"))))
+    (should (equal (sprig-review--block-bounds texts 1) '(0 2 nil)))
+    (should (equal (sprig-review--block-bounds texts 0) '(0 2 nil)))))
+
+(ert-deftest sprig-review-test-block-bounds-nested ()
+  "A method body gives the method, not the class it sits in: the rule
+stops at the nearest enclosing indentation, not the outermost."
+  (let ((texts (vconcat '("class A:"
+                          "    def f(self):"
+                          "        x = 1"
+                          "    def g(self):"
+                          "        return 2"))))
+    (should (equal (sprig-review--block-bounds texts 2) '(1 2 nil)))
+    (should (equal (sprig-review--block-bounds texts 1) '(1 2 nil)))))
+
+(ert-deftest sprig-review-test-block-bounds-keeps-the-closing-brace ()
+  "A C-like block shuts at its opening line's column, so the brace is
+part of the block rather than the line that ends it."
+  (let ((texts (vconcat '("int f(void) {"
+                          "    return 1;"
+                          "}"
+                          "int g(void) {"
+                          "    return 2;"
+                          "}"))))
+    (should (equal (sprig-review--block-bounds texts 1) '(0 2 nil)))))
+
+(ert-deftest sprig-review-test-block-bounds-flags-the-edge ()
+  "When the read runs out before the code does, the block says so: it is
+the one way this hands you less of the block than there is."
+  (let ((texts (vconcat '("    x = 1"
+                          "    y = 2"))))
+    ;; Nothing less-indented above, nothing at all below.
+    (should (equal (nth 2 (sprig-review--block-bounds texts 0)) t))))
+
+(ert-deftest sprig-review-test-runs-split-at-a-gap ()
+  "Lines the wider read never covered break the run, since the block
+rule may only look at code that was actually read."
+  (let ((lines '((:new 1 :text "a") (:new 2 :text "b")
+                 (:new 9 :text "c") (:new 10 :text "d"))))
+    (should (equal (mapcar #'length (sprig-review--runs lines)) '(2 2)))))
+
+(ert-deftest sprig-review-test-stage-block-reads-wider ()
+  "`e b' re-runs git for the one file with wide context and stages the
+whole block round point, anchored where the block starts."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded args)
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--narrow-diff
+          (setq sprig-review--session session)
+          (cl-letf (((symbol-function 'sprig-review--run-git)
+                     (lambda (_remote _root a)
+                       (setq args a)
+                       sprig-review-tests--wide-diff)))
+            (sprig-review-tests--goto "y = 3")
+            (sprig-review-tests--staging (sprig-review-stage-block)))
+          ;; The wider read is the same read, one file, more context.
+          (should (member "-U400" args))
+          (should (member "--" args))
+          (should (member "blk.py" args))
+          ;; The whole of `f', from its own first line, not the hunk's.
+          (should (equal seeded
+                         (list "blk.py"
+                               "def f(a):\n    \"doc\"\n    x = 1\n    y = 3\n    return x"
+                               8))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-block-memoises-the-read ()
+  "Blocks are staged in runs, so the second one in a file does not pay
+for another round trip."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        (reads 0) seeded)
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--narrow-diff
+          (setq sprig-review--session session)
+          (cl-letf (((symbol-function 'sprig-review--run-git)
+                     (lambda (&rest _)
+                       (cl-incf reads)
+                       sprig-review-tests--wide-diff)))
+            (sprig-review-tests--goto "y = 3")
+            (sprig-review-tests--staging (sprig-review-stage-block))
+            (sprig-review-tests--staging (sprig-review-stage-block))
+            (should (= reads 1))
+            ;; Re-reading the diff moves the tree on, so the cache goes.
+            (sprig-review--reload)
+            (sprig-review-tests--goto "y = 3")
+            (sprig-review-tests--staging (sprig-review-stage-block))
+            (should (= reads 3))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-hunk-verb-takes-the-whole-hunk ()
+  "`e h' takes the hunk however small a thing point is resting on."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with
+          (setq sprig-review--session session)
+          (sprig-review-tests--goto "(baz))")
+          (sprig-review-tests--staging (sprig-review-stage-hunk))
+          (should (equal seeded '("foo.el" "(defun foo ()\n  (baz))" 1))))
+      (kill-buffer session))))
+
+(defconst sprig-review-tests--elisp-narrow-diff
+  "diff --git a/mod.el b/mod.el
+--- a/mod.el
++++ b/mod.el
+@@ -4,3 +4,3 @@ (defun f (x)
+   (let ((y x))
+-    (+ y 1)))
++    (+ y 2)))
+ 
+"
+  "The rendered view of a change inside a Lisp function.")
+
+(defconst sprig-review-tests--elisp-wide-diff
+  "diff --git a/mod.el b/mod.el
+--- a/mod.el
++++ b/mod.el
+@@ -1,7 +1,7 @@
+ (defun f (x)
+   \"Doc line one.
+ A continuation at column zero.\"
+   (let ((y x))
+-    (+ y 1)))
++    (+ y 2)))
+ 
+ (defun g () nil)
+"
+  "The same file read wide.  Its docstring runs to column zero, which is
+what indentation alone reads as the start of a block and a major mode
+reads as what it is.")
+
+(ert-deftest sprig-review-test-defun-bounds-sees-the-docstring ()
+  "The file's own mode bounds a Lisp function correctly through a
+docstring that reaches column zero, where indentation cannot."
+  (let ((texts (vconcat '("(defun f (x)"
+                          "  \"Doc line one."
+                          "A continuation at column zero.\""
+                          "  (let ((y x))"
+                          "    (+ y 2)))"
+                          ""
+                          "(defun g () nil)"))))
+    (should (equal (sprig-review--defun-bounds texts 4 "mod.el") '(0 . 4)))
+    (should (equal (sprig-review--defun-bounds texts 0 "mod.el") '(0 . 4)))))
+
+(ert-deftest sprig-review-test-defun-bounds-declines-without-a-mode ()
+  "With no major mode to ask, it says so rather than guessing, and the
+caller falls back to the indentation rule."
+  (let ((texts (vconcat '("alpha" "beta"))))
+    (should (null (sprig-review--defun-bounds texts 0 "no-such.zzzz")))))
+
+(ert-deftest sprig-review-test-stage-defun-takes-the-whole-function ()
+  "`e d' stages the function around point, from its own first line."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--elisp-narrow-diff
+          (setq sprig-review--session session)
+          (cl-letf (((symbol-function 'sprig-review--run-git)
+                     (lambda (&rest _) sprig-review-tests--elisp-wide-diff)))
+            (sprig-review-tests--goto "(+ y 2)")
+            (sprig-review-tests--staging (sprig-review-stage-defun)))
+          (should (equal (nth 0 seeded) "mod.el"))
+          (should (equal (nth 2 seeded) 1))
+          (should (string-prefix-p "(defun f (x)" (nth 1 seeded)))
+          (should (string-suffix-p "(+ y 2)))" (nth 1 seeded))))
+      (kill-buffer session))))
+
+(ert-deftest sprig-review-test-stage-block-climbs-levels ()
+  "One level is the innermost form round point; another climbs out of it."
+  (let ((session (get-buffer-create "*sprig-review-test-session*"))
+        seeded)
+    (unwind-protect
+        (sprig-review-tests--with-diff sprig-review-tests--elisp-narrow-diff
+          (setq sprig-review--session session)
+          (cl-letf (((symbol-function 'sprig-review--run-git)
+                     (lambda (&rest _) sprig-review-tests--elisp-wide-diff)))
+            (sprig-review-tests--goto "(+ y 2)")
+            (sprig-review-tests--staging (sprig-review-stage-block 1))
+            (should (equal (nth 1 seeded) "  (let ((y x))\n    (+ y 2)))"))
+            (should (equal (nth 2 seeded) 4))))
+      (kill-buffer session))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

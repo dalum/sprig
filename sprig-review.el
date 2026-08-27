@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.8.0
+;; Version: 0.9.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -17,7 +17,7 @@
 ;;   d          open the review over the session's working tree
 ;;   n / p      walk the changed files; TAB folds one away
 ;;   c c        comment on the line at point, or on the region
-;;   e          hand-author the line, region, or hunk, rather than describe it
+;;   e          hand-author a line, block, or function, rather than describe it
 ;;   c p        publish: every draft, comments and edits, in one turn
 ;;   Q          quiz yourself on the change before you sign it off
 ;;
@@ -116,6 +116,19 @@ needs no configuration at all."
   :type '(repeat string)
   :group 'sprig)
 
+(defcustom sprig-review-block-context 400
+  "Lines of context `e b' re-reads a file with, to find the block round point.
+The review's own diff is read with git's default three lines of context,
+which is right for reading a change and far too little for editing one: a
+function almost always runs past its own hunk.  So `e b' re-runs `git
+diff' for that one file with this many lines of context and finds the
+block in the result.  It is the same read the review already does, over
+the same transport, so it needs nothing new to work on a remote tree; a
+larger number is one bigger round trip and nothing else, and git clamps it
+to the file."
+  :type 'integer
+  :group 'sprig)
+
 (defcustom sprig-review-quote-lines 6
   "How many annotated lines a published comment quotes back at the agent.
 A comment cites its line numbers exactly, but numbers alone are brittle
@@ -195,6 +208,13 @@ and an edit is a comment you were too impatient to phrase.")
 
 (defvar-local sprig-review--next-id 1
   "Counter handing each draft comment an id unique within the buffer.")
+
+(defvar-local sprig-review--wide-cache nil
+  "Memoises the wide re-reads `e b' does, keyed by (FILE . BASE).
+One `e b' is one `git diff' for one file, which is a round trip on a
+remote tree; blocks are usually staged in runs, so the second one in a
+file should not pay it again.  Dropped whenever the diff is re-read,
+since the file has moved on by then.")
 
 (defvar-local sprig-review--expanded nil
   "Files whose section the reader has unfolded.
@@ -835,6 +855,8 @@ KEEP-POINT holds the reading position across the redraw: the same diff
 line under point, and the same files open (see `sprig-review--expanded\=')."
   (let ((redraw
          (lambda ()
+           ;; The wide re-reads describe the tree as it was; it has moved.
+           (setq sprig-review--wide-cache nil)
            (setq sprig-review--changes
                  (sprig-parse-diff (sprig-review--git sprig-review--remote
                                                       sprig-review--root))
@@ -1126,6 +1148,226 @@ yourself, `c m' sends a plain message"))
       (when (= (buffer-size) 0)
         (insert (format "%s on the changes below." label))))))
 
+;;;; The block around point
+;;
+;; `e b' stages more code than the diff shows, which needs more code than
+;; the diff shows.  It gets it the way the review gets everything else: by
+;; running `git diff' again, for that one file, with a wide `-U'.  Not by
+;; reading the file, which would need a second transport for a remote tree
+;; and a second answer to the question of what Sprig is allowed to touch.
+;; The wider read comes back through the same parser with the same
+;; new-side line numbers, so nothing downstream can tell the difference.
+;;
+;; What bounds the block is indentation, and nothing else: no major mode,
+;; no defun motion, no parser.  That is honest about what it is (a block,
+;; not a claim about syntax) and it works the same in every language that
+;; indents conventionally.  You see the block in the staging buffer before
+;; you touch it, which is the check on the heuristic.
+
+(defun sprig-review--wide-change (file)
+  "Return FILE's change, re-read with `sprig-review-block-context' context.
+Nil when the wider read no longer shows the file at all.  Memoised in
+`sprig-review--wide-cache'."
+  (unless sprig-review--wide-cache
+    (setq sprig-review--wide-cache (make-hash-table :test 'equal)))
+  (let* ((key (cons file sprig-review-base))
+         (hit (gethash key sprig-review--wide-cache 'miss)))
+    (when (eq hit 'miss)
+      (setq hit (sprig-review--change-for
+                 file
+                 (sprig-parse-diff
+                  (sprig-review--run-git
+                   sprig-review--remote sprig-review--root
+                   (append (sprig-review--diff-args sprig-review-base)
+                           (list (format "-U%d" sprig-review-block-context)
+                                 "--" file))))))
+      (puthash key hit sprig-review--wide-cache))
+    hit))
+
+(defun sprig-review--runs (lines)
+  "Split LINES into runs consecutive on the new side, in order.
+A wide read still comes back in pieces when a file changes in two places
+further apart than the context reaches, and a piece is all the block rule
+may look at: the lines between two pieces were never read, so nothing
+here knows them."
+  (let (runs cur)
+    (dolist (l lines)
+      (if (and cur (= (plist-get l :new) (1+ (plist-get (car cur) :new))))
+          (push l cur)
+        (when cur (push (nreverse cur) runs))
+        (setq cur (list l)))) 
+    (when cur (push (nreverse cur) runs))
+    (nreverse runs)))
+
+(defun sprig-review--indent (text)
+  "Return TEXT's indentation in columns, or nil when TEXT is blank.
+A tab counts to the next multiple of eight, so a tab-indented file
+measures the same as a space-indented one and the two can be compared."
+  (let ((col 0) (i 0) (n (length text)) (code nil))
+    (while (and (not code) (< i n))
+      (pcase (aref text i)
+        (?\s (setq col (1+ col)) (setq i (1+ i)))
+        (?\t (setq col (* 8 (1+ (/ col 8)))) (setq i (1+ i)))
+        (_ (setq code t))))
+    (and code col)))
+
+(defun sprig-review--closer-p (text)
+  "Non-nil when TEXT is nothing but closing delimiters.
+A C-like language shuts a block with a brace back at the *opening* line's
+indentation, so the line that would end the block by indentation alone is
+the last line of it.  Matching bare closers catches that without
+pretending to parse the language."
+  (string-match-p "\\`[ \t]*\\(?:[]})]+[ \t]*[;,]?\\|end\\)[ \t]*\\'" text))
+
+(defun sprig-review--code-line (texts k step)
+  "Return the index of the first non-blank line from K along STEP, or nil."
+  (let ((n (length texts)) (hit nil))
+    (while (and (null hit) (>= k 0) (< k n))
+      (if (sprig-review--indent (aref texts k))
+          (setq hit k)
+        (setq k (+ k step))))
+    hit))
+
+(defun sprig-review--walk-up (texts start)
+  "Return the nearest index above START indented less than it, or nil."
+  (let ((col (or (sprig-review--indent (aref texts start)) 0))
+        (k (1- start))
+        (hit nil))
+    (while (and (>= k 0) (null hit))
+      (let ((c (sprig-review--indent (aref texts k))))
+        (when (and c (< c col)) (setq hit k)))
+      (setq k (1- k)))
+    hit))
+
+(defun sprig-review--block-bounds (texts i &optional levels)
+  "Return (START END EDGE), indices into TEXTS, bounding the block around I.
+The block starts at the nearest line indented less than I, or at I itself
+when I opens a block of its own, which is what puts point on a `defun'
+line inside that defun rather than inside its parent.  It ends before the
+next line back at the starting indentation, or at that line when the line
+is nothing but closing delimiters.  Trailing blank lines belong to
+whatever comes next, so they are trimmed.
+
+LEVELS, default 1, is how many indentation levels to climb.  Nesting is
+what indentation measures, so in a deeply nested language the first level
+is the innermost enclosing form rather than the whole function; climbing
+another level is how you say you meant the function.
+
+EDGE is non-nil when a boundary was the end of TEXTS rather than a line
+of code: the block runs past what was read, so the caller has been handed
+less of it than there is."
+  (let* ((n (length texts))
+         (i (or (sprig-review--code-line texts i 1)
+                (sprig-review--code-line texts i -1)
+                i))
+         (col (or (sprig-review--indent (aref texts i)) 0))
+         (below (sprig-review--code-line texts (1+ i) 1))
+         (opens (and below (> (sprig-review--indent (aref texts below)) col)))
+         (start i)
+         (open-found opens))
+    (unless opens
+      (when-let ((up (sprig-review--walk-up texts i)))
+        (setq start up open-found t)))
+    ;; Every level after the first climbs from where the last one landed.
+    (dotimes (_ (max 0 (1- (or levels 1))))
+      (if-let ((up (sprig-review--walk-up texts start)))
+          (setq start up)
+        (setq open-found nil)))
+    (let* ((bcol (or (sprig-review--indent (aref texts start)) 0))
+           (end (1- n))
+           (close-found nil)
+           (k (1+ start)))
+      (while (and (< k n) (not close-found))
+        (let ((c (sprig-review--indent (aref texts k))))
+          (when (and c (<= c bcol))
+            (setq end (if (sprig-review--closer-p (aref texts k)) k (1- k))
+                  close-found t)))
+        (setq k (1+ k)))
+      (while (and (> end start)
+                  (null (sprig-review--indent (aref texts end))))
+        (setq end (1- end)))
+      (list start end (not (and open-found close-found))))))
+
+(defun sprig-review--defun-bounds (texts i file)
+  "Return (START . END), indices into TEXTS, for the defun around line I.
+Nil when FILE's major mode has no notion of one, or when the defun it
+finds does not contain I after all.  The mode is the one thing here that
+can tell a string from structure, which is exactly what the indentation
+rule cannot do: a docstring line at column zero looks like the start of a
+block to it, and in Lisp that is most functions.  So this is what `e d'
+uses and `e b' is the fallback, rather than the other way round.
+
+The mode runs over the reconstructed text in a temp buffer with its hooks
+delayed and file-local variables off: this is a measurement, not a visit."
+  (with-temp-buffer
+    (insert (mapconcat #'identity texts "\n"))
+    (let ((buffer-file-name file)
+          (enable-local-variables nil))
+      (delay-mode-hooks (ignore-errors (set-auto-mode t))))
+    (unless (eq major-mode 'fundamental-mode)
+      (goto-char (point-min))
+      (forward-line i)
+      (let (start end)
+        (ignore-errors
+          (end-of-defun)
+          ;; `end-of-defun' lands on the line after; step back off it.
+          (setq end (line-number-at-pos (if (bolp) (max 1 (1- (point))) (point))))
+          (beginning-of-defun)
+          (setq start (line-number-at-pos)))
+        (when (and start end (<= start (1+ i)) (>= end (1+ i)))
+          (cons (1- start) (1- end)))))))
+
+(defun sprig-review--block-line ()
+  "Return (FILE . LINE) naming the new-side line `e b' bounds a block from.
+A removed line is in no file, so it stands for the first line of its hunk
+that is."
+  (let* ((l (or (sprig-review--line-at)
+                (user-error "Point is not on a line of the diff")))
+         (file (plist-get l :file))
+         (n (or (plist-get l :new)
+                (car (delq nil
+                           (mapcar (lambda (x) (plist-get x :new))
+                                   (plist-get (sprig-review--hunk-at
+                                               (magit-current-section))
+                                              :lines))))
+                (user-error "Nothing on this line is in the file to edit"))))
+    (cons file n)))
+
+(defun sprig-review--stage-block-target (&optional levels defun)
+  "Return (FILE TEXT LINE EDGE) for the block around point, LEVELS out.
+Re-reads FILE with wide context, keeps the run of lines that read gave
+around point, and bounds the block within it.  With DEFUN, the file's own
+major mode bounds it instead (see `sprig-review--defun-bounds'), falling
+back to indentation when the mode has nothing to say.
+
+EDGE means the block reaches the end of what was read rather than a line
+of code, so there may be more of it than you were handed."
+  (pcase-let* ((`(,file . ,n) (sprig-review--block-line))
+               (change (or (sprig-review--wide-change file)
+                           (user-error "A wider read no longer shows %s" file)))
+               (run (or (seq-find
+                         (lambda (r)
+                           (and (<= (plist-get (car r) :new) n)
+                                (>= (plist-get (car (last r)) :new) n)))
+                         (sprig-review--runs
+                          (sprig-review--change-lines change 'new)))
+                        (user-error "The wider read does not cover line %d" n)))
+               (texts (vconcat (mapcar (lambda (l) (plist-get l :text)) run)))
+               (i (- n (plist-get (car run) :new)))
+               (`(,start ,end ,edge)
+                 (or (and defun
+                          (when-let ((b (sprig-review--defun-bounds
+                                         texts i file)))
+                            (list (car b) (cdr b)
+                                  (or (and (= (car b) 0)
+                                           (> (plist-get (car run) :new) 1))
+                                      (= (cdr b) (1- (length texts)))))))
+                     (sprig-review--block-bounds texts i levels))))
+    (list file
+          (mapconcat #'identity (seq-subseq texts start (1+ end)) "\n")
+          (plist-get (nth start run) :new)
+          edge)))
+
 ;;;; Plain messages, and hand-authoring
 
 (defun sprig-review-message (&optional queue)
@@ -1166,8 +1408,8 @@ spans with a gap between them are not one `old_string'."
          (ns (mapcar (lambda (l) (plist-get l :new)) kept)))
     (when kept
       (unless (equal ns (number-sequence (car ns) (car (last ns))))
-        (user-error "That selection skips a gap in the file; \
-take one hunk at a time"))
+        (user-error "That selection skips a gap the diff never showed; \
+take one hunk at a time, or `e b' to read across it"))
       (cons (mapconcat (lambda (l) (plist-get l :text)) kept "\n")
             (car ns)))))
 
@@ -1285,6 +1527,13 @@ applied somewhere it no longer fits."
       (sprig-review--render-in-place)))
   (message "sprig: edit filed as a draft; `c p' publishes the review"))
 
+(defun sprig-review--stage-guard ()
+  "Signal a `user-error' unless this buffer can stage an edit."
+  (unless (derived-mode-p 'sprig-review-mode)
+    (user-error "Not in a sprig review buffer"))
+  (unless (buffer-live-p sprig-review--session)
+    (user-error "The session this review belongs to is gone")))
+
 (defun sprig-review--open-stage (file anchor line &optional id seed)
   "Open the staging buffer on ANCHOR of FILE at LINE, filing back as draft ID.
 SEED, when given, is put in the buffer instead of ANCHOR: re-editing a
@@ -1315,16 +1564,84 @@ failing those the hunk around point.
 an edit is a review comment you were too impatient to phrase, so it is
 composed with the rest of the review rather than sent on its own."
   (interactive)
-  (unless (derived-mode-p 'sprig-review-mode)
-    (user-error "Not in a sprig review buffer"))
-  (unless (buffer-live-p sprig-review--session)
-    (user-error "The session this review belongs to is gone"))
+  (sprig-review--stage-guard)
   (pcase-let ((`(,file ,text ,line) (sprig-review--stage-target)))
     (when (use-region-p) (deactivate-mark))
     (sprig-review--open-stage file text line)))
 
-(define-obsolete-function-alias 'sprig-review-stage-hunk
-  'sprig-review-stage "0.52.0")
+(defun sprig-review-stage-hunk ()
+  "Hand-author the whole hunk point is in (`e h').
+The widest thing the diff itself can give you, and the one `e' used to
+take by default; `e b' goes wider by reading wider."
+  (interactive)
+  (sprig-review--stage-guard)
+  (pcase-let ((`(,file ,text ,line)
+               (sprig-review--stage-hunk-target (magit-current-section))))
+    (sprig-review--open-stage file text line)))
+
+(defun sprig-review--report-block (text line edge)
+  "Say how much TEXT was staged, from LINE, and whether EDGE cut it short.
+How much you were handed is the check on a heuristic, so it is said out
+loud rather than left for you to count."
+  (let ((n (1+ (cl-count ?\n text))))
+    (message "sprig: %d line%s from line %d%s"
+             n (if (= n 1) "" "s") line
+             (if edge
+                 "; runs to the end of what was read, so there may be more"
+               ""))))
+
+(defun sprig-review-stage-block (&optional levels)
+  "Hand-author the block of code around point (`e b').
+The diff shows three lines of context, so the hunk you are reading is
+usually part of a function rather than one.  This re-reads that one file
+with `sprig-review-block-context' lines of context, the same `git diff'
+over the same transport, and hands you the block point sits in, bounded
+by indentation: the nearest line indented less than point, down to the
+next line back at that indentation.
+
+Indentation measures nesting, so in a language that nests deeply the
+block is the innermost form around point rather than the whole function.
+A numeric argument climbs that many levels instead of one, for when the
+innermost form is not the unit you meant.  To ask for a whole function,
+though, `e d' is the better verb: it reads the file's own major mode
+rather than counting columns, so a docstring cannot mislead it.
+
+It is a heuristic and says so.  You see the block in the staging buffer
+before you touch it, which is the check; if it looks cut off at the top or
+bottom, raise `sprig-review-block-context'."
+  (interactive "p")
+  (sprig-review--stage-guard)
+  (pcase-let ((`(,file ,text ,line ,edge)
+               (sprig-review--stage-block-target levels)))
+    (sprig-review--open-stage file text line)
+    (sprig-review--report-block text line edge)))
+
+(defun sprig-review-stage-defun ()
+  "Hand-author the whole function around point (`e d').
+Like `e b', but the file's own major mode decides where the function
+starts and ends, so a docstring or a comment at column zero does not
+mislead it the way indentation alone does.  Falls back to `e b'\='s rule
+when the mode has no notion of a defun."
+  (interactive)
+  (sprig-review--stage-guard)
+  (pcase-let ((`(,file ,text ,line ,edge)
+               (sprig-review--stage-block-target 1 t)))
+    (sprig-review--open-stage file text line)
+    (sprig-review--report-block text line edge)))
+
+(transient-define-prefix sprig-review-stage-dispatch ()
+  "Write a piece of the change yourself, instead of describing it.
+Every route fills the same staging buffer, in the file's own major mode,
+and `C-c C-c' there files what you wrote as a draft alongside your
+comments.  They differ only in how much they hand you."
+  [["Write it yourself"
+    ("e" "what you are pointing at (region, mark, or line)"
+     sprig-review-stage)
+    ("h" "the whole hunk" sprig-review-stage-hunk)
+    ("b" "the block around point (C-u N climbs N levels out)"
+     sprig-review-stage-block)
+    ("d" "the whole function around point (asks the file's mode)"
+     sprig-review-stage-defun)]])
 
 ;;;; Visiting and refreshing
 
@@ -1365,7 +1682,7 @@ composed with the rest of the review rather than sent on its own."
     (define-key map (kbd "c")       #'sprig-review-dispatch)
     (define-key map (kbd "C-c C-c") #'sprig-review-publish)
     (define-key map (kbd "k")       #'sprig-review-comment-delete)
-    (define-key map (kbd "e")       #'sprig-review-stage)
+    (define-key map (kbd "e")       #'sprig-review-stage-dispatch)
     (define-key map (kbd "b")       #'sprig-review-set-base)
     (define-key map (kbd "Q")       #'sprig-quiz)
     (define-key map (kbd "g")       #'sprig-review-refresh)
@@ -1393,9 +1710,10 @@ Move with \\`n' / \\`p', \\`g' re-reads the diff, and
 
 \\`b' changes what the review diffs against, carrying the drafts across.
 
-\\`e' hand-authors the code instead of describing it: the region, the
-hunk you marked, or the line point is on, opened in the file's own major
-mode and filed as a draft like a comment.  \\`C-c C-c' publishes, the way
+\\`e' hand-authors the code instead of describing it, opened in the
+file's own major mode and filed as a draft like a comment: \\`e e' takes
+what point names, \\`e h' the hunk, and \\`e b' / \\`e d' the block or
+function around point, which are read wider than the diff shows.  \\`C-c C-c' publishes, the way
 it sends everywhere else in sprig.
 
 Nothing here writes to the repository: publishing is an instruction to the

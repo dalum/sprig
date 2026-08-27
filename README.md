@@ -210,6 +210,19 @@ It opens as the list of changed files, one line each with its stat, folded. That
 
 Two things it will not do. A selection spanning two hunks is refused rather than staged: git showed you neither the lines between them nor how many, so the two spans are not one block any `Edit` could match. And a selection of pure removals has nothing on disk to anchor to, which it says instead of staging an empty buffer. Because the review reads its line numbers from git, the instruction also names the line the block starts at. That is what makes the one-line default safe: a lone `}` is not unique in any file, but the line it sits on is.
 
+**`e` is a transient, because the diff is not the only grain.** `e e` is the default above. `e h` takes the whole hunk without your having to find its `@@` line first. And two verbs go *wider than the diff shows*, which needs more code than the diff shows:
+
+| Verb | Takes | Bounded by |
+|---|---|---|
+| `e e` | region, marked hunk, else the line | the diff |
+| `e h` | the whole hunk | the diff |
+| `e b` | the block around point | indentation, over a wider read |
+| `e d` | the whole function around point | the file's own major mode, over a wider read |
+
+**Wider means asking git again, not reading the file.** `e b` and `e d` re-run `git diff` for that one file with `sprig-review-block-context` lines of context (400 by default) and find the block in the result. It is the same read the review already does, over the same transport, so it needs nothing new to work on a remote tree, and it comes back through the same parser with the same line numbers, so nothing downstream can tell the difference. One round trip per file, memoised for as long as the diff stands, and dropped on `g`.
+
+**What bounds it, and how honestly.** `e b` reads indentation and nothing else: the nearest line indented less than point, down to the next line back at that indentation, keeping a closing brace that sits at the opening line's column. No mode, no parser, so it works the same in any language that indents conventionally. Indentation measures *nesting*, though, so in a deeply nested language the block is the innermost form rather than the function; `C-u N e b` climbs N levels out. `e d` is the answer when you want the function as such: it runs the file's own major mode over the same text and asks it, which is the one way to tell a docstring at column zero from the start of a block. It falls back to `e b`'s rule when the mode has no notion of a defun. Either way you are told how many lines you were handed, and told when the block ran to the end of what was read rather than to a line of code.
+
 `c m` is the other escape hatch: a plain message about the marked hunks, for feedback about the change as a whole rather than a line of it.
 
 **What it diffs against.** Three scopes, and the summary line at the top always says which one it is showing, next to the file count and the total stat.
@@ -305,6 +318,7 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-review-base` | `"HEAD"` | Default scope of the `d` changeset review. `"HEAD"` = uncommitted changes; a branch name = the whole branch from the merge base, commits and uncommitted work (`d m` picks this per review); anything with `..` goes to `git diff` verbatim. Buffer-local once `b` changes it |
 | `sprig-review-fontify-code` | `t` | Syntax-highlight reviewed code in each file's own major mode, and move the added/removed colour to the line-number gutter. Nil colours the whole line instead |
 | `sprig-review-default-branches` | `("main" "master" "trunk" "develop" "default")` | Names `d m` looks for as the default branch, best first, local and remote-tracking. A tie is broken by `origin/HEAD`, not by this order |
+| `sprig-review-block-context` | `400` | Lines of context `e b` / `e d` re-read a file with, to find the block or function around point. The review itself reads at git's default 3, which is right for reading and too little for editing |
 | `sprig-review-quote-lines` | `6` | Lines a published comment quotes back at the agent before truncating with an ellipsis |
 | `sprig-session-timestamp-format` | `"%H:%M"` | `format-time-string` format for the left-margin timestamp on each block, in local time (nil = no timestamps, no margin) |
 | `sprig-session-fontify-markdown` | `t` | Fontify review prose with `markdown-mode` faces when it is installed |

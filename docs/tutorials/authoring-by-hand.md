@@ -37,6 +37,23 @@ It widens to the whole hunk only where there is no line to take: the `@@`
 heading, a file heading, or a removed line, which is not in the file to begin
 with.
 
+`e` is a transient, so there are three other routes when the line is not the
+grain you want:
+
+- **`e h`** — the whole hunk, without having to find its `@@` line first.
+- **`e b`** — the block around point. The diff shows three lines of context, so
+  the hunk you are reading is usually part of a function rather than one; this
+  re-runs `git diff` for that file with far more context (`sprig-review-block-context`)
+  and bounds the block by indentation. `C-u N e b` climbs N levels out.
+- **`e d`** — the whole function around point, bounded by the file's own major
+  mode rather than by indentation, which is the only way to tell a docstring at
+  column zero from the start of a block.
+
+The wider reads are still `git diff`, over the transport the review already
+uses, so they work on a remote tree with nothing extra and come back with the
+same line numbers. Each says how many lines it handed you, and says so when the
+block ran to the end of what was read rather than to a line of code.
+
 Two selections it refuses, because neither is a block the agent could match.
 One spanning two hunks: git showed you neither the lines between them nor how
 many, so the two spans are not one block. And one of pure removals: those lines
