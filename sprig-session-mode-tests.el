@@ -446,6 +446,21 @@ the fold learns the id from the result rather than from the call."
           (should (equal (sprig-session-tests--margins) nil))
           (should (= left-margin-width 0)))))))
 
+(defmacro sprig-session-tests--connected (&rest body)
+  "Run BODY with this buffer holding a live session to speak to.
+The waiting state line offers `a a' only where there is one (see
+`sprig-session--connected-p'), and a temp buffer has none; a pipe process
+stands in for the CLI, being live and costing no external program."
+  (declare (indent 0))
+  `(let ((proc (make-pipe-process :name "sprig-test-session" :noquery t)))
+     (unwind-protect
+         (progn (setq-local sprig--process proc)
+                ;; The state line is drawn, so redraw it under the connection.
+                (sprig-session--refresh)
+                ,@body)
+       (delete-process proc)
+       (setq-local sprig--process nil))))
+
 (defun sprig-session-tests--state-line ()
   "Return the buffer's last line, which is the state line, and its face."
   (save-excursion
@@ -767,8 +782,13 @@ the fold learns the id from the result rather than from the call."
       ;; It says how to answer, rather than pretending to be pickable.
       (should (string-match-p "a a to answer" s)))
     ;; Waiting beats working: the turn is stopped, not running.
-    (should (equal (sprig-session-tests--state-line)
-                   '("?  waiting on you  ·  a a to answer" . sprig-session-waiting)))))
+    (sprig-session-tests--connected
+      (should (equal (sprig-session-tests--state-line)
+                     '("?  waiting on you  ·  a a to answer" . sprig-session-waiting))))
+    ;; Detached, the question stands but `a a' has nothing to answer into.
+    (sprig-session--refresh)
+    (should (equal (car (sprig-session-tests--state-line))
+                   "?  waiting on you  ·  reconnect to answer"))))
 
 (ert-deftest sprig-session-mode-test-answered-dialog-shows-the-answer ()
   (with-temp-buffer
@@ -799,7 +819,9 @@ the fold learns the id from the result rather than from the call."
     (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
                                 (sprig-session-tests--dialog-input)))
     (sprig-session-flush)
-    (should (equal (car (sprig-session-tests--state-line)) "?  waiting on you  ·  a a to answer"))
+    (sprig-session-tests--connected
+      (should (equal (car (sprig-session-tests--state-line))
+                     "?  waiting on you  ·  a a to answer")))
     (sprig-session-consume '(done 0.01 nil))
     (sprig-session-flush)
     ;; The turn is over, and says so.
@@ -987,8 +1009,9 @@ the fold learns the id from the result rather than from the call."
       ;; What you are being asked to allow, not just that you are.
       (should (string-match-p "rm -rf /tmp/scratch" s))
       (should (string-match-p "a a to allow or deny" s)))
-    (should (equal (car (sprig-session-tests--state-line))
-                   "?  waiting on you  ·  a a to answer"))))
+    (sprig-session-tests--connected
+      (should (equal (car (sprig-session-tests--state-line))
+                     "?  waiting on you  ·  a a to answer")))))
 
 (ert-deftest sprig-session-mode-test-permission-allow-and-deny ()
   (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)

@@ -3762,6 +3762,16 @@ without a real SSH process."
                           (sprig--status-state-line '(:status idle) '(:error t))))
   (should (string-match-p "waiting on you"
                           (sprig--status-state-line '(:status idle) '(:pending t))))
+  ;; A question standing in a buffer whose session is gone is nobody's to
+  ;; answer: the model keeps it (the CLI may still be blocked on it on its
+  ;; host), so the row says so only while the broker still holds the session.
+  (should-not (string-match-p
+               "waiting on you"
+               (sprig--status-state-line '(:status disconnected) '(:pending t))))
+  (should (string-match-p
+           "waiting on you"
+           (sprig--status-state-line '(:status disconnected :live t)
+                                     '(:pending t))))
   ;; A notable permission mode rides the state line; an everyday one does not.
   (let ((l (sprig--status-state-line '(:status idle) '(:done t :mode "plan"))))
     (should (string-match-p "turn over" l))

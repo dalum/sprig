@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.39.0
+;; Version: 0.40.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1256,6 +1256,12 @@ read, and a dialog is a question put to you, which wants the same air."
 ;; waiting on, so the buffer says so, instead of leaving you to notice
 ;; that nothing has moved for a while.
 
+(defun sprig-session--connected-p ()
+  "Non-nil when this buffer has a live session to speak to.
+The transport's own flag (`sprig--process'), read defensively: the state
+line renders in buffers that never owned a session at all."
+  (and (boundp 'sprig--process) (process-live-p sprig--process)))
+
 (defun sprig-session--state (model)
   "Return (GLYPH TEXT FACE) for what is going on in MODEL, or has just ended.
 The glyph, word, and face are `sprig--state-parts', shared with the
@@ -1289,7 +1295,14 @@ is added here."
           (t 'idle))))
     (pcase-let ((`(,glyph ,text ,face) (sprig--state-parts state)))
       (when (eq state 'waiting)
-        (setq text (concat text "  ·  a a to answer")))
+        ;; The question can outlive this buffer's connection to the session
+        ;; that asked it: a dropped link, or a session the broker still holds
+        ;; that nothing here is attached to.  It is still waiting on you, and
+        ;; the block is right to stand, but `a a' would answer into a process
+        ;; that is gone, so say what actually moves it along.
+        (setq text (concat text (if (sprig-session--connected-p)
+                                    "  ·  a a to answer"
+                                  "  ·  reconnect to answer"))))
       (list glyph text face))))
 
 (defun sprig-session--insert-state (model)

@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.53.0
+;; Version: 0.54.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -4804,7 +4804,17 @@ say)."
             (sprig--state-parts
              (cond
               ((eq status 'streaming) 'streaming)
-              ((or (eq status 'waiting) (plist-get preview :pending)) 'waiting)
+              ;; `:pending' is an open buffer's own model, and that outlives
+              ;; the process that asked: a session whose link dropped leaves
+              ;; the question standing here though nothing is blocked on it
+              ;; any more.  So a disconnected row is taken at its word unless
+              ;; the broker still holds the session, where the CLI really is
+              ;; waiting and reconnecting hands you the prompt again.
+              ((or (eq status 'waiting)
+                   (and (plist-get preview :pending)
+                        (or (not (eq status 'disconnected))
+                            (plist-get entry :live))))
+               'waiting)
               ((plist-get preview :error) 'failed)
               ((or (eq status 'agent) (plist-get preview :agent-running)) 'agent)
               ((plist-get preview :done) 'done)
