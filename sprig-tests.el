@@ -4299,6 +4299,25 @@ without a real SSH process."
     (should (plist-get (car (plist-get model :blocks)) :answered))
     (should-not (sprig-session-pending-dialog model))))
 
+(ert-deftest sprig-session-test-redelivered-dialog-folds-into-one ()
+  ;; Reattaching to a session the CLI is still blocked on re-delivers its
+  ;; prompt under the same id, and the buffer's events outlive the
+  ;; disconnect, so the same question is folded twice.  It must land on one
+  ;; block: pushing a twin left the first unanswered for good (an answer
+  ;; settles the one block it finds), and the session then read `waiting on
+  ;; you' with no question on screen.
+  (let* ((input '((questions . [((question . "Which?")
+                                 (options . [((label . "A"))]))])))
+         (model (sprig-session-build
+                 `((dialog "req-1" "ask_user_question" ,input)
+                   (dialog "req-1" "ask_user_question" ,input)
+                   (dialog-answer "req-1" ((Which? . "A"))))))
+         (dialogs (seq-filter (lambda (b) (eq (plist-get b :type) 'dialog))
+                              (plist-get model :blocks))))
+    (should (= 1 (length dialogs)))
+    (should (plist-get (car dialogs) :answered))
+    (should-not (sprig-session-pending-dialog model))))
+
 (ert-deftest sprig-test-user-question-does-not-block-the-filter ()
   ;; The control request is handled inside the process filter.  Prompting
   ;; there held the filter, and Emacs with it, until the question was

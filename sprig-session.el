@@ -1,7 +1,7 @@
 ;;; sprig-session.el --- Session model and stored-log reader for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.33.0
+;; Version: 0.34.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -410,9 +410,19 @@ may be carried across calls to continue a fold (see
            (plist-put step :result (list :error is-error :text rtext))))
         (`(dialog ,id ,kind ,input)
          (setq open nil)
-         (push (list :type 'dialog :id id :kind kind :input input
-                     :answered nil :answers nil :time time)
-               blocks))
+         ;; A prompt can arrive twice under one id: reattaching to a session
+         ;; the CLI is still blocked on re-delivers it (see the broker's
+         ;; `reattach_offset'), and the buffer's events outlive the
+         ;; disconnect.  Fold the repeat into the block already standing
+         ;; rather than pushing a twin: an answer settles the one block it
+         ;; finds, so a twin would stay unanswered for good and keep the
+         ;; session reading `waiting on you' with no question on screen.
+         (if-let ((blk (sprig-session--find-dialog blocks id)))
+             (progn (plist-put blk :kind kind)
+                    (plist-put blk :input input))
+           (push (list :type 'dialog :id id :kind kind :input input
+                       :answered nil :answers nil :time time)
+                 blocks)))
         (`(dialog-answer ,id ,answers)
          (setq open nil)
          (when-let ((blk (sprig-session--find-dialog blocks id)))
