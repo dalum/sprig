@@ -1370,5 +1370,112 @@ which is what every Lisp and every C-like language writes instead."
               "(defun foo ()" "  (bar))")))
     (should (equal '(2 . 5) (sprig-review--defun-bounds el 5 "/tmp/x.el")))))
 
+;;;; Where the session is (`d w')
+
+(defmacro sprig-review-tests--rev-parse (out &rest body)
+  "Run BODY with `git rev-parse' answering OUT and every other call empty.
+OUT nil makes the call fail the way it does in a repository with no
+commits, or outside one altogether."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'sprig-review--run-git)
+              (lambda (_remote _dir args)
+                (if (equal (car args) "rev-parse")
+                    (or ,out (error "git rev-parse failed"))
+                  ""))))
+     ,@body))
+
+(ert-deftest sprig-review-test-tree-facts-reads-a-plain-checkout ()
+  "One `rev-parse' names the top level and the branch.  A checkout that is
+not a worktree reads `.git' for both git dirs, so there is no main to name."
+  (sprig-review-tests--rev-parse "/home/me/proj\n.git\n.git\nmain\n"
+    (let ((facts (sprig-review--tree-facts nil "/home/me/proj")))
+      (should (equal "/home/me/proj" (plist-get facts :root)))
+      (should (equal "main" (plist-get facts :branch)))
+      (should-not (plist-get facts :main)))))
+
+(ert-deftest sprig-review-test-tree-facts-names-the-main-checkout ()
+  "A linked worktree is the case where the two git dirs part company, and
+the checkout it was added from is the common one with its `/.git' removed."
+  (sprig-review-tests--rev-parse
+      (concat "/home/me/proj/.worktrees/x\n/home/me/proj/.git\n"
+              "/home/me/proj/.git/worktrees/x\nfeature/x\n")
+    (let ((facts (sprig-review--tree-facts nil "/home/me/proj/.worktrees/x")))
+      (should (equal "feature/x" (plist-get facts :branch)))
+      (should (equal "/home/me/proj" (plist-get facts :main))))))
+
+(ert-deftest sprig-review-test-tree-facts-reports-a-detached-head ()
+  "`--abbrev-ref HEAD' answers `HEAD' when nothing is checked out by name,
+which is no branch rather than a branch called HEAD."
+  (sprig-review-tests--rev-parse "/home/me/proj\n.git\n.git\nHEAD\n"
+    (should-not (plist-get (sprig-review--tree-facts nil "/home/me/proj")
+                           :branch))))
+
+(ert-deftest sprig-review-test-tree-facts-tells-unborn-from-absent ()
+  "A repository with no commits cannot resolve HEAD, so the one call fails.
+It is still a repository, and saying so is not the same as saying there is
+none: the retry for the top level alone is what tells the two apart."
+  (cl-letf (((symbol-function 'sprig-review--run-git)
+             (lambda (_remote _dir args)
+               (if (equal args '("rev-parse" "--show-toplevel"))
+                   "/home/me/fresh\n"
+                 (error "git rev-parse failed")))))
+    (should (plist-get (sprig-review--tree-facts nil "/home/me/fresh") :unborn)))
+  (sprig-review-tests--rev-parse nil
+    (should-not (sprig-review--tree-facts nil "/tmp"))))
+
+(ert-deftest sprig-review-test-where-names-the-tree-and-its-branch ()
+  "The plain case says the two things `d' depends on and nothing else."
+  (should (equal "sprig: /home/me/proj on main"
+                 (sprig-review--where-line
+                  nil "/home/me/proj"
+                  '(:root "/home/me/proj" :branch "main") nil nil))))
+
+(ert-deftest sprig-review-test-where-spots-a-different-tree ()
+  "The point of the command: a worktree usually sits *under* the checkout it
+was added from, so comparing paths would call it the same tree.  The top
+level is what separates them, and both branches get named."
+  (let ((line (sprig-review--where-line
+               nil "/home/me/proj"
+               '(:root "/home/me/proj" :branch "main")
+               "/home/me/proj/.worktrees/x"
+               '(:root "/home/me/proj/.worktrees/x" :branch "feature/x"
+                 :main "/home/me/proj"))))
+    (should (string-match-p "\\`sprig: /home/me/proj on main;" line))
+    (should (string-match-p "running in /home/me/proj/.worktrees/x on feature/x"
+                            line))))
+
+(ert-deftest sprig-review-test-where-is-quiet-about-a-subdirectory ()
+  "Same repository, so the review is right wherever in it the agent sits;
+saying so every time would bury the case that matters."
+  (let ((facts '(:root "/home/me/proj" :branch "main")))
+    (should (equal "sprig: /home/me/proj on main"
+                   (sprig-review--where-line nil "/home/me/proj" facts
+                                             "/home/me/proj/src" facts)))))
+
+(ert-deftest sprig-review-test-where-says-what-it-found-instead ()
+  "No repository, no commits and no branch are three different answers, and
+`d w' is the command you reach for when a `d' did something you did not
+expect, so none of them may read as one of the others."
+  (should (string-suffix-p "(not a git repository)"
+                           (sprig-review--where-line nil "/tmp" nil nil nil)))
+  (should (string-suffix-p "(a repository with no commits yet)"
+                           (sprig-review--where-line
+                            nil "/tmp/fresh"
+                            '(:root "/tmp/fresh" :unborn t) nil nil)))
+  (should (string-suffix-p "on a detached HEAD"
+                           (sprig-review--where-line
+                            nil "/home/me/proj"
+                            '(:root "/home/me/proj") nil nil)))
+  (should (equal "sprig: this session has no working directory"
+                 (sprig-review--where-line nil nil nil nil nil))))
+
+(ert-deftest sprig-review-test-where-keeps-a-remote-path-whole ()
+  "A remote path is named with its host and left unshortened: `~' here is
+not `~' there, and abbreviating against this host's home would be a guess."
+  (let ((line (sprig-review--where-line
+               "box" "/home/them/proj"
+               '(:root "/home/them/proj" :branch "main") nil nil)))
+    (should (equal "sprig: box:/home/them/proj on main" line))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

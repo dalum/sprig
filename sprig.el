@@ -354,6 +354,15 @@ Lets the transport reconnect a stale session without knowing the owner.")
   "Working directory for a session not backed by a Markdown file.
 A session buffer owns its session directly and has no frontmatter, so it
 records the session's directory here for `sprig--directory'.")
+(defvar-local sprig--session-cwd nil
+  "Directory the CLI reported it is actually running in, or nil.
+Read from the `init' event, the one place the stream names it, and so
+refreshed on every connect, reattach and resume.  `sprig--directory' is
+what sprig *asked* for and may be unset (the login dir), unexpanded (a
+leading `~'), or simply stale against a session the CLI re-homed; this is
+where the session is.  `sprig-session-review-where' reports the two, and
+their disagreement, since every review verb diffs the former.")
+
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
 The symbol `inherit' (the default) follows the primary remote (the first
@@ -1564,6 +1573,7 @@ script.  Regenerate with broker/embed.py after editing the broker.")
 ;;
 ;; An event is a list whose car is the tag:
 ;;   (session ID)              session id captured from the backend
+;;   (cwd DIR)                 the directory the backend is running in
 ;;   (text-block)              a new text block began; separate it
 ;;   (text STR)                assistant text to insert
 ;;   (tool-call ID NAME INPUT) a completed tool-use call (INPUT is JSON)
@@ -1704,6 +1714,10 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ((and (equal .type "system") (equal .subtype "init"))
           (append
            (when .session_id (list (list 'session .session_id)))
+           ;; The only event that names the working directory: the stream
+           ;; leaves it off every later record, so this is the one word we
+           ;; get on where the session actually runs (see `sprig--session-cwd').
+           (when .cwd (list (list 'cwd .cwd)))
            ;; The only place the CLI names the model with its context marker
            ;; (`claude-opus-5[1m]'), which the per-turn field below drops, and
            ;; the only word we get at all before the first turn runs.
@@ -2467,6 +2481,7 @@ model via `sprig-session-consume'."
                sprig--fork-session nil))
         ((not sprig--session-id)
          (setq sprig--session-id id)))))
+    (`(cwd ,dir) (setq sprig--session-cwd dir))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
     (`(compacting ,flag) (setq sprig--compacting flag))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
@@ -2484,12 +2499,14 @@ model via `sprig-session-consume'."
      (sprig--status-refresh)))
   ;; A control-request/response is transport, not conversation: it carries no
   ;; renderable content (the model never reads either), so it is handled above
-  ;; and not consumed.  Consuming it would matter beyond the wasted event: it
+  ;; and not consumed.  A `cwd' is left out for the same reason, and for one
+  ;; more: it rides the `init' event, which every attach re-emits, so
+  ;; consuming it would make a reattached buffer non-pristine on arrival.  Consuming it would matter beyond the wasted event: it
   ;; would push onto `sprig-session--events', so an attach's `initialize' ack
   ;; alone makes the buffer non-pristine and the background history fetch
   ;; (`sprig--review-session-buffer', which seeds settled history only while the
   ;; buffer is pristine) then skips, leaving a reattached session with no history.
-  (unless (memq (car-safe event) '(control-request control-response))
+  (unless (memq (car-safe event) '(control-request control-response cwd))
     (sprig-session-consume event))
   ;; Keep the open navigator's live row current through the turn: its context
   ;; readout and status move with the events, not only at `done'.  Coalesced,

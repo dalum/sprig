@@ -60,6 +60,8 @@
 (declare-function sprig--remote-sh "sprig" (command host))
 (declare-function sprig--remote-dir-arg "sprig" (dir))
 (declare-function sprig--directory "sprig" ())
+;; Buffer-local in a session buffer, set from the CLI's `init' event.
+(defvar sprig--session-cwd)
 (declare-function sprig-session--compose "sprig-session-mode"
                   (target context &optional plan queue format label))
 (declare-function sprig-session--open-stage-buffer "sprig-session-mode"
@@ -252,6 +254,45 @@ Signals on a non-zero git exit."
     (when out
       (let ((root (string-trim out)))
         (unless (string-empty-p root) root)))))
+
+(defun sprig-review--tree-facts (remote dir)
+  "Return a plist of git facts about DIR on REMOTE, or nil when it has none.
+One `git rev-parse' answers all of it, so a remote tree pays a single round
+trip: `:root' the top level, `:branch' the branch checked out there (nil on
+a detached HEAD), and `:main' the checkout this tree was added from when it
+is a linked worktree, nil when it is not.
+
+A tree is a linked worktree exactly when its git dir and its common git dir
+differ: an ordinary checkout reads `.git' for both, and only `git worktree
+add' splits them into `<main>/.git' and `<main>/.git/worktrees/<name>'.  The
+main checkout is then the common dir with its trailing `/.git' taken off.
+
+A repository with no commits in it cannot resolve `HEAD', so the one call
+fails outright.  It is retried for the top level alone and comes back as
+`:unborn', which is not the same answer as no repository at all."
+  (let ((out (ignore-errors
+               (sprig-review--run-git
+                remote dir '("rev-parse" "--show-toplevel"
+                             "--git-common-dir" "--git-dir"
+                             "--abbrev-ref" "HEAD")))))
+    (if (null out)
+        (when-let* ((root (sprig-review--toplevel remote dir)))
+          (list :root root :unborn t))
+      (let ((lines (split-string (string-trim out) "\n" t "[ \t\r]+")))
+        (when (= (length lines) 4)
+          (pcase-let ((`(,root ,common ,gitdir ,branch) lines))
+            (list :root root
+                  :branch (unless (equal branch "HEAD") branch)
+                  :main (and (not (equal common gitdir))
+                             (string-suffix-p "/.git" common)
+                             (substring common 0 (- (length common)
+                                                    (length "/.git")))))))))))
+
+(defun sprig-review--show-path (remote path)
+  "Render PATH for a message, shortened by `~' only when it is local.
+A remote path is left whole: `abbreviate-file-name' would measure it
+against *this* host's home, which is not the home it was written under."
+  (if remote path (abbreviate-file-name path)))
 
 (defun sprig-review--diff-args (base)
   "Return the `git diff' arguments reviewing against BASE.
@@ -1956,13 +1997,90 @@ is inference rather than something git records."
       (sprig-session-review (sprig-review--read-base remote root
                                                      sprig-review-base)))))
 
+(defun sprig-review--where-line (remote dir facts cwd cwd-facts)
+  "One line naming the tree at DIR, its git FACTS, and where the session is.
+Pure, so the wording is testable without a tree to point it at.  DIR is
+what every review verb diffs and FACTS its plist from
+`sprig-review--tree-facts' (nil when DIR is no git tree at all); CWD is
+what the CLI last said it is running in (`sprig--session-cwd') and
+CWD-FACTS the same plist for it, or nil when it was not looked up.
+
+The session's own directory is named only when it sits in a *different*
+git tree from the one being reviewed, and the test is the top level, not
+the path: a worktree is commonly a directory under the checkout it was
+added from, so a path comparison would call `~/proj/.worktrees/x' part of
+`~/proj' when it is a separate tree on a separate branch, which is the one
+case this whole command exists to catch.  A plain subdirectory, by the same
+test, is not worth mentioning: it is the same repository, and the review is
+right whichever one the agent sits in."
+  (let* ((root (or (plist-get facts :root) dir))
+         (cwd-root (or (plist-get cwd-facts :root) cwd))
+         (adrift (and cwd-root root (not (equal cwd-root root)))))
+    (concat
+     "sprig: "
+     (if root
+         (concat (when remote (concat remote ":"))
+                 (sprig-review--show-path remote root))
+       "this session has no working directory")
+     (sprig-review--where-tree remote facts root)
+     (when adrift
+       (concat "; the session is running in "
+               (sprig-review--show-path remote cwd-root)
+               (sprig-review--where-tree remote cwd-facts cwd-root))))))
+
+(defun sprig-review--where-tree (remote facts root)
+  "The branch-and-worktree tail of `sprig-review--where-line' for FACTS.
+ROOT is the directory FACTS describes, named only to tell a tree that has
+no git facts from one that was never looked at.  REMOTE is the host it
+lives on, for `sprig-review--show-path'."
+  (concat
+   (cond ((plist-get facts :branch) (concat " on " (plist-get facts :branch)))
+         ((plist-get facts :unborn) " (a repository with no commits yet)")
+         (facts " on a detached HEAD")
+         (root " (not a git repository)"))
+   (when-let* ((main (plist-get facts :main)))
+     (concat ", a worktree of " (sprig-review--show-path remote main)))))
+
+(defun sprig-session-review-where ()
+  "Say which tree the review verbs read, and where the session really is (`d w').
+Every `d' diffs the session's configured working directory (`sprig-
+directory', or this buffer's own override), resolved to its git top level.
+That is not always where the session is: the CLI names its own working
+directory on the `init' event and nowhere else, and the two part company
+when the directory is unset (the CLI runs in the login dir), when it is
+written with a `~' only the far end expands, or when the session was
+re-homed under it.
+
+Names the branch, says when the tree is a linked worktree and which
+checkout it was added from, and, when the session is running in a
+different tree from the one being reviewed, names that one and its branch
+too.  This is the question you have just after a `d' showed you a diff you
+did not expect.
+
+Costs one `git rev-parse', or two when the session's own directory has to
+be looked up as well."
+  (interactive)
+  (unless (derived-mode-p 'sprig-session-mode)
+    (user-error "Not in a sprig session buffer"))
+  (let* ((remote (sprig--remote))
+         (dir (or (sprig--directory)
+                  (and (not remote) default-directory)))
+         (cwd sprig--session-cwd)
+         (facts (and dir (sprig-review--tree-facts remote dir)))
+         (cwd-facts (and cwd (not (equal cwd dir))
+                         (sprig-review--tree-facts remote cwd))))
+    (message "%s" (sprig-review--where-line remote dir facts cwd cwd-facts))))
+
 (transient-define-prefix sprig-session-review-dispatch ()
   "Review the changes in this session's working tree."
   [["Review"
     ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
     ("m" "the whole branch (against main, master, …)" sprig-session-review-branch)
     ("p" "against the branch this one was branched off" sprig-session-review-parent)
-    ("b" "against a base you name" sprig-session-review-base)]])
+    ("b" "against a base you name" sprig-session-review-base)]
+   ["Tree"
+    ("w" "where: which tree these read, and where the session is"
+     sprig-session-review-where)]])
 
 (defun sprig-review-set-base (base)
   "Change what this review diffs against, and re-read it (`b').
