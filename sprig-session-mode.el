@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.37.0
+;; Version: 0.38.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -756,6 +756,15 @@ fontifying the whole conversation in one uninterruptible burst.")
   "Session buffers to repaint once the current deferred-fontify batch lands.")
 (defvar sprig-session--fontify-timer nil
   "Pending idle timer draining `sprig-session--fontify-queue', or nil.")
+(defvar sprig-session--fontify-settled (make-hash-table :test 'equal)
+  "Texts the drain has cached since its last repaint, across batches.
+A backlog drains a batch at a time, and only a render re-enters a buffer
+into `sprig-session--fontify-buffers'.  So a batch that named its buffers
+and then dropped them left the rest of the backlog with nobody to repaint:
+the texts were cached, nothing re-queued them, and a cold buffer's older
+blocks stayed raw until something else forced a full render.  The batches'
+results accumulate here instead and are handed over whole once the queue
+runs dry (see `sprig-session--fontify-repaint').")
 (defvar-local sprig-session--fontify-fresh nil
   "A set of block texts the idle fontifier just cached, for one repaint.
 Deferred fontification changes how a settled prose block looks without
@@ -785,51 +794,64 @@ each time, so the block that finally fontifies it repaints the right buffers."
   (sprig-session--fontify-arm))
 
 (defun sprig-session--fontify-drain ()
-  "Fontify a batch of queued blocks into the cache, then repaint their buffers.
-Runs on the idle timer.  Fontifies up to `sprig-session-fontify-batch' blocks,
-repaints the shown session buffers that were waiting (a repaint re-queues any
-block still un-fontified, and re-arms), and re-arms while the queue holds more."
+  "Fontify a batch of queued blocks into the cache; repaint once it is empty.
+Runs on the idle timer.  Fontifies up to `sprig-session-fontify-batch' blocks
+into `sprig-session--fontify-settled' and re-arms while the queue holds more,
+repainting the waiting buffers only once the backlog is gone
+\(`sprig-session--fontify-repaint').
+
+Once, not per batch, for two reasons.  A repaint reaches only the buffers
+`sprig-session--fontify-buffers' names, and a render is the only thing that
+names one, so a batch that repainted and cleared the list left every later
+batch with nobody to draw it: the buffer kept the faces of its newest blocks
+and showed the rest raw.  And the repaint redraws from the earliest block that
+just gained faces, which each batch pulls further back, so per-batch repaints
+redraw a growing tail once per idle slice.  Prose in a live turn does not wait
+on any of this: it is fontified synchronously (see `sprig-session--prose-for')."
   (setq sprig-session--fontify-timer nil)
-  (let ((budget sprig-session-fontify-batch)
-        (fresh (make-hash-table :test 'equal))
-        (any nil))
+  (let ((budget sprig-session-fontify-batch))
     (while (and sprig-session--fontify-queue (> budget 0))
       (let ((text (pop sprig-session--fontify-queue)))
         (remhash text sprig-session--fontify-queued)
         (unless (gethash text sprig-session--fontify-cache)
           (puthash text (sprig-session--fontify-uncached text)
                    sprig-session--fontify-cache)
-          (puthash text t fresh)
-          (setq any t))
-        (setq budget (1- budget))))
-    (let ((buffers (prog1 sprig-session--fontify-buffers
-                     (setq sprig-session--fontify-buffers nil))))
-      (when any
-        (dolist (buf buffers)
-          (when (buffer-live-p buf)
-            (with-current-buffer buf
-              (when (derived-mode-p 'sprig-session-mode)
-                ;; Name the blocks that just gained faces so the incremental
-                ;; render redraws from the earliest of them, rather than
-                ;; keeping them all in the prefix and leaving them raw.
-                ;; Merged, not replaced: an earlier drain's set can still be
-                ;; waiting on a buffer that has not been shown in between.
-                (if sprig-session--fontify-fresh
-                    (maphash (lambda (k _)
-                               (puthash k t sprig-session--fontify-fresh))
-                             fresh)
-                  (setq sprig-session--fontify-fresh (copy-hash-table fresh)))
-                (if (get-buffer-window buf t)
-                    (sprig-session--refresh)
-                  ;; Off-screen (a reattached session seeded in the
-                  ;; background, say): skipping it outright would strand the
-                  ;; buffer raw for good, since its texts are now cached and
-                  ;; nothing later re-queues them.  Leave it dirty instead,
-                  ;; so `sprig-session--flush-when-shown' redraws it the
-                  ;; moment it is displayed and the blocks gain their faces.
-                  (setq sprig-session--dirty t))))))))
-    (when sprig-session--fontify-queue
-      (sprig-session--fontify-arm))))
+          (puthash text t sprig-session--fontify-settled))
+        (setq budget (1- budget)))))
+  (if sprig-session--fontify-queue
+      (sprig-session--fontify-arm)
+    (sprig-session--fontify-repaint)))
+
+(defun sprig-session--fontify-repaint ()
+  "Redraw the buffers waiting on the drained backlog, then forget them."
+  (let ((fresh sprig-session--fontify-settled)
+        (buffers (prog1 sprig-session--fontify-buffers
+                   (setq sprig-session--fontify-buffers nil))))
+    (setq sprig-session--fontify-settled (make-hash-table :test 'equal))
+    (when (> (hash-table-count fresh) 0)
+      (dolist (buf buffers)
+        (when (buffer-live-p buf)
+          (with-current-buffer buf
+            (when (derived-mode-p 'sprig-session-mode)
+              ;; Name the blocks that just gained faces so the incremental
+              ;; render redraws from the earliest of them, rather than
+              ;; keeping them all in the prefix and leaving them raw.
+              ;; Merged, not replaced: an earlier drain's set can still be
+              ;; waiting on a buffer that has not been shown in between.
+              (if sprig-session--fontify-fresh
+                  (maphash (lambda (k _)
+                             (puthash k t sprig-session--fontify-fresh))
+                           fresh)
+                (setq sprig-session--fontify-fresh (copy-hash-table fresh)))
+              (if (get-buffer-window buf t)
+                  (sprig-session--refresh)
+                ;; Off-screen (a reattached session seeded in the
+                ;; background, say): skipping it outright would strand the
+                ;; buffer raw for good, since its texts are now cached and
+                ;; nothing later re-queues them.  Leave it dirty instead,
+                ;; so `sprig-session--flush-when-shown' redraws it the
+                ;; moment it is displayed and the blocks gain their faces.
+                (setq sprig-session--dirty t)))))))))
 
 (defun sprig-session--prose (text)
   "Return TEXT ready to insert as prose, fontified now or deferred to idle.

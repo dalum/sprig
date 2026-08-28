@@ -1423,6 +1423,55 @@ the fold learns the id from the result rather than from the call."
         ;; The carrier is spent, so a later ordinary refresh does not re-splice.
         (should (null sprig-session--fontify-fresh))))))
 
+(ert-deftest sprig-session-mode-test-async-fontify-repaints-whole-backlog ()
+  ;; Regression: a resumed buffer renders every block raw at once, so the
+  ;; backlog runs to several idle batches.  The drain used to repaint after
+  ;; each batch and drop the buffers it had repainted, and only a render
+  ;; re-enters a buffer there, so every batch after the first had nobody to
+  ;; draw it: the newest blocks gained their faces and the rest stayed plain
+  ;; text until something forced a full render.  Every block must end
+  ;; fontified, oldest included.
+  (skip-unless (require 'markdown-mode nil t))
+  (let ((sprig-session-fontify-markdown t)
+        (sprig-session-fontify-async t)
+        (sprig-session-fontify-batch 2)
+        (sprig-session--fontify-cache (make-hash-table :test 'equal))
+        (sprig-session--fontify-cache-flag 'unset)
+        (sprig-session--fontify-queue nil)
+        (sprig-session--fontify-queued (make-hash-table :test 'equal))
+        (sprig-session--fontify-settled (make-hash-table :test 'equal))
+        (sprig-session--fontify-buffers nil)
+        (sprig-session--fontify-timer nil)
+        (buf (get-buffer-create "*sprig-fontify-backlog*")))
+    (unwind-protect
+        (progn
+          (set-buffer buf)
+          (sprig-session-mode)
+          (switch-to-buffer buf)
+          (sprig-session-seed
+           (let (events)
+             (dotimes (i 4)
+               (push (list 'user (format "**q%d** asked" i)) events)
+               (push (list 'text (format "**a%d** replied" i)) events)
+               (push '(done 0.01 nil) events))
+             (nreverse events)))
+          ;; More than one batch's worth, all drawn raw.
+          (should (> (length sprig-session--fontify-queue)
+                     sprig-session-fontify-batch))
+          ;; Drive the idle worker to exhaustion, as its timer would.
+          (let ((guard 20))
+            (while (and sprig-session--fontify-queue (> guard 0))
+              (sprig-session--fontify-drain)
+              (setq guard (1- guard))))
+          (sprig-session--fontify-drain)
+          ;; The markup of the oldest block, and of the newest, is hidden:
+          ;; both ends of the backlog were repainted.
+          (dolist (re '("\\*\\*q0" "\\*\\*a0" "\\*\\*a3"))
+            (goto-char (point-min))
+            (should (re-search-forward re nil t))
+            (should (get-text-property (match-beginning 0) 'invisible))))
+      (kill-buffer buf))))
+
 (ert-deftest sprig-session-mode-test-btw-answer-fontifies ()
   ;; With the deferred stream off, the panel streams its answer raw, then
   ;; fontifies its markdown once the turn settles: the markup gains the
