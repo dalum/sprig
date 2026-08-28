@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.38.1
+;; Version: 0.39.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1174,11 +1174,20 @@ opening a child, and a wrapper here earns nothing to pay for it."
         (lambda (question index)
           (sprig-session--insert-question block question index))
         (sprig-session--question-list (plist-get block :input)))))
-  (unless (plist-get block :answered)
+  (cond
+   ((plist-get block :answered))
+   ;; A question the turn outlived (see `sprig-session--abandon-dialogs'):
+   ;; say so where the hint would be, rather than offer keys that would only
+   ;; report there is nothing waiting.
+   ((plist-get block :stale)
+    (insert (sprig--face "    unanswered; the turn ended without it"
+                         'sprig-session-meta-key)
+            "\n"))
+   (t
     (insert (sprig--face (sprig-session--dialog-hint
-                                 (plist-get block :kind))
-                                'sprig-session-meta-key)
-            "\n")))
+                          (plist-get block :kind))
+                         'sprig-session-meta-key)
+            "\n"))))
 
 (defun sprig-session--format-tokens (n)
   "Format N tokens compactly, in thousands or millions."

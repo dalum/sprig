@@ -1,7 +1,7 @@
 ;;; sprig-session.el --- Session model and stored-log reader for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.34.0
+;; Version: 0.35.0
 ;; Package-Requires: ((emacs "28.1"))
 ;; Keywords: tools, convenience, ai
 
@@ -44,7 +44,7 @@
 ;;                   :time ISO)
 ;;   (:type tasks    :items ITEMS :time ISO)
 ;;   (:type dialog   :id ID :kind KIND :input INPUT
-;;                   :answered BOOL :answers ANSWERS :time ISO)
+;;                   :answered BOOL :answers ANSWERS :stale BOOL :time ISO)
 ;;   (:type error    :text STR :time ISO)
 ;;
 ;; A tool block's `:agent' is the subagent folded onto the `Agent' call it runs
@@ -139,13 +139,28 @@ file and folded in after the whole transcript, result and all."
                    (equal (plist-get b :id) id)))
             blocks))
 
+(defun sprig-session--abandon-dialogs (blocks)
+  "Mark every unanswered dialog in BLOCKS as one nothing waits on any more.
+A question stops the CLI dead: it is a control request, and the turn cannot
+reach its result until the client answers.  So a turn that ends over an open
+question ended some other way, an interrupt or a failure or an answer given
+somewhere this buffer could not see, and the question died with it.  Left
+standing, it went on reading as `waiting on you' in the state line and in
+the navigator for the rest of the session, with nothing on screen to answer."
+  (dolist (block blocks)
+    (when (and (eq (plist-get block :type) 'dialog)
+               (not (plist-get block :answered)))
+      (plist-put block :stale t))))
+
 (defun sprig-session-pending-dialog (model)
   "Return MODEL's dialog block still waiting on an answer, or nil.
 The turn is stopped on it: the CLI asked, and will not go on until it
-hears back."
+hears back.  A question the turn outlived is not one of these; see
+`sprig-session--abandon-dialogs'."
   (seq-find (lambda (b)
               (and (eq (plist-get b :type) 'dialog)
-                   (not (plist-get b :answered))))
+                   (not (plist-get b :answered))
+                   (not (plist-get b :stale))))
             (plist-get model :blocks)))
 
 (defun sprig-session-agent-running (model)
@@ -428,7 +443,9 @@ may be carried across calls to continue a fold (see
          (when-let ((blk (sprig-session--find-dialog blocks id)))
            (plist-put blk :answered t)
            (plist-put blk :answers answers)))
-        (`(done ,c ,e) (setq done t cost c error e))
+        (`(done ,c ,e)
+         (setq done t cost c error e)
+         (sprig-session--abandon-dialogs blocks))
         (`(context ,n) (setq context n))
         (`(error ,m)
          (setq open nil)

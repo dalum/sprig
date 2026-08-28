@@ -787,6 +787,32 @@ the fold learns the id from the result rather than from the call."
       (should-not (string-match-p "a a to answer" s)))
     (should (equal (car (sprig-session-tests--state-line)) "✓  turn over"))))
 
+(ert-deftest sprig-session-mode-test-dialog-the-turn-outlived ()
+  ;; A question stops the CLI dead, so a turn that ends over an open one
+  ;; ended some other way (an interrupt, a failure, an answer given where
+  ;; this buffer could not see it) and nothing is waiting on you any more.
+  ;; Before the fix the block stood pending for the rest of the session:
+  ;; the state line kept saying `waiting on you' with no live question, and
+  ;; so did the navigator's row.
+  (with-temp-buffer
+    (sprig-session-mode)
+    (sprig-session-consume (list 'dialog "req-1" "ask_user_question"
+                                (sprig-session-tests--dialog-input)))
+    (sprig-session-flush)
+    (should (equal (car (sprig-session-tests--state-line)) "?  waiting on you  ·  a a to answer"))
+    (sprig-session-consume '(done 0.01 nil))
+    (sprig-session-flush)
+    ;; The turn is over, and says so.
+    (should (equal (car (sprig-session-tests--state-line)) "✓  turn over"))
+    (should-not (sprig-session-pending-dialog (sprig-session--current-model)))
+    (let ((s (buffer-string)))
+      ;; The question stays in the transcript, told as what it was.
+      (should (string-match-p "? Which approach?" s))
+      (should (string-match-p "unanswered; the turn ended without it" s))
+      (should-not (string-match-p "a a to answer" s)))
+    ;; And `a' says so rather than opening a buffer for a dead question.
+    (should-error (sprig-session-answer-skip) :type 'user-error)))
+
 (ert-deftest sprig-session-mode-test-answer-recommended ()
   ;; `a r' takes the option the tool marked, without opening anything.
   (with-temp-buffer

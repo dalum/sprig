@@ -4318,6 +4318,33 @@ without a real SSH process."
     (should (plist-get (car dialogs) :answered))
     (should-not (sprig-session-pending-dialog model))))
 
+(ert-deftest sprig-session-test-turn-end-closes-an-open-question ()
+  ;; The navigator reads `waiting' off the preview's `:pending', which is
+  ;; this same pending-dialog test.  A question the turn outlived must not
+  ;; keep the row saying `waiting on you' long after the conversation moved
+  ;; on; one still open under a running turn must.
+  (let* ((input '((questions . [((question . "Which?")
+                                 (options . [((label . "A"))]))])))
+         (live (sprig-session-build
+                `((dialog "req-1" "ask_user_question" ,input))))
+         (outlived (sprig-session-build
+                    `((dialog "req-1" "ask_user_question" ,input)
+                      (done 0.01 nil))))
+         (answered (sprig-session-build
+                    `((dialog "req-1" "ask_user_question" ,input)
+                      (dialog-answer "req-1" ((Which? . "A")))
+                      (done 0.01 nil)))))
+    (should (sprig-session-pending-dialog live))
+    (should (plist-get (sprig--model-preview live) :pending))
+    (should-not (sprig-session-pending-dialog outlived))
+    (should-not (plist-get (sprig--model-preview outlived) :pending))
+    ;; Abandoned, not answered: the transcript still says nobody answered it.
+    (should-not (plist-get (car (plist-get outlived :blocks)) :answered))
+    ;; A settled question is settled, not stale.
+    (should-not (sprig-session-pending-dialog answered))
+    (should (plist-get (car (plist-get answered :blocks)) :answered))
+    (should-not (plist-get (car (plist-get answered :blocks)) :stale))))
+
 (ert-deftest sprig-test-user-question-does-not-block-the-filter ()
   ;; The control request is handled inside the process filter.  Prompting
   ;; there held the filter, and Emacs with it, until the question was
