@@ -4594,5 +4594,50 @@ without a real SSH process."
     (should-not (string-match-p "Counting" (buffer-string)))
     (should (string-match-p "No local consumption" (buffer-string)))))
 
+;;;; Reading a move out of a Bash call
+
+(ert-deftest sprig-test-moved-into-reads-a-cd ()
+  "The last `cd' wins, being where a chain of them ends up."
+  (should (equal '("/home/me/proj/.worktrees/x" . "cd")
+                 (sprig--moved-into "cd /home/me/proj/.worktrees/x && ls")))
+  (should (equal '("/b" . "cd") (sprig--moved-into "cd /a && cd /b"))))
+
+(ert-deftest sprig-test-moved-into-prefers-the-worktree-add ()
+  "`cd repo && git worktree add wt' is a move to the worktree, which the
+`cd' alone would get backwards.  Options are skipped, and `-b' takes a
+branch name of its own that is not the path."
+  (should (equal '("/wt" . "git worktree add")
+                 (sprig--moved-into "cd /repo && git worktree add /wt")))
+  (should (equal '(".worktrees/x" . "git worktree add")
+                 (sprig--moved-into "git worktree add -b feature/x \
+.worktrees/x")))
+  (should (equal '(".worktrees/x" . "git worktree add")
+                 (sprig--moved-into "git worktree add .worktrees/x -b \
+feature/x"))))
+
+(ert-deftest sprig-test-moved-into-ignores-a-command-that-moves-nowhere ()
+  "`add' has to follow `worktree' to be this `add', a `cd' with no argument
+goes home rather than anywhere nameable, and `cd -' goes back."
+  (dolist (cmd '("git worktree list" "echo add && ls" "ls -la" "cd" "cd -"))
+    (should-not (sprig--moved-into cmd))))
+
+(ert-deftest sprig-test-moved-into-refuses-a-path-it-cannot-trust ()
+  "Tokenising on whitespace splits a path with a space in it down the middle,
+and a `$' or a backtick names something the shell would have expanded and
+this never saw.  Either is worse to report than nothing at all, which
+matters here: plenty of real checkouts live under a directory with a space."
+  (should-not (sprig--moved-into "cd \"/tmp/a b\""))
+  (should-not (sprig--moved-into "cd $HOME/x"))
+  (should-not (sprig--moved-into "cd `pwd`/x"))
+  (should-not (sprig--moved-into "git worktree add \"/tmp/a b\"")))
+
+(ert-deftest sprig-test-seen-directory-only-listens-to-bash ()
+  "`Bash' is the one tool whose payload is a command line.  A path in any
+other tool's input is a file it read, not a directory it moved into."
+  (should (equal '("/wt" . "cd")
+                 (sprig--seen-directory "Bash" "{\"command\": \"cd /wt\"}")))
+  (should-not (sprig--seen-directory "Read" "{\"file_path\": \"/wt/x.el\"}"))
+  (should-not (sprig--seen-directory "Bash" "not json")))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

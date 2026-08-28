@@ -62,6 +62,8 @@
 (declare-function sprig--directory "sprig" ())
 ;; Buffer-local in a session buffer, set from the CLI's `init' event.
 (defvar sprig--session-cwd)
+;; Also buffer-local in a session buffer, read out of its `Bash' calls.
+(defvar sprig--seen-dir)
 (declare-function sprig-session--compose "sprig-session-mode"
                   (target context &optional plan queue format label))
 (declare-function sprig-session--open-stage-buffer "sprig-session-mode"
@@ -1997,25 +1999,62 @@ is inference rather than something git records."
       (sprig-session-review (sprig-review--read-base remote root
                                                      sprig-review-base)))))
 
-(defun sprig-review--where-line (remote dir facts cwd cwd-facts)
+(defun sprig-review--resolve (remote dir path)
+  "PATH made absolute against DIR, or nil when it cannot be.
+A command runs in the session's own directory, so a relative path written
+in one is relative to that.  A remote path is left textual: nothing here
+can resolve a `~' or a `..' against a filesystem on another host."
+  (cond ((or (null path) (string-empty-p path)) nil)
+        ;; A `~' is as absolute as a `/' here: it is the far host's home,
+        ;; and joining it onto DIR would make a path that exists nowhere.
+        (remote (if (or (string-prefix-p "/" path) (string-prefix-p "~" path))
+                    path
+                  (and dir (concat (file-name-as-directory dir) path))))
+        ((or (string-prefix-p "/" path) (string-prefix-p "~" path))
+         (expand-file-name path))
+        (dir (expand-file-name path dir))))
+
+(defun sprig-review--elsewhere (remote dir seen cwd)
+  "Where the session is other than DIR, as (PATH FACTS HOW), or nil.
+SEEN is the raw `sprig--seen-dir' cons and CWD the reported
+`sprig--session-cwd'.  The seen move wins, being the later fact of the two,
+but only while it still names a git tree: a worktree that has since been
+removed leaves a path that resolves to nothing, and the report is the
+better answer then.  HOW is nil for the report and the shell verb for a
+move, so the wording can say which it is rather than passing off an
+observation as a state."
+  (let* ((path (and seen (sprig-review--resolve remote dir (car seen))))
+         (facts (and path (not (equal path dir))
+                     (sprig-review--tree-facts remote path))))
+    (cond (facts (list path facts (cdr seen)))
+          ((and cwd (not (equal cwd dir)))
+           (list cwd (sprig-review--tree-facts remote cwd) nil)))))
+
+(defun sprig-review--where-line (remote dir facts elsewhere)
   "One line naming the tree at DIR, its git FACTS, and where the session is.
 Pure, so the wording is testable without a tree to point it at.  DIR is
 what every review verb diffs and FACTS its plist from
-`sprig-review--tree-facts' (nil when DIR is no git tree at all); CWD is
-what the CLI last said it is running in (`sprig--session-cwd') and
-CWD-FACTS the same plist for it, or nil when it was not looked up.
+`sprig-review--tree-facts' (nil when DIR is no git tree at all); ELSEWHERE
+is (PATH FACTS HOW) from `sprig-review--elsewhere', or nil.
 
-The session's own directory is named only when it sits in a *different*
-git tree from the one being reviewed, and the test is the top level, not
-the path: a worktree is commonly a directory under the checkout it was
-added from, so a path comparison would call `~/proj/.worktrees/x' part of
+The second clause is written only when the session is in a *different* git
+tree from the one being reviewed, and the test is the top level, not the
+path: a worktree is commonly a directory under the checkout it was added
+from, so a path comparison would call `~/proj/.worktrees/x' part of
 `~/proj' when it is a separate tree on a separate branch, which is the one
 case this whole command exists to catch.  A plain subdirectory, by the same
 test, is not worth mentioning: it is the same repository, and the review is
-right whichever one the agent sits in."
+right whichever one the agent sits in.
+
+A HOW is reported in the past tense it deserves.  Sprig sees the agent move
+in and cannot see the CLI put the shell back, so the honest claim is that
+it was last seen going there, not that it is there now."
   (let* ((root (or (plist-get facts :root) dir))
-         (cwd-root (or (plist-get cwd-facts :root) cwd))
-         (adrift (and cwd-root root (not (equal cwd-root root)))))
+         (epath (nth 0 elsewhere))
+         (efacts (nth 1 elsewhere))
+         (how (nth 2 elsewhere))
+         (eroot (or (plist-get efacts :root) epath))
+         (adrift (and eroot root (not (equal eroot root)))))
     (concat
      "sprig: "
      (if root
@@ -2024,9 +2063,12 @@ right whichever one the agent sits in."
        "this session has no working directory")
      (sprig-review--where-tree remote facts root)
      (when adrift
-       (concat "; the session is running in "
-               (sprig-review--show-path remote cwd-root)
-               (sprig-review--where-tree remote cwd-facts cwd-root))))))
+       (concat (if how
+                   "; the agent was last seen moving into "
+                 "; the session is running in ")
+               (sprig-review--show-path remote eroot)
+               (sprig-review--where-tree remote efacts eroot)
+               (when how (concat " (" how ")")))))))
 
 (defun sprig-review--where-tree (remote facts root)
   "The branch-and-worktree tail of `sprig-review--where-line' for FACTS.
@@ -2045,41 +2087,42 @@ lives on, for `sprig-review--show-path'."
   "Say which tree the review verbs read, and where the session really is (`d w').
 Every `d' diffs the session's configured working directory (`sprig-
 directory', or this buffer's own override), resolved to its git top level.
-That is not always where the session is: the CLI names its own working
-directory on the `init' event and nowhere else, and the two part company
-when the directory is unset (the CLI runs in the login dir), when it is
-written with a `~' only the far end expands, or when the session was
-re-homed under it.
+That is not always where the session is, and there are two ways to learn
+otherwise: the CLI names its own working directory on the `init' event, and
+the agent's `Bash' calls say when it moved somewhere (`sprig--seen-dir').
+The move wins when there is one, being the later of the two, and is
+reported as a move rather than as a state.
 
 Names the branch, says when the tree is a linked worktree and which
-checkout it was added from, and, when the session is running in a
-different tree from the one being reviewed, names that one and its branch
-too.  This is the question you have just after a `d' showed you a diff you
-did not expect.
+checkout it was added from, and, when the session is in a different tree
+from the one being reviewed, names that one and its branch too.  This is
+the question you have just after a `d' showed you a diff you did not
+expect.
 
-Costs one `git rev-parse', or two when the session's own directory has to
-be looked up as well."
+Costs one `git rev-parse', or two when there is a second directory to look
+up."
   (interactive)
   (unless (derived-mode-p 'sprig-session-mode)
     (user-error "Not in a sprig session buffer"))
   (let* ((remote (sprig--remote))
          (dir (or (sprig--directory)
                   (and (not remote) default-directory)))
-         (cwd sprig--session-cwd)
-         (facts (and dir (sprig-review--tree-facts remote dir)))
-         (cwd-facts (and cwd (not (equal cwd dir))
-                         (sprig-review--tree-facts remote cwd))))
-    (message "%s" (sprig-review--where-line remote dir facts cwd cwd-facts))))
+         (facts (and dir (sprig-review--tree-facts remote dir))))
+    (message "%s" (sprig-review--where-line
+                   remote dir facts
+                   (sprig-review--elsewhere remote dir sprig--seen-dir
+                                            sprig--session-cwd)))))
 
-(defun sprig-review--cwd-line (remote dir cwd)
-  "One line naming CWD, the directory the session reported, against DIR.
+(defun sprig-review--cwd-line (remote dir cwd seen)
+  "One line naming CWD and SEEN, the two directories tracked, against DIR.
 Pure, like `sprig-review--where-line', and unconditional where that one is
-selective: it states CWD whether or not it agrees with DIR, since the point
-of asking is to see the tracked value itself.  DIR is named alongside only
-when the two differ as written, which includes the case where they are the
-same place spelled two ways (`~/proj' against `/home/me/proj'): that is a
-difference worth seeing, being exactly the sort that makes the two look
-like disagreement when they are not."
+selective: it states both whether or not they agree with DIR, since the
+point of asking is to see the tracked values themselves.  SEEN is (PATH
+. HOW), already resolved.  DIR is named alongside only when it differs from
+CWD as written, which includes the case where they are the same place
+spelled two ways (`~/proj' against `/home/me/proj'): that is a difference
+worth seeing, being exactly the sort that makes the two look like
+disagreement when they are not."
   (concat
    "sprig: "
    (if cwd
@@ -2087,30 +2130,38 @@ like disagreement when they are not."
                (when remote (concat remote ":"))
                (sprig-review--show-path remote cwd))
      "the session has not said where it is running; it reports that on connect")
+   (when seen
+     (concat "; last seen moving into "
+             (sprig-review--show-path remote (car seen))
+             " (" (cdr seen) ")"))
    (when (and cwd dir (not (equal cwd dir)))
      (concat "; the review verbs read " (sprig-review--show-path remote dir)))))
 
 (defun sprig-session-review-cwd ()
-  "Say the working directory the session itself reported (`d c').
-The raw tracked value, `sprig--session-cwd', read from the CLI's `init'
-event: the only place the stream names the directory the session is
-actually running in.  It is refreshed on every connect, reattach and
-resume, and is empty until the first of those, so a replayed buffer that
-has not been connected has nothing to report yet.
+  "Say the working directories the session reported and was seen using (`d c').
+The raw tracked values.  `sprig--session-cwd' is read from the CLI's `init'
+event, the only place the stream names the directory the session is
+actually running in; it is refreshed on every connect, reattach and resume,
+and is empty until the first of those, so a replayed buffer that has not
+been connected has nothing to report yet.  `sprig--seen-dir' is read from
+the agent's own `Bash' calls, and is the last directory it was seen moving
+into.
 
-Where `d w' mentions it only when it lands in a different git tree from
-the one being reviewed, this states it every time and touches git not at
-all.  It is the answer to `where does this session think it is', asked on
-its own rather than as part of a question about the diff."
+Where `d w' mentions these only when they land in a different git tree
+from the one being reviewed, this states them every time and touches git
+not at all.  It is the answer to `where does this session think it is',
+asked on its own rather than as part of a question about the diff."
   (interactive)
   (unless (derived-mode-p 'sprig-session-mode)
     (user-error "Not in a sprig session buffer"))
-  (let ((remote (sprig--remote)))
-    (message "%s" (sprig-review--cwd-line
-                   remote
-                   (or (sprig--directory)
-                       (and (not remote) default-directory))
-                   sprig--session-cwd))))
+  (let* ((remote (sprig--remote))
+         (dir (or (sprig--directory)
+                  (and (not remote) default-directory)))
+         (seen (when sprig--seen-dir
+                 (when-let* ((path (sprig-review--resolve
+                                    remote dir (car sprig--seen-dir))))
+                   (cons path (cdr sprig--seen-dir))))))
+    (message "%s" (sprig-review--cwd-line remote dir sprig--session-cwd seen))))
 
 (transient-define-prefix sprig-session-review-dispatch ()
   "Review the changes in this session's working tree."

@@ -1428,7 +1428,7 @@ none: the retry for the top level alone is what tells the two apart."
   (should (equal "sprig: /home/me/proj on main"
                  (sprig-review--where-line
                   nil "/home/me/proj"
-                  '(:root "/home/me/proj" :branch "main") nil nil))))
+                  '(:root "/home/me/proj" :branch "main") nil))))
 
 (ert-deftest sprig-review-test-where-spots-a-different-tree ()
   "The point of the command: a worktree usually sits *under* the checkout it
@@ -1437,67 +1437,137 @@ level is what separates them, and both branches get named."
   (let ((line (sprig-review--where-line
                nil "/home/me/proj"
                '(:root "/home/me/proj" :branch "main")
-               "/home/me/proj/.worktrees/x"
-               '(:root "/home/me/proj/.worktrees/x" :branch "feature/x"
-                 :main "/home/me/proj"))))
+               '("/home/me/proj/.worktrees/x"
+                 (:root "/home/me/proj/.worktrees/x" :branch "feature/x"
+                  :main "/home/me/proj")
+                 nil))))
     (should (string-match-p "\\`sprig: /home/me/proj on main;" line))
     (should (string-match-p "running in /home/me/proj/.worktrees/x on feature/x"
                             line))))
+
+(ert-deftest sprig-review-test-where-reports-a-move-as-a-move ()
+  "A directory read out of a `Bash' call is an observation with a time on it,
+not a state: sprig sees the agent go and cannot see the CLI put the shell
+back, so the wording says it was last seen going there and names the verb."
+  (let ((line (sprig-review--where-line
+               nil "/home/me/proj"
+               '(:root "/home/me/proj" :branch "main")
+               '("/home/me/proj/.worktrees/x"
+                 (:root "/home/me/proj/.worktrees/x" :branch "feature/x")
+                 "git worktree add"))))
+    (should (string-match-p "last seen moving into" line))
+    (should (string-suffix-p "(git worktree add)" line))
+    (should-not (string-match-p "is running in" line))))
 
 (ert-deftest sprig-review-test-where-is-quiet-about-a-subdirectory ()
   "Same repository, so the review is right wherever in it the agent sits;
 saying so every time would bury the case that matters."
   (let ((facts '(:root "/home/me/proj" :branch "main")))
     (should (equal "sprig: /home/me/proj on main"
-                   (sprig-review--where-line nil "/home/me/proj" facts
-                                             "/home/me/proj/src" facts)))))
+                   (sprig-review--where-line
+                    nil "/home/me/proj" facts
+                    (list "/home/me/proj/src" facts nil))))))
 
 (ert-deftest sprig-review-test-where-says-what-it-found-instead ()
   "No repository, no commits and no branch are three different answers, and
 `d w' is the command you reach for when a `d' did something you did not
 expect, so none of them may read as one of the others."
   (should (string-suffix-p "(not a git repository)"
-                           (sprig-review--where-line nil "/tmp" nil nil nil)))
+                           (sprig-review--where-line nil "/tmp" nil nil)))
   (should (string-suffix-p "(a repository with no commits yet)"
                            (sprig-review--where-line
                             nil "/tmp/fresh"
-                            '(:root "/tmp/fresh" :unborn t) nil nil)))
+                            '(:root "/tmp/fresh" :unborn t) nil)))
   (should (string-suffix-p "on a detached HEAD"
                            (sprig-review--where-line
                             nil "/home/me/proj"
-                            '(:root "/home/me/proj") nil nil)))
+                            '(:root "/home/me/proj") nil)))
   (should (equal "sprig: this session has no working directory"
-                 (sprig-review--where-line nil nil nil nil nil))))
+                 (sprig-review--where-line nil nil nil nil))))
 
 (ert-deftest sprig-review-test-where-keeps-a-remote-path-whole ()
   "A remote path is named with its host and left unshortened: `~' here is
 not `~' there, and abbreviating against this host's home would be a guess."
   (let ((line (sprig-review--where-line
                "box" "/home/them/proj"
-               '(:root "/home/them/proj" :branch "main") nil nil)))
+               '(:root "/home/them/proj" :branch "main") nil)))
     (should (equal "sprig: box:/home/them/proj on main" line))))
+
+(ert-deftest sprig-review-test-elsewhere-prefers-the-move ()
+  "Two sources, and the move is the later one, so it wins while it still
+names a tree."
+  (sprig-review-tests--rev-parse
+      "/home/me/proj/.worktrees/x\n/home/me/proj/.git\n\
+/home/me/proj/.git/worktrees/x\nfeature/x\n"
+    (should (equal "cd"
+                   (nth 2 (sprig-review--elsewhere
+                           nil "/home/me/proj"
+                           '(".worktrees/x" . "cd") "/home/me/other"))))))
+
+(ert-deftest sprig-review-test-elsewhere-falls-back-to-the-report ()
+  "A worktree that has since been removed leaves a path resolving to no tree.
+The move is stale then, and the CLI's own report is the better answer."
+  (cl-letf (((symbol-function 'sprig-review--tree-facts)
+             (lambda (_remote dir)
+               (unless (string-match-p "worktrees" dir)
+                 (list :root dir :branch "main")))))
+    (let ((out (sprig-review--elsewhere nil "/home/me/proj"
+                                        '("/gone/.worktrees/x" . "cd")
+                                        "/home/me/other")))
+      (should (equal "/home/me/other" (nth 0 out)))
+      (should-not (nth 2 out))))
+  ;; Neither source says anything new: nothing to add to the line.
+  (should-not (sprig-review--elsewhere nil "/home/me/proj" nil nil)))
+
+(ert-deftest sprig-review-test-resolve-anchors-a-relative-path ()
+  "A path written in a `Bash' call is relative to the directory that call
+ran in, which is the session's own; an absolute one is already an answer."
+  (should (equal "/home/me/proj/.worktrees/x"
+                 (sprig-review--resolve nil "/home/me/proj" ".worktrees/x")))
+  (should (equal "/elsewhere/x"
+                 (sprig-review--resolve nil "/home/me/proj" "/elsewhere/x")))
+  ;; A remote path is joined but never expanded: `~' and `..' belong to a
+  ;; filesystem this host cannot see.
+  (should (equal "/home/them/proj/wt"
+                 (sprig-review--resolve "box" "/home/them/proj" "wt")))
+  (should (equal "~/wt" (sprig-review--resolve "box" "/home/them/proj" "~/wt")))
+  (should-not (sprig-review--resolve nil "/home/me/proj" nil)))
 
 (ert-deftest sprig-review-test-cwd-states-it-even-when-it-agrees ()
   "`d c' is the unconditional one: asked for the tracked value, it gives the
 tracked value, where `d w' would say nothing because there is no drift."
   (should (equal "sprig: the session is running in /home/me/proj"
-                 (sprig-review--cwd-line nil "/home/me/proj" "/home/me/proj"))))
+                 (sprig-review--cwd-line nil "/home/me/proj" "/home/me/proj"
+                                         nil))))
 
 (ert-deftest sprig-review-test-cwd-names-the-reviewed-dir-when-it-differs ()
   "Two spellings of one place is a difference worth seeing, since it is what
 makes agreement look like disagreement everywhere else."
-  (should (string-suffix-p "; the review verbs read ~/proj"
-                           (sprig-review--cwd-line nil "~/proj" "/home/me/proj")))
-  (should (string-suffix-p "; the review verbs read /home/me/proj"
-                           (sprig-review--cwd-line nil "/home/me/proj"
-                                                   "/home/me/proj/.worktrees/x"))))
+  (should (string-suffix-p
+           "; the review verbs read ~/proj"
+           (sprig-review--cwd-line nil "~/proj" "/home/me/proj" nil)))
+  (should (string-suffix-p
+           "; the review verbs read /home/me/proj"
+           (sprig-review--cwd-line nil "/home/me/proj"
+                                   "/home/me/proj/.worktrees/x" nil))))
+
+(ert-deftest sprig-review-test-cwd-reports-the-seen-move-too ()
+  "Both tracked values, each labelled with where it came from, since they
+answer the same question from different evidence."
+  (let ((line (sprig-review--cwd-line
+               nil "/home/me/proj" "/home/me/proj"
+               '("/home/me/proj/.worktrees/x" . "git worktree add"))))
+    (should (string-match-p "running in /home/me/proj;" line))
+    (should (string-suffix-p
+             "last seen moving into /home/me/proj/.worktrees/x \
+(git worktree add)" line))))
 
 (ert-deftest sprig-review-test-cwd-says-when-it-has-none-yet ()
   "The value arrives on the `init' event, so a buffer that has only replayed
 history has nothing to report; saying which is better than an empty answer."
   (should (equal (concat "sprig: the session has not said where it is "
                          "running; it reports that on connect")
-                 (sprig-review--cwd-line nil "/home/me/proj" nil))))
+                 (sprig-review--cwd-line nil "/home/me/proj" nil nil))))
 
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

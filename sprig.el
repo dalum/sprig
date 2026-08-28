@@ -363,6 +363,22 @@ leading `~'), or simply stale against a session the CLI re-homed; this is
 where the session is.  `sprig-session-review-where' reports the two, and
 their disagreement, since every review verb diffs the former.")
 
+(defvar-local sprig--seen-dir nil
+  "Directory the agent was last seen moving into, as (PATH . HOW), or nil.
+HOW is the shell verb it was read from, `git worktree add' or `cd'.
+
+Read out of the `Bash' calls the stream already carries, so it needs no
+cooperation from the agent and adds nothing to the log.  It is an
+observation and never a state: sprig sees a move *in*, and cannot see the
+CLI put the shell back afterwards, so this says where the agent was last
+seen going and not where it is now.  Everything that reports it says so in
+those words (see `sprig-review--where-line'), and it never decides which
+tree a review reads.
+
+PATH is recorded exactly as the command wrote it, relative and all;
+resolving it is the reader\='s job (see `sprig-review--resolve'), since only
+the reader knows the directory it would be relative to.")
+
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
 The symbol `inherit' (the default) follows the primary remote (the first
@@ -2463,6 +2479,85 @@ buffer has since died.  Remote only: a local caller reads the file directly."
 ;; to `sprig--review-sink' and its verbs steer the session directly (see
 ;; DESIGN.md, option A: CLI sessions are the branches).
 
+(defun sprig--unquote-token (token)
+  "TOKEN with one layer of surrounding shell quotes removed."
+  (if (and (> (length token) 1)
+           (memq (aref token 0) '(?\' ?\"))
+           (eq (aref token 0) (aref token (1- (length token)))))
+      (substring token 1 -1)
+    token))
+
+(defun sprig--worktree-add-path (tokens)
+  "The path a `git worktree add' in TOKENS creates, or nil.
+`add' must follow `worktree' immediately, or an `add' elsewhere in the
+command line would be read as this one.  The path is then the first token
+after it that is not an option: `-b' and `-B' take a branch name of their
+own, and every other flag stands alone."
+  (let ((rest (cdr (member "worktree" tokens)))
+        (path nil))
+    (when (equal (car rest) "add")
+      (setq rest (cdr rest))
+      (while (and rest (not path))
+        (let ((tok (car rest)))
+          (cond ((member tok '("-b" "-B")) (setq rest (cddr rest)))
+                ((string-prefix-p "-" tok) (setq rest (cdr rest)))
+                (t (setq path tok))))))
+    path))
+
+(defun sprig--last-cd-path (tokens)
+  "The argument of the last `cd' in TOKENS, or nil.
+The last one wins because that is where a chain of them ends up.  `cd'
+with no argument (home) or with a flag is not a move worth recording, and
+neither is `cd -', which goes back rather than anywhere nameable."
+  (let ((rest tokens) (path nil))
+    (while (setq rest (cdr (member "cd" rest)))
+      (let ((tok (car rest)))
+        (when (and tok (not (string-prefix-p "-" tok))
+                   (not (member tok '("&&" "||" ";" "|"))))
+          (setq path tok))))
+    path))
+
+(defun sprig--plausible-path-p (path)
+  "Non-nil when PATH came out of the tokeniser as a usable directory name.
+A leftover quote means the path had a space in it and was split down the
+middle; a `$' or a backtick means the shell would have expanded it into
+something this never saw.  Either way the token is not a directory, and
+reporting it would be worse than reporting nothing."
+  (and path (not (string-empty-p path))
+       (not (string-match-p "[\"'`$]" path))))
+
+(defun sprig--moved-into (command)
+  "The directory shell COMMAND moves the agent into, as (PATH . HOW), or nil.
+HOW names the verb it was read from.  A `git worktree add' outranks a `cd'
+in the same command: `add X && cd X' is one move either way, and `cd repo
+&& git worktree add wt' is a move to the worktree, which the `cd' alone
+would get backwards.
+
+Tokenised on whitespace, so a path with a space in it is not read.  This is
+inference from a command line, not shell semantics: it does not know which
+parts of the command ran, or whether one of them failed."
+  (let* ((tokens (mapcar #'sprig--unquote-token
+                         (split-string (or command "") "[ \t\n]+" t)))
+         (added (sprig--worktree-add-path tokens)))
+    (cond ((sprig--plausible-path-p added) (cons added "git worktree add"))
+          (added nil)
+          (t (when-let* ((p (sprig--last-cd-path tokens))
+                         ((sprig--plausible-path-p p)))
+               (cons p "cd"))))))
+
+(defun sprig--seen-directory (name input)
+  "The directory a tool call NAME/INPUT was seen moving into, or nil.
+Only `Bash' says anything: it is the one tool whose payload is a command
+line, and a worktree is made and entered by running one."
+  (when (equal name "Bash")
+    (when-let* ((in (ignore-errors
+                      (json-parse-string (if (string-empty-p (or input ""))
+                                             "{}" input)
+                                         :object-type 'alist :array-type 'list
+                                         :null-object nil :false-object nil)))
+                (cmd (alist-get 'command in)))
+      (sprig--moved-into cmd))))
+
 (defun sprig--review-sink (event)
   "Sink for a session buffer that owns its session: track state, then consume.
 Keeps the transport bookkeeping (session id, permission mode, busy flag)
@@ -2482,6 +2577,11 @@ model via `sprig-session-consume'."
         ((not sprig--session-id)
          (setq sprig--session-id id)))))
     (`(cwd ,dir) (setq sprig--session-cwd dir))
+    ;; Recorded, then consumed like any other tool call: this only
+    ;; watches what the agent was already going to run.
+    (`(tool-call ,_ ,name ,input)
+     (when-let* ((seen (sprig--seen-directory name input)))
+       (setq sprig--seen-dir seen)))
     (`(mode ,m) (setq sprig--permission-mode m) (force-mode-line-update))
     (`(compacting ,flag) (setq sprig--compacting flag))
     (`(control-request ,id ,req) (sprig--answer-control-request id req))
