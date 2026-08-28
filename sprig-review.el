@@ -2071,6 +2071,47 @@ be looked up as well."
                          (sprig-review--tree-facts remote cwd))))
     (message "%s" (sprig-review--where-line remote dir facts cwd cwd-facts))))
 
+(defun sprig-review--cwd-line (remote dir cwd)
+  "One line naming CWD, the directory the session reported, against DIR.
+Pure, like `sprig-review--where-line', and unconditional where that one is
+selective: it states CWD whether or not it agrees with DIR, since the point
+of asking is to see the tracked value itself.  DIR is named alongside only
+when the two differ as written, which includes the case where they are the
+same place spelled two ways (`~/proj' against `/home/me/proj'): that is a
+difference worth seeing, being exactly the sort that makes the two look
+like disagreement when they are not."
+  (concat
+   "sprig: "
+   (if cwd
+       (concat "the session is running in "
+               (when remote (concat remote ":"))
+               (sprig-review--show-path remote cwd))
+     "the session has not said where it is running; it reports that on connect")
+   (when (and cwd dir (not (equal cwd dir)))
+     (concat "; the review verbs read " (sprig-review--show-path remote dir)))))
+
+(defun sprig-session-review-cwd ()
+  "Say the working directory the session itself reported (`d c').
+The raw tracked value, `sprig--session-cwd', read from the CLI's `init'
+event: the only place the stream names the directory the session is
+actually running in.  It is refreshed on every connect, reattach and
+resume, and is empty until the first of those, so a replayed buffer that
+has not been connected has nothing to report yet.
+
+Where `d w' mentions it only when it lands in a different git tree from
+the one being reviewed, this states it every time and touches git not at
+all.  It is the answer to `where does this session think it is', asked on
+its own rather than as part of a question about the diff."
+  (interactive)
+  (unless (derived-mode-p 'sprig-session-mode)
+    (user-error "Not in a sprig session buffer"))
+  (let ((remote (sprig--remote)))
+    (message "%s" (sprig-review--cwd-line
+                   remote
+                   (or (sprig--directory)
+                       (and (not remote) default-directory))
+                   sprig--session-cwd))))
+
 (transient-define-prefix sprig-session-review-dispatch ()
   "Review the changes in this session's working tree."
   [["Review"
@@ -2080,7 +2121,9 @@ be looked up as well."
     ("b" "against a base you name" sprig-session-review-base)]
    ["Tree"
     ("w" "where: which tree these read, and where the session is"
-     sprig-session-review-where)]])
+     sprig-session-review-where)
+    ("c" "cwd: the directory the session itself reported"
+     sprig-session-review-cwd)]])
 
 (defun sprig-review-set-base (base)
   "Change what this review diffs against, and re-read it (`b').

@@ -227,7 +227,7 @@ Two things it will not do. A selection spanning two hunks is refused rather than
 
 `c m` is the other escape hatch: a plain message about the marked hunks, for feedback about the change as a whole rather than a line of it.
 
-**What it diffs against.** Four scopes, and the summary line at the top always says which one it is showing, next to the file count and the total stat. `d w` says which *tree* they read.
+**What it diffs against.** Four scopes, and the summary line at the top always says which one it is showing, next to the file count and the total stat. `d w` says which *tree* they read, `d c` the directory the session itself reported.
 
 | Verb | Scope | Runs |
 |---|---|---|
@@ -236,6 +236,7 @@ Two things it will not do. A selection spanning two hunks is refused rather than
 | `d p` | Just this branch of a stack, against the one below it | `git diff --merge-base <parent>` |
 | `d b` | Whatever you name | as below |
 | `d w` | Not a scope: says which tree the four above read, and where the session is | `git rev-parse` |
+| `d c` | Not a scope: says the working directory the session itself reported | nothing |
 
 `d m` is the scope a pull request would show, and it is the one to reach for once the agent has been committing as it goes. It is deliberately not `git diff main`: that compares against main's *tip*, so every commit main has gained since you branched shows up inverted, as changes you appear to have reverted. Nor is it `git diff main...HEAD`, which fixes that but drops your uncommitted work. `--merge-base` is both halves and neither bug.
 
@@ -248,6 +249,8 @@ It is inference, not a record, and it says so when it fails. A parent that has b
 **`d w` says where you are.** Every `d` diffs the session's configured working directory, resolved to its git top level. That is not always where the session is: the CLI names its own working directory once, on the `init` event, and the two part company when the directory is unset (the CLI runs in the login dir), when it is written with a `~` that only the far end expands, or when the session was re-homed under it. `d w` names the tree, the branch checked out in it, and, when that tree is a linked worktree, the checkout it was added from. When the session is running in a *different* tree from the one being reviewed it names that one and its branch too, which is the case the command exists for: a review is then reading a tree the agent is not working in.
 
 The test is the git top level, not the path. A worktree usually lives under the checkout it was added from (`~/proj/.worktrees/x` under `~/proj`), so comparing paths would call two separate branches the same tree. A plain subdirectory of the same repository is not mentioned at all, since the review is right wherever in it the agent sits. Costs one `git rev-parse`, or two when the session's own directory has to be looked up as well.
+
+**`d c` states the tracked directory outright.** `d w` is selective: it mentions the session's own directory only when that lands in a different git tree, so that the case worth noticing is not buried under a line printed every time. When the tracked value itself is what you want, `d c` gives it whether or not it agrees, and names the reviewed directory alongside when the two differ *as written*. `~/proj` against `/home/me/proj` is one place spelled two ways, and that is exactly the difference that makes agreement look like disagreement. It touches git not at all. The value arrives on the CLI's `init` event, so a buffer that has only replayed history has nothing to report until it connects, and `d c` says so rather than answering with a blank.
 
 **`d m` finds the default branch rather than assuming one.** Some repos call it `main`, some `master`, some something else, and some carry both part-way through a rename. It looks for every name in `sprig-review-default-branches` (`main`, `master`, `trunk`, `develop`, `default`) as a local branch and as any remote's, in one `git for-each-ref`. One match wins outright. Several, which is the both-`main`-and-`master` case, are broken by the forge's own `origin/HEAD` rather than by list order, so a repo mid-rename resolves to the branch it actually uses. None still asks `origin/HEAD`, which catches a project whose default is `release`. A local branch is preferred over a remote-tracking one, since it is what you would type and it diffs without a fetch, but `origin/main` alone is a perfectly good base and is used when there is no local branch. If nothing answers, `d m` prompts you for a base instead of refusing.
 

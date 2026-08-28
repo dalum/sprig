@@ -1477,5 +1477,27 @@ not `~' there, and abbreviating against this host's home would be a guess."
                '(:root "/home/them/proj" :branch "main") nil nil)))
     (should (equal "sprig: box:/home/them/proj on main" line))))
 
+(ert-deftest sprig-review-test-cwd-states-it-even-when-it-agrees ()
+  "`d c' is the unconditional one: asked for the tracked value, it gives the
+tracked value, where `d w' would say nothing because there is no drift."
+  (should (equal "sprig: the session is running in /home/me/proj"
+                 (sprig-review--cwd-line nil "/home/me/proj" "/home/me/proj"))))
+
+(ert-deftest sprig-review-test-cwd-names-the-reviewed-dir-when-it-differs ()
+  "Two spellings of one place is a difference worth seeing, since it is what
+makes agreement look like disagreement everywhere else."
+  (should (string-suffix-p "; the review verbs read ~/proj"
+                           (sprig-review--cwd-line nil "~/proj" "/home/me/proj")))
+  (should (string-suffix-p "; the review verbs read /home/me/proj"
+                           (sprig-review--cwd-line nil "/home/me/proj"
+                                                   "/home/me/proj/.worktrees/x"))))
+
+(ert-deftest sprig-review-test-cwd-says-when-it-has-none-yet ()
+  "The value arrives on the `init' event, so a buffer that has only replayed
+history has nothing to report; saying which is better than an empty answer."
+  (should (equal (concat "sprig: the session has not said where it is "
+                         "running; it reports that on connect")
+                 (sprig-review--cwd-line nil "/home/me/proj" nil))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here
