@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.38.0
+;; Version: 0.38.1
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2067,7 +2067,7 @@ Inherits magit-section's navigation and folding; the sprig verbs are
 added on top as they land.")
 
 
-(define-derived-mode sprig-session-mode magit-section-mode "Sprig-Review"
+(define-derived-mode sprig-session-mode magit-section-mode "Sprig-Session"
   "Major mode for reviewing an agent conversation as read-only sections.
 Built on `magit-section-mode': move with \\`n' / \\`p', fold with TAB."
   :group 'sprig
