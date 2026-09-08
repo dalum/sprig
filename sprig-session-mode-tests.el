@@ -1422,6 +1422,131 @@ stands in for the CLI, being live and costing no external program."
       (sprig-session-flush)
       (should (string-match-p "\\$0\\.02" (buffer-string))))))
 
+(defun sprig-session-tests--seed-turns (n)
+  "Seed the current buffer with N one-line user turns, `u0' to `uN-1'.
+Through `sprig-session-seed', so the render window is measured the way
+opening a stored conversation measures it."
+  (sprig-session-seed
+   (cl-loop for i below n collect (list 'user (format "u%d" i)))))
+
+(ert-deftest sprig-session-mode-test-render-window-draws-the-tail ()
+  ;; A history longer than the window draws its last `window' blocks, and the
+  ;; rest stand as one heading saying how many are not drawn.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (should (equal sprig-session--render-floor 20))
+      (let ((s (buffer-string)))
+        (should (string-match-p "20 earlier blocks not drawn" s))
+        (should-not (string-match-p "\\bu19\\b" s))
+        (should (string-match-p "\\bu20\\b" s))
+        (should (string-match-p "\\bu29\\b" s))))))
+
+(ert-deftest sprig-session-mode-test-render-window-slack-draws-everything ()
+  ;; Just past the window is still drawn whole: a fold hiding a handful of
+  ;; blocks costs a heading and saves nothing.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 12)
+      (should (equal sprig-session--render-floor 0))
+      (should-not (string-match-p "earlier block" (buffer-string)))
+      (should (string-match-p "\\bu0\\b" (buffer-string))))))
+
+(ert-deftest sprig-session-mode-test-render-window-off-draws-everything ()
+  ;; The escape hatch: nil draws the whole history however long it is.
+  (let ((sprig-session-render-window nil))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (should (equal sprig-session--render-floor 0))
+      (should (string-match-p "\\bu0\\b" (buffer-string)))
+      (should-not (string-match-p "earlier block" (buffer-string))))))
+
+(ert-deftest sprig-session-mode-test-show-earlier-pages-back ()
+  ;; Paging draws one more window at a time, and stops being offered once the
+  ;; whole history is drawn.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 25)
+      (should (equal sprig-session--render-floor 15))
+      (sprig-session-show-earlier)
+      (should (equal sprig-session--render-floor 5))
+      (should (string-match-p "5 earlier blocks not drawn" (buffer-string)))
+      (should (string-match-p "\\bu5\\b" (buffer-string)))
+      (should-not (string-match-p "\\bu4\\b" (buffer-string)))
+      (sprig-session-show-earlier)
+      (should (equal sprig-session--render-floor 0))
+      (should (string-match-p "\\bu0\\b" (buffer-string)))
+      (should-not (string-match-p "earlier block" (buffer-string)))
+      (should-error (sprig-session-show-earlier) :type 'user-error))))
+
+(ert-deftest sprig-session-mode-test-visit-on-earlier-pages-back ()
+  ;; RET on the heading is what pages it in.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (goto-char (point-min))
+      (should (re-search-forward "earlier blocks not drawn" nil t))
+      (sprig-session-visit)
+      (should (equal sprig-session--render-floor 10)))))
+
+(ert-deftest sprig-session-mode-test-render-window-holds-still ()
+  ;; The floor is measured once and then held: a turn landing extends the
+  ;; buffer downwards, and a window that re-measured itself would fold away
+  ;; the top of what you are reading.  The append still takes the tail path.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (goto-char (point-min))
+      (should (re-search-forward "\\bu20\\b" nil t))
+      (let ((before (magit-current-section)))
+        (sprig-session-consume '(user "landed"))
+        (sprig-session-flush)
+        (should (equal sprig-session--render-floor 20))
+        ;; Spliced, not redrawn: the kept prefix starts at the floor.
+        (should (null sprig-session--incremental-reason))
+        (should (eq (magit-current-section) before))
+        (should (string-match-p "landed" (buffer-string)))
+        (should (string-match-p "\\bu20\\b" (buffer-string)))))))
+
+(ert-deftest sprig-session-mode-test-show-earlier-forces-a-full-render ()
+  ;; The block diff compares only the drawn tail, so a moved floor cannot be
+  ;; seen in it; the render says so outright rather than splicing against a
+  ;; baseline that starts somewhere else.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (sprig-session-show-earlier)
+      (should (eq sprig-session--incremental-reason 'floor)))))
+
+(ert-deftest sprig-session-mode-test-reseed-remeasures-the-window ()
+  ;; A re-read replaces the history the window was measured against, so the
+  ;; floor is an index into a list that is gone; it is measured again.
+  (let ((sprig-session-render-window 10)
+        (sprig-session-render-window-slack 2))
+    (with-temp-buffer
+      (sprig-session-mode)
+      (sprig-session-tests--seed-turns 30)
+      (should (equal sprig-session--render-floor 20))
+      (sprig-session-tests--seed-turns 40)
+      (should (equal sprig-session--render-floor 30))
+      ;; And a shorter history cannot leave the buffer drawing nothing.
+      (sprig-session-tests--seed-turns 5)
+      (should (equal sprig-session--render-floor 0))
+      (should (string-match-p "\\bu0\\b" (buffer-string))))))
+
 (ert-deftest sprig-session-mode-test-async-fontify-repaints-settled-block ()
   ;; Regression: the idle fontifier caches a settled prose block's faces
   ;; without changing the model, so the `equal' block diff keeps the block in

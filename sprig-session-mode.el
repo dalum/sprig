@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.40.0
+;; Version: 0.41.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -1421,6 +1421,53 @@ projection of the model either way.  Set to nil to force full renders."
   :type 'boolean
   :group 'sprig)
 
+(defcustom sprig-session-render-window 500
+  "How many trailing blocks a session buffer draws, or nil for all of them.
+A full render is worse than linear in the sections it draws: magit-section
+keeps two markers per section, and Emacs adjusts every marker in a buffer on
+every insertion, so the cost of drawing a block grows with the blocks already
+drawn.  On an 8,000-block conversation the whole history takes about 2.6s to
+draw where its last 500 blocks take about 0.03s, which is the difference
+between opening a long session and waiting on it.
+
+So only the tail is drawn.  The rest stand as one heading that pages them in a
+window at a time (RET, `sprig-session-show-earlier'): they are undrawn, not
+lost, and nothing about the model or the log changes.
+
+Bounding the tree is the only fix that works.  Detaching the previous
+render's markers (they stay live through the render, since fold inheritance
+reads them) sounds like the cheaper one and is not: `set-marker' unchains
+one marker at a time from that same list, so releasing them is quadratic
+too, and on the histories where the stale markers cost anything it loses
+more than it saves.
+
+The window is measured once, against the history a buffer is opened or
+re-read with, and the buffer keeps that floor afterwards (see
+`sprig-session--render-floor').  A live turn extends the buffer downwards, and
+a window that re-measured itself would fold away the top of what you are
+reading mid-turn."
+  :type '(choice (const :tag "Draw the whole history" nil) integer)
+  :group 'sprig)
+
+(defvar sprig-session-render-window-slack 50
+  "How many blocks past `sprig-session-render-window' are drawn anyway.
+A fold that hides a handful of blocks costs a heading and saves nothing, so
+the window only takes effect once there is meaningfully more than it.")
+
+(defvar-local sprig-session--render-floor nil
+  "Index of the first block this buffer draws, or nil before it is measured.
+Absolute, and fixed once set: blocks only ever append, so the index of a
+block already drawn does not move, and holding the floor still is what keeps
+the top of the buffer from shifting under you while a turn comes in.
+`sprig-session-seed' clears it, since that replaces the history the window was
+measured against; `sprig-session-show-earlier' pulls it back.")
+
+(defvar-local sprig-session--rendered-floor nil
+  "`sprig-session--render-floor' as it stood at the last render.
+A change means the buffer now draws blocks it did not before, which the
+block diff cannot see (it compares only the drawn tail), so it forces a full
+redraw rather than splicing against a baseline that starts elsewhere.")
+
 (defvar-local sprig-session--rendered-blocks nil
   "The model's `:blocks' at the last render.
 The baseline `sprig-session--render-incremental' diffs the new model
@@ -1452,6 +1499,34 @@ redraw, without which its withheld final paragraph would never appear.")
   "Why the last refresh fell back to a full render, or nil if it did not.
 Set by `sprig-session--render-incremental' and logged when
 `sprig-session-debug-render' is on, to make a fallback storm diagnosable.")
+
+(defun sprig-session--ensure-floor (blocks)
+  "Return this buffer's render floor for BLOCKS, measuring it when unset.
+Measured once (see `sprig-session-render-window'), then only ever clamped to
+the history that is actually there, so a floor outliving the blocks it was
+measured against cannot leave the buffer drawing nothing."
+  (let ((n (length blocks)))
+    (setq sprig-session--render-floor
+          (if sprig-session--render-floor
+              (min sprig-session--render-floor n)
+            (if (and sprig-session-render-window
+                     (> n (+ sprig-session-render-window
+                             sprig-session-render-window-slack)))
+                (- n sprig-session-render-window)
+              0)))))
+
+(defun sprig-session--insert-earlier (hidden)
+  "Insert the heading standing for the HIDDEN blocks above the render window.
+Nothing at all when none are hidden.  It is a section of its own so RET can
+page more of them in (`sprig-session-show-earlier'), and it draws no body,
+since not drawing them is the whole point of it."
+  (when (> hidden 0)
+    (magit-insert-section (sprig-earlier hidden)
+      (insert (sprig--face
+               (format "⋯ %d earlier block%s not drawn (RET draws more)\n"
+                       hidden (if (= hidden 1) "" "s"))
+               'sprig-session-time)))
+    (insert "\n")))
 
 (defun sprig-session--insert-block (block prev first last)
   "Insert one BLOCK at point, with its boundary blank line and its margin.
@@ -1494,9 +1569,14 @@ identically."
   "Render review MODEL into the current buffer as magit-sections.
 META is an optional plist of display metadata (see
 `sprig-session--insert-headers').  The buffer should already be in
-`sprig-session-mode'."
+`sprig-session-mode'.
+
+Draws only the trailing `sprig-session-render-window' blocks; whatever sits
+above the floor stands as one heading that pages them in."
   (let* ((inhibit-read-only t)
-         (blocks (plist-get model :blocks))
+         (all (plist-get model :blocks))
+         (hidden (sprig-session--ensure-floor all))
+         (blocks (nthcdr hidden all))
          (last (car (last blocks)))
          (prev nil)
          (first t))
@@ -1507,6 +1587,7 @@ META is an optional plist of display metadata (see
     (let (sections)
       (magit-insert-section (sprig-session)
         (sprig-session--insert-headers model meta)
+        (sprig-session--insert-earlier hidden)
         (setq sections
               (sprig-session--insert-blocks magit-root-section blocks prev first last))
         ;; Below the last message, and last of all, so it is what the buffer
@@ -1521,6 +1602,21 @@ META is an optional plist of display metadata (see
       (sprig-session--update-margin)
       (sprig-session--record-baseline model meta sections))
     (goto-char (point-min))))
+
+(defun sprig-session-show-earlier ()
+  "Draw another window's worth of the history above what is already drawn.
+Bound to RET on the `earlier' heading.  It pages rather than showing the
+lot: drawing a whole long history is the cost the window exists to avoid,
+so repeat it to walk back, or set `sprig-session-render-window' to nil to
+draw everything from the start."
+  (interactive)
+  (unless (and sprig-session--render-floor (> sprig-session--render-floor 0))
+    (user-error "The whole history is already drawn"))
+  (setq sprig-session--render-floor
+        (max 0 (- sprig-session--render-floor
+                  (or sprig-session-render-window
+                      sprig-session--render-floor))))
+  (sprig-session--refresh))
 
 (defun sprig-session--insert-blocks (root blocks prev first last)
   "Insert BLOCKS under ROOT in order, returning the last top-level section
@@ -1559,8 +1655,13 @@ session change, or a reset)."
         (plist-get model :model)  (plist-get model :session)))
 
 (defun sprig-session--record-baseline (model meta sections)
-  "Store MODEL's blocks, header signature, and per-block SECTIONS as baseline."
-  (setq sprig-session--rendered-blocks (plist-get model :blocks)
+  "Store the drawn blocks, header signature, and per-block SECTIONS as baseline.
+The blocks recorded are the ones actually drawn, `sprig-session--render-floor'
+on, since those are what SECTIONS lines up with and what the next render has
+to diff against."
+  (setq sprig-session--rendered-blocks (nthcdr (or sprig-session--render-floor 0)
+                                               (plist-get model :blocks))
+        sprig-session--rendered-floor sprig-session--render-floor
         sprig-session--rendered-header (sprig-session--header-signature model meta)
         sprig-session--rendered-sections sections
         sprig-session--rendered-streaming sprig-session--streaming))
@@ -1581,7 +1682,10 @@ fresh children of ROOT, so only O(new events) is drawn.  Sections are kept
 by buffer position, not by block index, so a block that drew several
 sections is handled correctly.  Returns t."
   (let* ((inhibit-read-only t)
-         (new-blocks (plist-get model :blocks))
+         ;; Drawn-block space throughout: K indexes the tail this buffer shows,
+         ;; not the whole history, and the kept prefix starts at the floor.
+         (new-blocks (nthcdr (or sprig-session--render-floor 0)
+                             (plist-get model :blocks)))
          ;; A shallow copy carrying the full old child list, so re-inserted
          ;; sections still inherit a predecessor's fold state by ident.  It
          ;; must be taken before ROOT's children are truncated below; `oset'
@@ -1662,7 +1766,10 @@ or when even the first block diverged.  The reason is recorded in
 `sprig-session--incremental-reason' for the debug log."
   (let* ((root magit-root-section)
          (old-blocks sprig-session--rendered-blocks)
-         (new-blocks (plist-get model :blocks))
+         ;; Both sides are the drawn tail: the baseline was recorded that way,
+         ;; and a floor that moved is caught below rather than diffed across.
+         (new-blocks (nthcdr (or sprig-session--render-floor 0)
+                             (plist-get model :blocks)))
          (k (sprig-session--common-prefix old-blocks new-blocks))
          ;; Read-and-clear: a fontify repaint gets exactly one shot at the
          ;; boundary, and a later ordinary refresh must not re-apply it.
@@ -1694,6 +1801,13 @@ or when even the first block diverged.  The reason is recorded in
            ;; buffer whose baseline the old code built; the full render heals it.
            ((not (= (length sprig-session--rendered-sections) (length old-blocks)))
             'sections-mismatch)
+           ;; `sprig-session-show-earlier' moved the floor, so the buffer now
+           ;; draws blocks above everything the baseline knows about.  The
+           ;; block diff cannot see that (it starts at the new floor either
+           ;; way), and two equal blocks would let it splice against the wrong
+           ;; prefix, so say so outright.
+           ((not (eql sprig-session--rendered-floor sprig-session--render-floor))
+            'floor)
            ((not (equal sprig-session--rendered-header
                         (sprig-session--header-signature model meta)))
             'header)
@@ -2024,11 +2138,18 @@ With META, replace the header metadata plist."
   "Seed this session buffer with EVENTS (in order) and refresh synchronously.
 Use this to replay history before the live sink appends more, so a later
 `sprig-session-consume' rebuilds from history plus the new event.  Replayed
-history is settled, so it renders with no live tail."
+history is settled, so it renders with no live tail.
+
+Re-measures the render window (`sprig-session-render-window'), so a re-read
+draws the last window of the history it just read, whatever was drawn before."
   (sprig-session--cancel-timer)
   (setq sprig-session--events (reverse events) sprig-session--dirty nil
         sprig-session--streaming nil sprig-session--stream-nl nil
-        sprig-session--pending-steer nil)
+        sprig-session--pending-steer nil
+        ;; This replaces the history the render window was measured against,
+        ;; so measure it again rather than carrying a floor that was an index
+        ;; into a different list.
+        sprig-session--render-floor nil)
   (when meta (setq sprig-session--meta meta))
   (sprig-session--refresh))
 
@@ -2589,13 +2710,17 @@ turn if the CLI does not honour the request (see `sprig-interrupt-timeout')."
 
 (defun sprig-session-visit ()
   "Visit the file the section at point refers to, or answer a question.
-On a question the agent is waiting on, open the answer dialog, the way
-`a a' does.  On a diff hunk, best-effort move point to the first changed
-line."
+On the `earlier' heading, draw another window of the history above it.  On a
+question the agent is waiting on, open the answer dialog, the way `a a'
+does.  On a diff hunk, best-effort move point to the first changed line."
   (interactive)
   (let ((section (magit-current-section)))
-    (if (sprig-session--question-section-p section)
-        (sprig-session-answer)
+    (cond
+     ((eq (and section (oref section type)) 'sprig-earlier)
+      (sprig-session-show-earlier))
+     ((sprig-session--question-section-p section)
+      (sprig-session-answer))
+     (t
       (let ((file (sprig--section-file section)))
         (unless file (user-error "No file to visit here"))
         (find-file (sprig-session--file-location file))
@@ -2606,7 +2731,7 @@ line."
             (unless (string-empty-p needle)
               (goto-char (point-min))
               (when (search-forward needle nil t)
-                (beginning-of-line)))))))))
+                (beginning-of-line))))))))))
 
 ;;;; Compose buffer (the c c message)
 
