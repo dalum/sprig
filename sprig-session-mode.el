@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.41.0
+;; Version: 0.42.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -432,17 +432,50 @@ The extra column is the gap holding the stamp off the text."
       (truncate-string-to-width s width nil nil "…")
     s))
 
-(defun sprig-session--input-summary (name input)
-  "Return a one-line summary of tool NAME's INPUT, or nil.
-Shows the command for `Bash'; other non-diff tools fall back to a salient
-input field (path, pattern, query, ...).  File tools that render a diff
-header instead pass their changes in, so this is only reached without one."
+(defun sprig-session--tool-display-name (name)
+  "Return tool NAME as it should read in a heading.
+An MCP server's tools arrive spelled `mcp__SERVER__TOOL'.  That is three
+tokens of wire format for two of meaning, so they read as `SERVER:TOOL'
+and the row says which server and which tool without the prefix.  Any
+other name is already its own display name."
+  (if (string-prefix-p "mcp__" name)
+      (let ((rest (substring name (length "mcp__"))))
+        ;; Split on the first `__' only: a server name may carry one of its
+        ;; own, and everything after the first is the tool.
+        (if (string-match "__" rest)
+            (concat (substring rest 0 (match-beginning 0))
+                    ":"
+                    (substring rest (match-end 0)))
+          rest))
+    name))
+
+(defconst sprig-session--summary-keys
+  '(command file_path path pattern query url description prompt symbol name text)
+  "Input fields a tool call is summarized by, most salient first.
+One ordered list rather than a table keyed by tool name: the tools an MCP
+server adds are not known ahead of time, and reading their input the way
+the built-in ones are read makes their headings say as much.")
+
+(defun sprig-session--summary-value (val)
+  "Return VAL when it is a string with something in it, else nil."
+  (and (stringp val) (string-match-p "[^[:space:]]" val) val))
+
+(defun sprig-session--input-summary (input)
+  "Return a one-line summary of a tool call's INPUT, or nil.
+Takes the first of `sprig-session--summary-keys' the input carries (the
+command for `Bash', a path, a pattern, a query, ...), and failing all of
+them its first string field, so a tool this file has never heard of still
+says what it was asked for.  File tools that render a diff header instead
+pass their changes in, so this is only reached without one."
   (let* ((obj (sprig--parse-input input))
-         (val (if (equal name "Bash")
-                  (alist-get 'command obj)
-                (seq-some (lambda (k) (alist-get k obj))
-                          '(file_path path pattern query url description prompt)))))
-    (when (stringp val)
+         (val (or (seq-some (lambda (k)
+                              (sprig-session--summary-value (alist-get k obj)))
+                            sprig-session--summary-keys)
+                  (seq-some (lambda (cell)
+                              (and (consp cell)
+                                   (sprig-session--summary-value (cdr cell))))
+                            obj))))
+    (when val
       (car (split-string val "\n")))))
 
 (defun sprig-session--todos (block)
@@ -516,11 +549,11 @@ to that."
   (let* ((name (or (plist-get block :name) "tool"))
          (changes (plist-get block :changes))
          (todos (sprig-session--todos block))
-         (summary (sprig-session--input-summary name (plist-get block :input)))
+         (summary (sprig-session--input-summary (plist-get block :input)))
          (activity (sprig-session--agent-activity block))
          (err (plist-get (plist-get block :result) :error)))
     (concat
-     (sprig--face name 'sprig-session-tool)
+     (sprig--face (sprig-session--tool-display-name name) 'sprig-session-tool)
      (cond
       (changes
        (let ((c (car changes)))
@@ -1135,10 +1168,11 @@ whole of what you are approving is here to read."
   "Insert the tool call BLOCK wants permission for, and what was said of it."
   (let* ((request (plist-get block :input))
          (tool (or (alist-get 'tool_name request) "a tool"))
-         (summary (sprig-session--input-summary tool (alist-get 'input request))))
+         (summary (sprig-session--input-summary (alist-get 'input request))))
     (magit-insert-section (sprig-permission block)
       (magit-insert-heading
-        (sprig--face (format "? Allow %s?" tool) 'sprig-session-dialog))
+        (sprig--face (format "? Allow %s?" (sprig-session--tool-display-name tool))
+                     'sprig-session-dialog))
       (when summary
         (insert "    "
                 (sprig--face

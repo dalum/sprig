@@ -1013,6 +1013,20 @@ stands in for the CLI, being live and costing no external program."
       (should (equal (car (sprig-session-tests--state-line))
                      "?  waiting on you  ·  a a to answer")))))
 
+(ert-deftest sprig-session-mode-test-permission-names-mcp-server ()
+  "A tool an MCP server added is asked about by server and tool, not by prefix."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (sprig-session-consume
+     (list 'dialog "req-m" "can_use_tool"
+           '((subtype . "can_use_tool")
+             (tool_name . "mcp__gortex__search")
+             (input . ((query . "callers of sprig-session-flush"))))))
+    (sprig-session-flush)
+    (let ((s (buffer-string)))
+      (should (string-match-p "\\? Allow gortex:search\\?" s))
+      (should (string-match-p "callers of sprig-session-flush" s)))))
+
 (ert-deftest sprig-session-mode-test-permission-allow-and-deny ()
   (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
             ((symbol-function 'quit-window) #'ignore))
@@ -2612,6 +2626,35 @@ the highlighting you read it in; it visits nothing, so a save writes no file."
     ;; An ordinary tool has no subagent and gains nothing.
     (should-not (sprig-session--agent-activity
                  (list :type 'tool :name "Read" :input "{}")))))
+
+(ert-deftest sprig-session-mode-test-mcp-tool-heading ()
+  "An MCP server's tool reads as SERVER:TOOL, and still says what it asked."
+  ;; The wire spelling is three tokens for two of meaning.
+  (should (equal (sprig-session--tool-display-name "mcp__gortex__search")
+                 "gortex:search"))
+  ;; A server name carrying an underscore keeps it; only the first `__' splits.
+  (should (equal (sprig-session--tool-display-name "mcp__code_intel__trace")
+                 "code_intel:trace"))
+  ;; A built-in tool is already its own display name.
+  (should (equal (sprig-session--tool-display-name "Bash") "Bash"))
+  (let ((s (substring-no-properties
+            (sprig-session--tool-heading
+             (list :type 'tool :id "toolu_M" :name "mcp__gortex__search"
+                   :input (json-serialize '(:symbol "sprig-session--insert-tool")))))))
+    (should (string-match-p "^gortex:search  sprig-session--insert-tool" s)))
+  ;; A field no built-in tool uses: the first string there is beats nothing.
+  (let ((s (substring-no-properties
+            (sprig-session--tool-heading
+             (list :type 'tool :id "toolu_M" :name "mcp__gortex__relations"
+                   :input (json-serialize '(:needle "parse-input" :depth 2)))))))
+    (should (string-match-p "^gortex:relations  parse-input" s)))
+  ;; And the command still wins for `Bash', which also carries a description.
+  (let ((s (substring-no-properties
+            (sprig-session--tool-heading
+             (list :type 'tool :id "toolu_B" :name "Bash"
+                   :input (json-serialize '(:command "ls -la"
+                                            :description "List files")))))))
+    (should (string-match-p "^Bash  ls -la" s))))
 
 (ert-deftest sprig-session-mode-test-plan-indicator ()
   "The freshest plan's progress, by either route into the buffer."
