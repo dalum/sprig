@@ -230,6 +230,19 @@ Uses only real marks, not the section-at-point fallback."
                                  (oref s start) (oref s end))))
                  secs "\n\n"))))
 
+(defun sprig--marked-headings ()
+  "Return the first line of each marked section, or nil.
+That line is how the section reads as a row, so it names the section in a
+summary of what is marked.  Like `sprig--marked-context', only real marks
+count."
+  (when sprig--marks
+    (mapcar (lambda (s)
+              (save-excursion
+                (goto-char (oref s start))
+                (string-trim (buffer-substring-no-properties
+                              (point) (min (line-end-position) (oref s end))))))
+            (sprig--marked-sections))))
+
 ;;;; Renamed faces
 ;;
 ;; These render a change wherever it appears, so they left the transcript's

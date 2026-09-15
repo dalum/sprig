@@ -2575,6 +2575,73 @@ the highlighting you read it in; it visits nothing, so a save writes no file."
         (should (equal (string-trim (buffer-string)) "plan me something"))))
     (kill-buffer "*sprig-message*")))
 
+(defun sprig-session-tests--regarding ()
+  "Return the compose buffer's `Regarding:' overlay, or nil."
+  (seq-find (lambda (o) (overlay-get o 'sprig-session-regarding))
+            (overlays-in (point-min) (point-max))))
+
+(ert-deftest sprig-session-mode-test-compose-says-what-it-is-regarding ()
+  "Marked sections show above the composed text as one folded `Regarding:'
+line, which `C-c TAB' opens to the whole context.  It is an overlay, not
+text, so the context still goes out once."
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
+    (re-search-forward "^Editing the file\\.")
+    (sprig-toggle-mark)
+    (goto-char (point-min))
+    (re-search-forward "^Edit  /tmp/x\\.el")
+    (sprig-toggle-mark)
+    (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+      (sprig-session-message))
+    (with-current-buffer "*sprig-message*"
+      (should (equal (substring-no-properties
+                      (overlay-get (sprig-session-tests--regarding) 'before-string))
+                     "▸ Regarding: Editing the file.  (+1 more)\n\n"))
+      (insert "why this?")
+      ;; It stays above what you write, and none of it is in the text.
+      (should (= (overlay-start (sprig-session-tests--regarding)) (point-min)))
+      (should (equal (buffer-string) "why this?"))
+      (sprig-session-compose-toggle-regarding)
+      (let ((open (overlay-get (sprig-session-tests--regarding) 'before-string)))
+        (should (string-prefix-p "▾ Regarding:\n\nEditing the file." open))
+        (should (string-match-p "Edit  /tmp/x\\.el" open)))
+      (sprig-session-compose-toggle-regarding)
+      (should (string-prefix-p "▸" (overlay-get (sprig-session-tests--regarding)
+                                                'before-string))))
+    ;; The buffer is reused, and a message with nothing marked says nothing.
+    (sprig-unmark-all)
+    (cl-letf (((symbol-function 'pop-to-buffer) #'ignore))
+      (sprig-session-message))
+    (with-current-buffer "*sprig-message*"
+      (should-not (sprig-session-tests--regarding))
+      (should-error (sprig-session-compose-toggle-regarding) :type 'user-error))
+    (kill-buffer "*sprig-message*")))
+
+(ert-deftest sprig-session-mode-test-compose-send-unmarks-what-it-carried ()
+  "Sending unmarks the sections the message carried, since they are spent.
+A section marked while the message was being written was not part of it
+and keeps its mark, and a cancelled message spends nothing."
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
+    (let (text tool)
+      (re-search-forward "^Editing the file\\.")
+      (setq text (magit-section-ident (magit-current-section)))
+      (sprig-toggle-mark)
+      (cl-letf (((symbol-function 'pop-to-buffer) #'ignore)
+                ((symbol-function 'quit-window) #'ignore)
+                ((symbol-function 'sprig-session--steer) #'ignore))
+        (sprig-session-message)
+        (with-current-buffer "*sprig-message*" (sprig-session-compose-abort))
+        (should (equal sprig--marks (list text)))
+        (sprig-session-message)
+        (goto-char (point-min))
+        (re-search-forward "^Edit  /tmp/x\\.el")
+        (setq tool (magit-section-ident (magit-current-section)))
+        (sprig-toggle-mark)
+        (with-current-buffer "*sprig-message*"
+          (insert "look at this")
+          (sprig-session-compose-send))
+        (should (equal sprig--marks (list tool)))))
+    (kill-buffer "*sprig-message*")))
+
 (ert-deftest sprig-session-mode-test-agent-steps-nest-and-fold ()
   "A subagent's steps render inside the `Agent' row, each folding as a tool."
   (let ((model (list :blocks

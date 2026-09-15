@@ -728,7 +728,14 @@ escape hatch for feedback that is about the change and not about a line."
             (with-current-buffer "*sprig-message*"
               (should (eq sprig-session--compose-target session))
               (should (string-match-p "(baz))"
-                                      sprig-session--compose-context)))))
+                                      sprig-session--compose-context))
+              (insert "about this")
+              (cl-letf (((symbol-function 'quit-window) #'ignore)
+                        ((symbol-function 'sprig-session--steer) #'ignore))
+                (sprig-session-compose-send)))
+            ;; The mark is spent in the review, where it was made, not in
+            ;; the session the message went to.
+            (should-not sprig--marks)))
       (kill-buffer session)
       (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
 

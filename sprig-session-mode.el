@@ -157,6 +157,10 @@ point still reads as yours instead of losing its tint to the cursor."
   "Face for a metadata key in the header."
   :group 'sprig)
 
+(defface sprig-session-regarding '((t :inherit shadow))
+  "Face for the line in a compose buffer naming what a message is regarding."
+  :group 'sprig)
+
 (defface sprig-session-time '((t :inherit font-lock-comment-face))
   "Face for a block's timestamp in the left margin."
   :group 'sprig)
@@ -2789,6 +2793,17 @@ first under a `Regarding:' heading.")
   "Non-nil when the composed text is a side question (`c b'), not a message.
 Sent as a throwaway one-shot that leaves the turn and the log alone, rather
 than as a turn in the conversation.")
+(defvar-local sprig-session--compose-source nil
+  "Buffer the attached marks were made in, or nil.")
+(defvar-local sprig-session--compose-marks nil
+  "Idents of the marks attached to the message.
+Sending unmarks these in `sprig-session--compose-source', since a mark that
+has gone out with a message is spent.  Only these: a section marked while
+the message was being written was not part of it, and stays marked.")
+(defvar-local sprig-session--compose-headings nil
+  "First line of each attached section, for the `Regarding:' line.")
+(defvar-local sprig-session--compose-open nil
+  "Non-nil when the `Regarding:' line is unfolded to the whole context.")
 
 (defvar sprig-session-compose-mode-map (make-sparse-keymap)
   "Keymap for `sprig-session-compose-mode'.
@@ -2798,11 +2813,17 @@ Bound below, for the reason `sprig-review-mode-map' gives.")
             #'sprig-session-compose-send)
 (define-key sprig-session-compose-mode-map (kbd "C-c C-k")
             #'sprig-session-compose-abort)
+(define-key sprig-session-compose-mode-map (kbd "C-c TAB")
+            #'sprig-session-compose-toggle-regarding)
 
 (define-derived-mode sprig-session-compose-mode text-mode "Sprig-Msg"
   "Compose a message to send to a sprig conversation.
 \\<sprig-session-compose-mode-map>\\[sprig-session-compose-send] sends, \
-\\[sprig-session-compose-abort] cancels.")
+\\[sprig-session-compose-abort] cancels, and \
+\\[sprig-session-compose-toggle-regarding] unfolds what it is regarding."
+  ;; The buffer is reused, and changing mode keeps its overlays, so the last
+  ;; message's `Regarding:' line would otherwise sit on top of this one.
+  (remove-overlays (point-min) (point-max) 'sprig-session-regarding t))
 
 
 (defun sprig-session-message (&optional plan queue)
@@ -2831,9 +2852,12 @@ CONTEXT (see `sprig-session--compose-format'); LABEL names what is
 attached, for the echo-area line, and defaults to counting the marks.
 Shared by `sprig-session-message' and `sprig-review-publish'; call it from
 the buffer whose marks CONTEXT was collected in, so that count reads right
-before the compose buffer takes over."
+before the compose buffer takes over.  With no LABEL, CONTEXT is those
+marks: the compose buffer names them on a `Regarding:' line, and sending
+unmarks them."
   (let ((what (and context
                    (or label (format "%d section(s)" (length sprig--marks)))))
+        (source (current-buffer))
         (buf (get-buffer-create "*sprig-message*")))
     (with-current-buffer buf
       (sprig-session-compose-mode)
@@ -2843,12 +2867,70 @@ before the compose buffer takes over."
             sprig-session--compose-mode (and plan "plan")
             sprig-session--compose-queue queue
             sprig-session--compose-format format
-            sprig-session--compose-btw nil))
+            sprig-session--compose-btw nil)
+      (unless label (sprig-session--compose-attach source context)))
     (pop-to-buffer buf)
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
              (if queue "QUEUED: waits for the running turn to end.  " "")
-             (if what (format "%s attached.  " what) ""))))
+             (if what
+                 (format "%s attached%s.  " what
+                         (if label "" ", C-c TAB shows it"))
+               ""))))
+
+(defun sprig-session--compose-attach (source context)
+  "Attach SOURCE's marked sections, whose text is CONTEXT, to this message.
+Call it in the compose buffer.  It draws a folded `Regarding:' line above
+the text naming what goes with the message, and keeps the marks so that
+sending can unmark them in SOURCE."
+  (when context
+    (setq sprig-session--compose-source source
+          sprig-session--compose-marks
+          (copy-sequence (buffer-local-value 'sprig--marks source))
+          sprig-session--compose-headings
+          (with-current-buffer source (sprig--marked-headings)))
+    (sprig-session--compose-draw-regarding)))
+
+(defun sprig-session--compose-draw-regarding ()
+  "Draw the `Regarding:' line above the composed text, folded or open.
+Folded, it names the first attached section by its heading and counts the
+rest.  It is an overlay rather than text, so it is never part of what is
+sent: the context goes out once, framed by `sprig-session-compose-send'."
+  (remove-overlays (point-min) (point-max) 'sprig-session-regarding t)
+  (when-let ((headings sprig-session--compose-headings))
+    (let ((ov (make-overlay (point-min) (point-min))))
+      (overlay-put ov 'sprig-session-regarding t)
+      (overlay-put
+       ov 'before-string
+       (propertize
+        (if sprig-session--compose-open
+            (format "▾ Regarding:\n\n%s\n\n" sprig-session--compose-context)
+          (format "▸ Regarding: %s%s\n\n"
+                  (truncate-string-to-width (car headings) 60 nil nil "…")
+                  (if (cdr headings)
+                      (format "  (+%d more)" (length (cdr headings)))
+                    "")))
+        'face 'sprig-session-regarding)))))
+
+(defun sprig-session-compose-toggle-regarding ()
+  "Unfold what the message is regarding, or fold it again (`C-c TAB').
+Open, it shows the attached context exactly as it goes out."
+  (interactive)
+  (unless sprig-session--compose-headings
+    (user-error "Nothing attached; mark sections before composing"))
+  (setq sprig-session--compose-open (not sprig-session--compose-open))
+  (sprig-session--compose-draw-regarding))
+
+(defun sprig-session--compose-spend-marks ()
+  "Unmark the sections this message carried, where they were marked.
+They have gone with the message, so leaving them marked would attach them
+to the next one too."
+  (let ((source sprig-session--compose-source)
+        (idents sprig-session--compose-marks))
+    (when (and idents (buffer-live-p source))
+      (with-current-buffer source
+        (setq sprig--marks (seq-difference sprig--marks idents))
+        (sprig--apply-marks)))))
 
 (defun sprig-session-message-plan ()
   "Compose a message and send it in plan mode (`c p')."
@@ -2916,10 +2998,11 @@ the CLI's own `/btw'."
             sprig-session--compose-context context
             sprig-session--compose-mode nil
             sprig-session--compose-queue nil
-            sprig-session--compose-btw t))
+            sprig-session--compose-btw t)
+      (sprig-session--compose-attach review context))
     (pop-to-buffer buf)
     (message "%sby the way: C-c C-c to ask, C-c C-k to cancel"
-             (if context (format "%d section(s) attached.  "
+             (if context (format "%d section(s) attached, C-c TAB shows it.  "
                                  (length (sprig--marked-sections)))
                ""))))
 
@@ -2951,6 +3034,7 @@ the CLI's own `/btw'."
                   dir (sprig--directory)
                   remote (sprig--remote)
                   tail (sprig-session--btw-tail)))
+          (sprig-session--compose-spend-marks)
           (quit-window t)
           (sprig--btw-ask id dir remote text context tail))
       (let ((message (cond (fmt (funcall fmt text context))
@@ -2965,6 +3049,7 @@ the CLI's own `/btw'."
           (cond (queue (sprig-session--queue message))
                 (mode (sprig-session--send message mode))
                 (t (sprig-session--steer message))))
+        (sprig-session--compose-spend-marks)
         (quit-window t)))))
 
 (defun sprig-session-compose-abort ()
