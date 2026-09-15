@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.11.0
+;; Version: 0.12.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -113,6 +113,19 @@ mostly reading code, so the code gets the syntax colours and the change
 gets the margin.  Nil renders the old way, plain text with the whole line
 coloured."
   :type 'boolean
+  :group 'sprig)
+
+(defcustom sprig-review-fontify-file-lines 10000
+  "Largest file, in lines per side, fontified whole for the review.
+The review reads its diff a second time at full context so a hunk's
+colours can be computed from the entire file rather than from the few
+lines the hunk shows: a hunk that starts in the middle of a docstring
+then fontifies as the docstring it is in, instead of as code (see
+`sprig-review--filefont').  Fontifying a whole file costs time on the
+first render, so a file longer than this many lines on either side
+falls back to fontifying each hunk on its own, the old behaviour and
+the old blind spot.  Nil skips the full-context read entirely."
+  :type '(choice (integer :tag "Lines") (const :tag "Never" nil))
   :group 'sprig)
 
 (defcustom sprig-review-default-branches
@@ -232,6 +245,25 @@ since the file has moved on by then.")
 Folding is a reading position, not a fact about the diff, so re-reading
 the diff must not shut the file you are in the middle of.")
 
+(defvar-local sprig-review--full-context nil
+  "The reviewed diff re-read at full context, parsed; nil when unavailable.
+`git diff -U999999' folds the whole of each changed file into its diff
+as context, so the parse carries every line of both sides with its
+number.  That is what lets a hunk be fontified from the file it sits in
+rather than from its own few lines (see `sprig-review--filefont').
+Read once per reload beside the diff itself; nil when that read failed,
+when `sprig-review-fontify-code' or `sprig-review-fontify-file-lines'
+is nil, and until the first reload.")
+
+(defvar-local sprig-review--filefont-cache nil
+  "Hash of FILE to its whole-file fontified line maps, or nil.
+Each value is (OLDMAP . NEWMAP), hash tables from a line number to that
+line's text fontified as part of the entire side, or the symbol `skip'
+for a file the treatment does not fit (absent from the full-context
+read, or longer than `sprig-review-fontify-file-lines').  Built lazily
+per file from `sprig-review--full-context'; dropped with it on reload,
+since both describe a tree that has moved on.")
+
 ;;;; Reading the tree
 ;;
 ;; The one thing sprig runs itself.  A read of the working tree is what
@@ -328,6 +360,15 @@ Untracked files are not shown, since `git diff' omits them and staging
 them would touch the index."
   (sprig-review--run-git remote root
                          (sprig-review--diff-args sprig-review-base)))
+
+(defun sprig-review--git-full-context (remote root)
+  "Return the same diff `sprig-review--git' reads, at full context.
+`-U999999' folds the whole of each changed file into its diff as
+context, so the parse that follows knows every line of both sides.
+Same scope, same transport, one more round trip per reload."
+  (let ((args (sprig-review--diff-args sprig-review-base)))
+    (sprig-review--run-git remote root
+                           (cons (car args) (cons "-U999999" (cdr args))))))
 
 (defun sprig-review--ref-branch (ref)
   "Return the branch name REF points at, dropping any remote prefix.
@@ -543,12 +584,17 @@ post-image, which is what the file on disk actually reads.  Signals a
 ;;;; Syntax highlighting
 ;;
 ;; A review is mostly reading code, so the code is fontified in its own
-;; file's major mode and the diff's own colours move to the gutter.  Each
-;; side of a hunk is fontified as one contiguous block rather than line by
-;; line, so a multi-line string or comment inside the hunk comes out right.
-;; A construct that *opens before* the hunk still cannot: we have the hunk,
-;; not the file, which is the price of never reading the tree beyond the
-;; diff (and the only thing that works unchanged for a remote tree).
+;; file's major mode and the diff's own colours move to the gutter.  The
+;; colours are computed from the *whole file* where they can be: the diff
+;; is read a second time at full context (`sprig-review--full-context'),
+;; each side of each file fontified as one text, and a hunk's lines
+;; sliced out by their numbers.  That is what gets a hunk opening in the
+;; middle of a docstring painted as the docstring it is in; a hunk
+;; fontified on its own cannot know, and worse, the construct's *closing*
+;; delimiter inside the hunk flips the state for everything after it.
+;; The hunk-alone path stays as the fallback, for a file too large for
+;; the whole treatment (`sprig-review-fontify-file-lines'), a failed
+;; full-context read, and a tree that moved between the two reads.
 
 (defvar sprig-review--fontify-cache (make-hash-table :test 'equal :size 200)
   "Memoises fontified diff blocks, keyed by (FILENAME . TEXT).
@@ -600,8 +646,83 @@ be able to act like one."
     (let ((text (mapconcat (lambda (l) (plist-get l :text)) lines "\n")))
       (split-string (sprig-review--fontify-block file text) "\n"))))
 
+(defun sprig-review--filefont-build (file)
+  "Build FILE's whole-file fontified maps from the full-context parse.
+Returns (OLDMAP . NEWMAP), each a hash from a line number to that
+line's text fontified as part of the entire side, or the symbol `skip'
+when FILE is absent from the full-context read or a side runs past
+`sprig-review-fontify-file-lines'.  Each side is fontified as one text,
+so any construct however far back it opens comes out right; the
+memoisation in `sprig-review--fontify-block' makes a reload where the
+file did not change cost nothing."
+  (let* ((change (seq-find (lambda (c) (equal (plist-get c :file) file))
+                           sprig-review--full-context))
+         (lines (and change
+                     (apply #'append
+                            (mapcar (lambda (u) (plist-get u :lines))
+                                    (plist-get change :unified)))))
+         (olds (seq-filter (lambda (l) (plist-get l :old)) lines))
+         (news (seq-filter (lambda (l) (plist-get l :new)) lines)))
+    (if (or (null lines)
+            (> (max (length olds) (length news))
+               sprig-review-fontify-file-lines))
+        'skip
+      (let ((oldmap (make-hash-table :test 'eql :size (max 1 (length olds))))
+            (newmap (make-hash-table :test 'eql :size (max 1 (length news)))))
+        (cl-mapc (lambda (l text) (puthash (plist-get l :old) text oldmap))
+                 olds (sprig-review--fontify-side file olds))
+        (cl-mapc (lambda (l text) (puthash (plist-get l :new) text newmap))
+                 news (sprig-review--fontify-side file news))
+        (cons oldmap newmap)))))
+
+(defun sprig-review--filefont (file)
+  "Return FILE's whole-file fontified maps (OLDMAP . NEWMAP), or nil.
+Nil when whole-file fontification is off or does not fit this file; the
+verdict is cached per file until the next reload."
+  (when (and sprig-review-fontify-code
+             sprig-review-fontify-file-lines
+             sprig-review--full-context)
+    (unless sprig-review--filefont-cache
+      (setq sprig-review--filefont-cache (make-hash-table :test 'equal)))
+    (let ((hit (gethash file sprig-review--filefont-cache 'miss)))
+      (when (eq hit 'miss)
+        (setq hit (puthash file (sprig-review--filefont-build file)
+                           sprig-review--filefont-cache)))
+      (unless (eq hit 'skip) hit))))
+
+(defun sprig-review--hunk-texts-filewise (file uhunk)
+  "UHUNK's lines with texts sliced from FILE's whole-file maps, or nil.
+Nil unless every line of the hunk is found at its number carrying
+exactly the text the display diff carries: the two reads are moments
+apart, and a tree that moved between them must not paint one version's
+lines with another's colours.  All or nothing per hunk, so a mismatch
+falls back to fontifying the hunk on its own rather than mixing the two
+sources in one hunk."
+  (when-let* ((maps (sprig-review--filefont file)))
+    (catch 'mismatch
+      (mapcar
+       (lambda (l)
+         (let ((cand (pcase (plist-get l :kind)
+                       ('del (gethash (plist-get l :old) (car maps)))
+                       (_ (gethash (plist-get l :new) (cdr maps))))))
+           (unless (and cand (equal (substring-no-properties cand)
+                                    (plist-get l :text)))
+             (throw 'mismatch nil))
+           (cons l cand)))
+       (plist-get uhunk :lines)))))
+
 (defun sprig-review--hunk-texts (file uhunk)
   "Return UHUNK's lines paired with their fontified text, as (LINE . TEXT).
+The whole-file colours win when they are to be had
+\(`sprig-review--hunk-texts-filewise'), being right even for a construct
+that opens before the hunk; otherwise each side of the hunk is fontified
+as its own block (`sprig-review--hunk-texts-alone'), which is right only
+within the hunk."
+  (or (sprig-review--hunk-texts-filewise file uhunk)
+      (sprig-review--hunk-texts-alone file uhunk)))
+
+(defun sprig-review--hunk-texts-alone (file uhunk)
+  "UHUNK's lines fontified from the hunk alone, as (LINE . TEXT).
 Each side is fontified as its own block: the pre-image for removed lines,
 the post-image for added and context ones.  Context appears in both, and
 takes the post-image's colours, since that is what the file now reads."
@@ -906,13 +1027,25 @@ line under point, and the same files open (see `sprig-review--expanded\=')."
   (let ((redraw
          (lambda ()
            ;; The wide re-reads describe the tree as it was; it has moved.
-           (setq sprig-review--wide-cache nil)
+           (setq sprig-review--wide-cache nil
+                 sprig-review--filefont-cache nil
+                 sprig-review--full-context nil)
            (setq sprig-review--changes
                  (sprig-parse-diff (sprig-review--git sprig-review--remote
                                                       sprig-review--root))
                  sprig-review--drafts
                  (sprig-review--reanchor sprig-review--drafts
                                          sprig-review--changes))
+           ;; The second read feeds only the colours, so its failure is
+           ;; not the review's: the hunk-alone fontification still runs.
+           (setq sprig-review--full-context
+                 (and sprig-review-fontify-code
+                      sprig-review-fontify-file-lines
+                      sprig-review--changes
+                      (ignore-errors
+                        (sprig-parse-diff
+                         (sprig-review--git-full-context
+                          sprig-review--remote sprig-review--root)))))
            (sprig-review--render))))
     (if keep-point
         (sprig-review--render-in-place redraw)

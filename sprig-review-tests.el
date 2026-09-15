@@ -197,6 +197,103 @@ inside the hunk resolves; line-by-line fontification would not."
                                   'font-lock-face out))))
     (should (eq (funcall at "still a string") 'font-lock-string-face))))
 
+(defconst sprig-review-tests--doc-full-diff
+  "diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -1,6 +1,7 @@
+ def f():
+     \"\"\"Doc opens.
+     aaa
+     bbb
++    added doc line
+     \"\"\"
+     return 1
+"
+  "The full-context read: the whole file, docstring opener included.")
+
+(defconst sprig-review-tests--doc-hunk-diff
+  "diff --git a/a.py b/a.py
+--- a/a.py
++++ b/a.py
+@@ -4,2 +4,3 @@
+     bbb
++    added doc line
+     \"\"\"
+"
+  "The display hunk: it starts inside the docstring, opener unseen.")
+
+(defun sprig-review-tests--doc-uhunk ()
+  "The display hunk of `sprig-review-tests--doc-hunk-diff', parsed."
+  (car (plist-get (car (sprig-parse-diff sprig-review-tests--doc-hunk-diff))
+                  :unified)))
+
+(defun sprig-review-tests--text-face (texts needle)
+  "The `font-lock-face' where NEEDLE occurs among TEXTS's (LINE . TEXT)."
+  (let ((text (cdr (seq-find (lambda (p)
+                               (string-match-p (regexp-quote needle)
+                                               (cdr p)))
+                             texts))))
+    (get-text-property (string-match (regexp-quote needle) text)
+                       'font-lock-face text)))
+
+(ert-deftest sprig-review-test-filewise-fontifies-past-the-hunk ()
+  "A hunk starting inside a docstring takes the whole file's colours.
+The opener sits above the hunk, so the hunk alone paints the line as
+code; sliced from the full-context read it is the string it really is."
+  (with-temp-buffer
+    (setq-local sprig-review--full-context
+                (sprig-parse-diff sprig-review-tests--doc-full-diff))
+    ;; The blind spot this exists for: alone, the added line is not prose.
+    ;; A docstring may take the doc face or the string face by mode and
+    ;; Emacs version, so both count as right and neither as wrong.
+    (should-not (memq (sprig-review-tests--text-face
+                       (sprig-review--hunk-texts-alone
+                        "a.py" (sprig-review-tests--doc-uhunk))
+                       "added doc line")
+                      '(font-lock-string-face font-lock-doc-face)))
+    ;; Filewise, it is the docstring it sits in.
+    (should (memq (sprig-review-tests--text-face
+                   (sprig-review--hunk-texts "a.py"
+                                             (sprig-review-tests--doc-uhunk))
+                   "added doc line")
+                  '(font-lock-string-face font-lock-doc-face)))))
+
+(ert-deftest sprig-review-test-filewise-refuses-a-moved-tree ()
+  "The two reads are moments apart; when they disagree on a line's text,
+the whole hunk falls back to its own colours rather than mixing sources."
+  (with-temp-buffer
+    (setq-local sprig-review--full-context
+                (sprig-parse-diff
+                 (string-replace "added doc line" "some other line"
+                                 sprig-review-tests--doc-full-diff)))
+    (should-not (sprig-review--hunk-texts-filewise
+                 "a.py" (sprig-review-tests--doc-uhunk)))))
+
+(ert-deftest sprig-review-test-filewise-respects-the-size-cap ()
+  "A file longer than `sprig-review-fontify-file-lines' is not fontified
+whole; the verdict is per file and the hunk-alone path still runs."
+  (with-temp-buffer
+    (setq-local sprig-review--full-context
+                (sprig-parse-diff sprig-review-tests--doc-full-diff))
+    (let ((sprig-review-fontify-file-lines 2))
+      (should-not (sprig-review--filefont "a.py"))
+      (should-not (sprig-review--hunk-texts-filewise
+                   "a.py" (sprig-review-tests--doc-uhunk)))
+      ;; The fallback still answers for every line.
+      (should (= 3 (length (sprig-review--hunk-texts
+                            "a.py" (sprig-review-tests--doc-uhunk))))))))
+
+(ert-deftest sprig-review-test-filewise-is-off-without-the-read ()
+  "No full-context parse, no whole-file treatment: the narrow path is
+what a test render, a failed read, and a fontify-off buffer all get."
+  (with-temp-buffer
+    (should-not (sprig-review--filefont "a.py"))
+    (let ((sprig-review-fontify-code nil))
+      (setq-local sprig-review--full-context
+                  (sprig-parse-diff sprig-review-tests--doc-full-diff))
+      (should-not (sprig-review--filefont "a.py")))))
+
 (ert-deftest sprig-review-test-fontify-survives-an-unknown-file ()
   "An unrecognised name is not an error; it just comes back plain."
   (should (equal (sprig-review--fontify-uncached "x.zzzz" "a b c") "a b c"))
@@ -1178,7 +1275,9 @@ for another round trip."
             (sprig-review--reload)
             (sprig-review-tests--goto "y = 3")
             (sprig-review-tests--staging (sprig-review-stage-block))
-            (should (= reads 3))))
+            ;; Four, not three: the reload itself reads twice, the diff
+            ;; and its full-context twin for the whole-file colours.
+            (should (= reads 4))))
       (kill-buffer session))))
 
 (ert-deftest sprig-review-test-stage-hunk-verb-takes-the-whole-hunk ()
