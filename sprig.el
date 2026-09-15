@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.55.0
+;; Version: 0.56.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -5532,6 +5532,8 @@ command's docstring."
   "Compact the context of the row's session (`c z').")
 (sprig--status-define-steer sprig-status-btw sprig-session-btw
   "Ask a side question about the row's session, disturbing nothing (`c b').")
+(sprig--status-define-steer sprig-status-ask-status sprig-session-ask-status
+  "Ask the row's session for a brief status report (`c s').")
 (sprig--status-define-steer sprig-status-answer sprig-session-answer
   "Answer the row's session's waiting question, one at a time (`a a').")
 (sprig--status-define-steer sprig-status-answer-recommended
@@ -5771,7 +5773,8 @@ not here: they act on a diff section, which the navigator has none of."
     ("r" "resend last turn" sprig-status-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)
     ("z" "compact context" sprig-status-compact)
-    ("b" "by the way: side question (writes no log)" sprig-status-btw)]
+    ("b" "by the way: side question (writes no log)" sprig-status-btw)
+    ("s" "status report (a canned side question)" sprig-status-ask-status)]
    ["Session"
     ("o" "open & connect" sprig-status-connect)
     ("d" "disconnect (stops a held session)" sprig-status-disconnect)]])

@@ -2890,5 +2890,22 @@ tearing the process down; the turn's `done' does the clearing later."
             (should (timerp sprig--interrupt-timer)))
         (sprig--clear-interrupt)))))
 
+(ert-deftest sprig-session-mode-test-ask-status-fires-the-canned-question ()
+  "`c s' asks the canned status question over the side-question fork,
+with no compose step, and refuses when there is no session to ask."
+  (let (asked)
+    (cl-letf (((symbol-function 'sprig--btw-ask)
+               (lambda (id _dir _host question _context _tail)
+                 (setq asked (list id question)))))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (setq sprig--session-id "abc123")
+        (sprig-session-ask-status)
+        (should (equal asked
+                       (list "abc123" sprig-session-status-question))))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (should-error (sprig-session-ask-status) :type 'user-error)))))
+
 (provide 'sprig-session-mode-tests)
 ;;; sprig-session-mode-tests.el ends here
