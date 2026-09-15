@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.10.0
+;; Version: 0.11.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -64,7 +64,7 @@
 (defvar sprig--session-cwd)
 ;; Also buffer-local in a session buffer, read out of its `Bash' calls.
 (defvar sprig--seen-dir)
-;; Also buffer-local there: the review-only tree override `d w' sets.
+;; Also buffer-local there: the review-only tree override `w' sets.
 (defvar sprig--review-dir)
 ;; And the session's own directory and id, for the ask-the-agent fork.
 (defvar sprig--working-dir)
@@ -1839,7 +1839,7 @@ agent, like every other sprig verb."
 
 (defun sprig-review--session-root ()
   "Return (REMOTE . ROOT) for the session buffer point is in.
-The `d w' override (`sprig--review-dir') outranks the session's own
+The `w' override (`sprig--review-dir') outranks the session's own
 directory, so a review pointed at another worktree stays pointed there.
 Signals a `user-error' when there is no session, no working directory, or
 no git repository around it."
@@ -1878,7 +1878,7 @@ changes the scope, reads the tree."
                         (not (derived-mode-p 'sprig-review-mode)))))
     (with-current-buffer buf
       (when fresh (sprig-review-mode))
-      ;; A `d w' switch changes the tree under an existing review buffer,
+      ;; A `w' switch changes the tree under an existing review buffer,
       ;; and showing that buffer as it was would show the *old* tree's
       ;; diff labelled as the new one's.  A tree change re-reads the way a
       ;; scope change does.
@@ -2051,7 +2051,7 @@ Pure, so the wording is testable without a tree to point it at.  DIR is
 what every review verb diffs and FACTS its plist from
 `sprig-review--tree-facts' (nil when DIR is no git tree at all); ELSEWHERE
 is (PATH FACTS HOW) from `sprig-review--elsewhere', or nil.  CHOSEN
-non-nil says DIR was set by hand with `d w' rather than being the
+non-nil says DIR was set by hand with `w' rather than being the
 session's own, which the line states: a tree you pointed the review at
 must not read as where the session lives.
 
@@ -2080,7 +2080,7 @@ it was last seen going there, not that it is there now."
                  (sprig-review--show-path remote root))
        "this session has no working directory")
      (sprig-review--where-tree remote facts root)
-     (when chosen " (set with d w)")
+     (when chosen " (set with w)")
      (when adrift
        (concat (if how
                    "; the agent was last seen moving into "
@@ -2103,10 +2103,10 @@ lives on, for `sprig-review--show-path'."
      (concat ", a worktree of " (sprig-review--show-path remote main)))))
 
 (defun sprig-session-review-where ()
-  "Say which tree the review verbs read, and where the session really is (`d w w').
+  "Say which tree the review verbs read, and where the session really is (`w w').
 Every `d' diffs the session's configured working directory (`sprig-
 directory', or this buffer's own override), resolved to its git top level,
-unless the `d w' transient has pointed it elsewhere (`sprig--review-dir'),
+unless the `w' transient has pointed it elsewhere (`sprig--review-dir'),
 which the line then says outright.
 That is not always where the session is, and there are two ways to learn
 otherwise: the CLI names its own working directory on the `init' event, and
@@ -2164,7 +2164,7 @@ disagreement when they are not."
      (concat "; the review verbs read " (sprig-review--show-path remote dir)))))
 
 (defun sprig-session-review-cwd ()
-  "Say the working directories the session reported and was seen using (`d c').
+  "Say the working directories the session reported and was seen using (`w c').
 The raw tracked values.  `sprig--session-cwd' is read from the CLI's `init'
 event, the only place the stream names the directory the session is
 actually running in; it is refreshed on every connect, reattach and resume,
@@ -2173,7 +2173,7 @@ been connected has nothing to report yet.  `sprig--seen-dir' is read from
 the agent's own `Bash' calls, and is the last directory it was seen moving
 into.
 
-Where `d w' mentions these only when they land in a different git tree
+Where `w w' mentions these only when they land in a different git tree
 from the one being reviewed, this states them every time and touches git
 not at all.  It is the answer to `where does this session think it is',
 asked on its own rather than as part of a question about the diff."
@@ -2212,14 +2212,14 @@ and no candidates still leaves a path you can type."
 (defun sprig-review--worktree-note (remote dir override)
   "One line naming the tree the review verbs read, for a transient heading.
 Pure.  DIR is that tree (nil when the session has no working directory)
-and OVERRIDE non-nil when it was chosen with `d w' rather than being the
+and OVERRIDE non-nil when it was chosen with `w' rather than being the
 session's own."
   (concat "Worktree: reading "
           (if dir
               (concat (when remote (concat remote ":"))
                       (sprig-review--show-path remote dir))
             "nowhere (this session has no working directory)")
-          (when override "  (set with d w)")))
+          (when override "  (set with w)")))
 
 (defun sprig-review--worktree-heading ()
   "The worktree transient headings: the tree the review verbs read now.
@@ -2235,7 +2235,7 @@ slow."
   "Point every review verb at DIR, after checking it names a git tree.
 Runs in the session buffer, setting its review-only override
 \(`sprig--review-dir'): the session itself stays homed where it is, and
-`d w r' clears the override again.  An open review buffer picks the new
+`w r' clears the override again.  An open review buffer picks the new
 tree up on its next `d', which re-reads on a tree change the way it does
 on a scope change."
   (unless (derived-mode-p 'sprig-session-mode)
@@ -2252,8 +2252,8 @@ on a scope change."
       (message "%s" (sprig-review--where-line remote dir facts nil t)))))
 
 (defun sprig-session-review-worktree-detected ()
-  "Adopt the tree the session was detected in (`d w d').
-The passive detection `d w w' reports: the tree the agent was last seen
+  "Adopt the tree the session was detected in (`w d').
+The passive detection `w w' reports: the tree the agent was last seen
 moving into (`sprig--seen-dir'), else the directory the CLI itself
 reported on connect (`sprig--session-cwd').  Adopting it is one key
 because it is the common case: the agent added itself a worktree, and the
@@ -2296,7 +2296,7 @@ directory that exists but is wrong."
       (and (string-match-p "\\`[~/]" s) s))))
 
 (defun sprig-session-review-worktree-ask ()
-  "Ask the agent which tree it is working in, then adopt it (`d w a').
+  "Ask the agent which tree it is working in, then adopt it (`w a').
 Rides the side-question fork the way `T a' does: the fork sees the whole
 conversation, writes no log and opens no turn, so asking disturbs
 nothing.  The answer is proposed in the minibuffer for you to accept or
@@ -2321,10 +2321,10 @@ shell; `sprig-review--set-tree' then still checks it names a git tree."
                                (sprig-review--set-tree dir)))))))))
 
 (defun sprig-session-review-worktree-manually (dir)
-  "Set the tree the review verbs read to DIR by hand (`d w m').
+  "Set the tree the review verbs read to DIR by hand (`w m').
 Completion offers the repository's own worktrees (`git worktree list',
 read in the tree currently being reviewed), but any path on the session's
-host may be typed.  `d w r' goes back to the session's own directory."
+host may be typed.  `w r' goes back to the session's own directory."
   (interactive
    (progn
      (unless (derived-mode-p 'sprig-session-mode)
@@ -2338,7 +2338,7 @@ host may be typed.  `d w r' goes back to the session's own directory."
   (sprig-review--set-tree dir))
 
 (defun sprig-session-review-worktree-reset ()
-  "Drop the `d w' override: the review verbs read the session's own tree (`d w r')."
+  "Drop the `w' override: the review verbs read the session's own tree (`w r')."
   (interactive)
   (unless (derived-mode-p 'sprig-session-mode)
     (user-error "Not in a sprig session buffer"))
@@ -2352,44 +2352,42 @@ host may be typed.  `d w r' goes back to the session's own directory."
                "the session's own directory"))))
 
 (transient-define-prefix sprig-session-review-worktree ()
-  "Say or switch which tree the review verbs read (`d w').
-`w' keeps the old report: which tree the four scopes read, and where the
-session really is.  The rest switch it: `d' adopts the tree the passive
-detection found (the last seen move, else the reported cwd), `a' asks the
-agent itself over a side-question fork and proposes its answer for you to
-confirm, `m' names one by hand with the repository's worktrees as
-completion, and `r' goes back to the session's own directory.  The switch
-is review-only (`sprig--review-dir'): it never re-homes the session
-itself."
-  [[:description sprig-review--worktree-heading
-    ("w" "where: which tree these read, and where the session is"
-     sprig-session-review-where)
-    ("d" "adopt the detected tree (last seen move, else the reported cwd)"
-     sprig-session-review-worktree-detected
-     :if (lambda () (or sprig--seen-dir sprig--session-cwd)))
-    ("a" "ask the agent which tree it works in, then set it"
-     sprig-session-review-worktree-ask)
-    ("m" "set by hand (this repo's worktrees complete)"
-     sprig-session-review-worktree-manually)
-    ("r" "reset to the session's own directory"
-     sprig-session-review-worktree-reset
-     :if (lambda () sprig--review-dir))]])
+  "Say or switch which tree the review verbs read (`w').
+The heading names the tree in force.  `w w' and `w c' report: which tree
+the `d' scopes read and where the session really is, and the raw tracked
+directories.  The rest switch it: `w d' adopts the tree the passive
+detection found (the last seen move, else the reported cwd), `w a' asks
+the agent itself over a side-question fork and proposes its answer for
+you to confirm, `w m' names one by hand with the repository's worktrees
+as completion, and `w r' goes back to the session's own directory.  The
+switch is review-only (`sprig--review-dir'): it never re-homes the
+session itself."
+  [:description sprig-review--worktree-heading
+   ("w" "where: which tree the review reads, and where the session is"
+    sprig-session-review-where)
+   ("c" "cwd: the directory the session itself reported"
+    sprig-session-review-cwd)
+   ("d" "adopt the detected tree (last seen move, else the reported cwd)"
+    sprig-session-review-worktree-detected
+    :if (lambda () (or sprig--seen-dir sprig--session-cwd)))
+   ("a" "ask the agent which tree it works in, then set it"
+    sprig-session-review-worktree-ask)
+   ("m" "set by hand (this repo's worktrees complete)"
+    sprig-session-review-worktree-manually)
+   ("r" "reset to the session's own directory"
+    sprig-session-review-worktree-reset
+    :if (lambda () sprig--review-dir))])
 
 (transient-define-prefix sprig-session-review-dispatch ()
   "Review the changes in this session's working tree.
-The tree those verbs read is named in the second group's heading, and
-`w' says more about it or switches it (see
-`sprig-session-review-worktree')."
-  [["Review"
-    ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
-    ("m" "the whole branch (against main, master, …)" sprig-session-review-branch)
-    ("p" "against the branch this one was branched off" sprig-session-review-parent)
-    ("b" "against a base you name" sprig-session-review-base)]
-   [:description sprig-review--worktree-heading
-    ("w" "worktree: say or switch the tree these read"
-     sprig-session-review-worktree)
-    ("c" "cwd: the directory the session itself reported"
-     sprig-session-review-cwd)]])
+The heading names the tree those verbs read; the top-level `w' transient
+(`sprig-session-review-worktree') says more about it or switches it,
+which is why nothing here reports on the tree any more."
+  [:description sprig-review--worktree-heading
+   ("d" "uncommitted changes (against HEAD)" sprig-session-review-uncommitted)
+   ("m" "the whole branch (against main, master, …)" sprig-session-review-branch)
+   ("p" "against the branch this one was branched off" sprig-session-review-parent)
+   ("b" "against a base you name" sprig-session-review-base)])
 
 (defun sprig-review-set-base (base)
   "Change what this review diffs against, and re-read it (`b').

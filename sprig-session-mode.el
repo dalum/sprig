@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.42.0
+;; Version: 0.43.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -3520,6 +3520,7 @@ into its first-message prompt (plan mode for `s p')."
 (define-key sprig-session-mode-map (kbd "C")   #'sprig-session-commit)
 (define-key sprig-session-mode-map (kbd "x")   #'sprig-session-run)
 (define-key sprig-session-mode-map (kbd "d")   #'sprig-session-review-dispatch)
+(define-key sprig-session-mode-map (kbd "w")   #'sprig-session-review-worktree)
 (define-key sprig-session-mode-map (kbd "RET") #'sprig-session-visit)
 (define-key sprig-session-mode-map (kbd "t")   #'sprig-session-set-title)
 (define-key sprig-session-mode-map (kbd "T")   #'sprig-session-title-dispatch)

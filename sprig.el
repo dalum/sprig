@@ -381,7 +381,7 @@ the reader knows the directory it would be relative to.")
 
 (defvar-local sprig--review-dir nil
   "Tree the `d' review verbs read instead of the session's own, or nil.
-A review-only override, set from the `d w' transient: pointing the review
+A review-only override, set from the `w' transient: pointing the review
 at a worktree the agent moved into must not re-home the session itself,
 which is what writing `sprig--working-dir' would do on the next connect.
 Nil reads the session's own directory, as ever (`sprig--directory').")

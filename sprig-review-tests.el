@@ -1377,7 +1377,7 @@ which is what every Lisp and every C-like language writes instead."
               "(defun foo ()" "  (bar))")))
     (should (equal '(2 . 5) (sprig-review--defun-bounds el 5 "/tmp/x.el")))))
 
-;;;; Where the session is (`d w')
+;;;; Where the session is (`w')
 
 (defmacro sprig-review-tests--rev-parse (out &rest body)
   "Run BODY with `git rev-parse' answering OUT and every other call empty.
@@ -1477,7 +1477,7 @@ saying so every time would bury the case that matters."
 
 (ert-deftest sprig-review-test-where-says-what-it-found-instead ()
   "No repository, no commits and no branch are three different answers, and
-`d w' is the command you reach for when a `d' did something you did not
+`w' is the command you reach for when a `d' did something you did not
 expect, so none of them may read as one of the others."
   (should (string-suffix-p "(not a git repository)"
                            (sprig-review--where-line nil "/tmp" nil nil)))
@@ -1542,7 +1542,7 @@ ran in, which is the session's own; an absolute one is already an answer."
 
 (ert-deftest sprig-review-test-cwd-states-it-even-when-it-agrees ()
   "`d c' is the unconditional one: asked for the tracked value, it gives the
-tracked value, where `d w' would say nothing because there is no drift."
+tracked value, where `w' would say nothing because there is no drift."
   (should (equal "sprig: the session is running in /home/me/proj"
                  (sprig-review--cwd-line nil "/home/me/proj" "/home/me/proj"
                                          nil))))
@@ -1577,9 +1577,9 @@ history has nothing to report; saying which is better than an empty answer."
                  (sprig-review--cwd-line nil "/home/me/proj" nil nil))))
 
 (ert-deftest sprig-review-test-where-says-when-the-tree-was-chosen ()
-  "A tree pointed at with `d w' must not read as where the session lives,
+  "A tree pointed at with `w' must not read as where the session lives,
 so the line says the override outright."
-  (should (equal "sprig: /home/me/proj/.worktrees/x on feature/x (set with d w)"
+  (should (equal "sprig: /home/me/proj/.worktrees/x on feature/x (set with w)"
                  (sprig-review--where-line
                   nil "/home/me/proj/.worktrees/x"
                   '(:root "/home/me/proj/.worktrees/x" :branch "feature/x")
@@ -1605,7 +1605,7 @@ worktree /home/me/proj/.worktrees/x\nHEAD def456\nbranch refs/heads/feature/x\n\
 hand, from strings alone so the popup costs no git."
   (should (equal "Worktree: reading ~/proj"
                  (sprig-review--worktree-note nil "~/proj" nil)))
-  (should (equal "Worktree: reading box:/home/them/wt  (set with d w)"
+  (should (equal "Worktree: reading box:/home/them/wt  (set with w)"
                  (sprig-review--worktree-note "box" "/home/them/wt"
                                               "/home/them/wt")))
   (should (equal "Worktree: reading nowhere (this session has no working directory)"
