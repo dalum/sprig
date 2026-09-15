@@ -1989,6 +1989,23 @@ opening a stored conversation measures it."
       (sprig-toggle-mark)
       (should-not (member ident sprig--marks)))))
 
+(ert-deftest sprig-session-mode-test-mark-highlights-the-whole-block ()
+  "A marked prose block is highlighted to its last paragraph, not only its
+first line, since the whole block is what goes with a message.  The blank
+line after it is not part of it, and neither is the next section."
+  (sprig-session-tests--rendered
+      (sprig-session-build '((text "First paragraph.\n\nSecond paragraph.")
+                             (user "next")))
+      nil
+    (re-search-forward "^First paragraph\\.")
+    (sprig-toggle-mark)
+    (let ((ov (seq-find (lambda (o) (overlay-get o 'sprig-mark))
+                        (overlays-in (point-min) (point-max)))))
+      (should ov)
+      (should (equal (buffer-substring-no-properties (overlay-start ov)
+                                                     (overlay-end ov))
+                     "First paragraph.\n\nSecond paragraph.\n")))))
+
 (ert-deftest sprig-session-mode-test-reject-pairs ()
   (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
     (goto-char (point-min))

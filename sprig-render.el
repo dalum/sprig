@@ -170,13 +170,18 @@ so they are worth reading at a glance rather than parsing."
 Idents rather than section objects, so marks survive a re-render.")
 
 (defun sprig--apply-marks ()
-  "Highlight the marked sections; drop marks whose section no longer exists."
+  "Highlight the marked sections; drop marks whose section no longer exists.
+The highlight covers the whole section, since the whole section is what a
+verb takes: a prose block is a line per paragraph, so its first line alone
+would claim less than goes with the message.  Trailing blank lines are left
+out, as they separate sections rather than belong to one."
   (remove-overlays (point-min) (point-max) 'sprig-mark t)
   (setq sprig--marks (seq-filter #'magit-get-section sprig--marks))
   (dolist (ident sprig--marks)
     (let* ((sec (magit-get-section ident))
            (beg (oref sec start))
-           (end (save-excursion (goto-char beg)
+           (end (save-excursion (goto-char (oref sec end))
+                                (skip-chars-backward " \t\n" beg)
                                 (min (1+ (line-end-position)) (point-max))))
            (ov (make-overlay beg end)))
       (overlay-put ov 'sprig-mark t)
