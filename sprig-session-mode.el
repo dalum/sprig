@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.44.0
+;; Version: 0.45.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2370,6 +2370,17 @@ proceed.  For a reason or an alternative, compose a reply with `c c'."
   :type 'string
   :group 'sprig)
 
+(defcustom sprig-session-status-instruction
+  "Give me a brief status report: what you are doing right now, what is \
+done so far, what remains, and anything you are blocked on. A few short \
+lines; then carry on."
+  "Canned request the status verb (`c s') sends into the conversation.
+Like the yes/no instructions above it composes nothing: mid-turn it
+steers, so the agent answers at its next tool-call boundary and keeps
+working; idle, it opens a turn of its own."
+  :type 'string
+  :group 'sprig)
+
 (defun sprig-session-reject-instruction (changes)
   "Return an instruction asking the agent to undo CHANGES.
 CHANGES is a list of (FILE . HUNK-PLIST)."
@@ -2590,6 +2601,17 @@ agent to hold off rather than proceed."
   (interactive)
   (sprig-session--send sprig-session-decline-instruction)
   (message "sprig: no"))
+
+(defun sprig-session-ask-status ()
+  "Ask the agent for a brief status report (`c s').
+A canned instruction like `c y' and `c n', composing nothing: it steers
+a turn in flight, so the agent reports at its next tool-call boundary
+and carries on, and with no turn running it goes as a turn of its own.
+The wording is `sprig-session-status-instruction'; for a pointed
+question about the work, compose one with `c c' instead."
+  (interactive)
+  (sprig-session--steer sprig-session-status-instruction)
+  (message "sprig: status requested"))
 
 (defun sprig-session-set-title (title)
   "Set this review's display TITLE in the header.
@@ -2975,27 +2997,6 @@ now, the way the CLI's in-process `/btw' does."
 saved transcript.  Its latest output so far is:\n\n%s" reply)
         "The agent is mid-turn right now (nothing not yet saved has any prose \
 to show)."))))
-
-(defvar sprig-session-status-question
-  "Give me a brief status report on this session: what you are working on \
-right now, what has been done so far, what remains, and anything you are \
-blocked on. A few short lines; no code."
-  "The canned side question `c s' asks the session.")
-
-(defun sprig-session-ask-status ()
-  "Ask the session for a brief status report, disturbing nothing (`c s').
-A canned side question: like `c b' it forks the session, so the answer
-draws on the whole conversation, streams into `*sprig-btw*', writes no
-log and opens no turn.  Mid-turn it also carries the live text of the
-turn in flight, which is exactly when a status is worth asking for.
-Unlike `c b' there is nothing to compose, because the question is always
-the same (`sprig-session-status-question')."
-  (interactive)
-  (unless sprig--session-id
-    (user-error "No session yet to ask about; send a message first"))
-  (sprig--btw-ask sprig--session-id (sprig--directory) (sprig--remote)
-                  sprig-session-status-question nil
-                  (sprig-session--btw-tail)))
 
 (defun sprig-session-btw ()
   "Compose a side question about this session, disturbing nothing (`c b').
@@ -3448,13 +3449,13 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("Q" "drop the queued messages" sprig-session-drop-queue)
     ("y" "yes / accept" sprig-session-accept)
     ("n" "no / decline" sprig-session-decline)
+    ("s" "status report (canned; steers a running turn)" sprig-session-ask-status)
     ("p" "compose in plan mode" sprig-session-message-plan)
     ("r" "independent review of the changes (subagent)" sprig-session-independent-review)
     ("l" "resend last turn" sprig-session-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-session-interrupt)
     ("z" "compact context" sprig-session-compact)
-    ("b" "by the way: side question (writes no log)" sprig-session-btw)
-    ("s" "status report (a canned side question)" sprig-session-ask-status)]
+    ("b" "by the way: side question (writes no log)" sprig-session-btw)]
    ["Changes (agent instructions)"
     ("k" "reject / undo (or unstage a floated message)" sprig-session-reject)
     ("C" "commit" sprig-session-commit)

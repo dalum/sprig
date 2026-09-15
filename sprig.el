@@ -5769,12 +5769,12 @@ not here: they act on a diff section, which the navigator has none of."
     ("Q" "drop the queued messages" sprig-status-drop-queue)
     ("y" "yes / accept" sprig-status-accept)
     ("n" "no / decline" sprig-status-decline)
+    ("s" "status report (canned; steers a running turn)" sprig-status-ask-status)
     ("p" "compose in plan mode" sprig-status-message-plan)
     ("r" "resend last turn" sprig-status-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)
     ("z" "compact context" sprig-status-compact)
-    ("b" "by the way: side question (writes no log)" sprig-status-btw)
-    ("s" "status report (a canned side question)" sprig-status-ask-status)]
+    ("b" "by the way: side question (writes no log)" sprig-status-btw)]
    ["Session"
     ("o" "open & connect" sprig-status-connect)
     ("d" "disconnect (stops a held session)" sprig-status-disconnect)]])
