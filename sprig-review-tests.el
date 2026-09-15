@@ -1576,5 +1576,55 @@ history has nothing to report; saying which is better than an empty answer."
                          "running; it reports that on connect")
                  (sprig-review--cwd-line nil "/home/me/proj" nil nil))))
 
+(ert-deftest sprig-review-test-where-says-when-the-tree-was-chosen ()
+  "A tree pointed at with `d w' must not read as where the session lives,
+so the line says the override outright."
+  (should (equal "sprig: /home/me/proj/.worktrees/x on feature/x (set with d w)"
+                 (sprig-review--where-line
+                  nil "/home/me/proj/.worktrees/x"
+                  '(:root "/home/me/proj/.worktrees/x" :branch "feature/x")
+                  nil t)))
+  ;; Without the flag the wording is untouched.
+  (should (equal "sprig: /home/me/proj on main"
+                 (sprig-review--where-line
+                  nil "/home/me/proj"
+                  '(:root "/home/me/proj" :branch "main") nil))))
+
+(ert-deftest sprig-review-test-worktree-paths-reads-the-porcelain ()
+  "Only the `worktree ' lines name paths; branch and HEAD attributes, the
+bare flag and the blank stanza separators are all noise here."
+  (should (equal '("/home/me/proj" "/home/me/proj/.worktrees/x")
+                 (sprig-review--worktree-paths
+                  "worktree /home/me/proj\nHEAD abc123\nbranch refs/heads/main\n\n\
+worktree /home/me/proj/.worktrees/x\nHEAD def456\nbranch refs/heads/feature/x\n\n")))
+  (should-not (sprig-review--worktree-paths nil))
+  (should-not (sprig-review--worktree-paths "")))
+
+(ert-deftest sprig-review-test-worktree-note-names-the-tree-read ()
+  "The transient heading: the tree, its host, and whether it was chosen by
+hand, from strings alone so the popup costs no git."
+  (should (equal "Worktree: reading ~/proj"
+                 (sprig-review--worktree-note nil "~/proj" nil)))
+  (should (equal "Worktree: reading box:/home/them/wt  (set with d w)"
+                 (sprig-review--worktree-note "box" "/home/them/wt"
+                                              "/home/them/wt")))
+  (should (equal "Worktree: reading nowhere (this session has no working directory)"
+                 (sprig-review--worktree-note nil nil nil))))
+
+(ert-deftest sprig-review-test-clean-path-tells-a-path-from-an-apology ()
+  "The fork's answer is prose until proven path: quotes and trailing
+punctuation are shed, a chatty sentence is rejected, and a long path is
+never truncated the way a title is."
+  (should (equal "/home/me/proj/.worktrees/x"
+                 (sprig-review--clean-path
+                  "`/home/me/proj/.worktrees/x`.\n")))
+  (should (equal "~/proj" (sprig-review--clean-path "\"~/proj\"")))
+  (should-not (sprig-review--clean-path
+               "I am working in the main checkout."))
+  (should-not (sprig-review--clean-path nil))
+  (should-not (sprig-review--clean-path "  \n"))
+  (let ((long (concat "/very" (make-string 120 ?y) "/deep/path")))
+    (should (equal long (sprig-review--clean-path long)))))
+
 (provide 'sprig-review-tests)
 ;;; sprig-review-tests.el ends here

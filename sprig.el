@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.54.0
+;; Version: 0.55.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -378,6 +378,13 @@ tree a review reads.
 PATH is recorded exactly as the command wrote it, relative and all;
 resolving it is the reader\='s job (see `sprig-review--resolve'), since only
 the reader knows the directory it would be relative to.")
+
+(defvar-local sprig--review-dir nil
+  "Tree the `d' review verbs read instead of the session's own, or nil.
+A review-only override, set from the `d w' transient: pointing the review
+at a worktree the agent moved into must not re-home the session itself,
+which is what writing `sprig--working-dir' would do on the next connect.
+Nil reads the session's own directory, as ever (`sprig--directory').")
 
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
@@ -2867,7 +2874,12 @@ be nil.  Streams the answer into `*sprig-btw*'.  The one-at-a-time guard is
   "Assistant text collected from the retitle fork, assembled on `done'.")
 
 (defvar-local sprig--title-callback nil
-  "One-argument function run with the proposed title once the fork settles.")
+  "One-argument function run with the proposed answer once the fork settles.")
+
+(defvar-local sprig--title-clean-fn #'sprig--title-clean
+  "Function reducing the fork's raw answer to the one line handed on.
+Buffer-local in the fork's hidden buffer, so the same sink serves every
+one-line ask: a retitle cleans for a title, a worktree ask for a path.")
 
 (defun sprig--title-prompt ()
   "The message asking a forked one-shot for a short session title."
@@ -2902,16 +2914,17 @@ chatty answer still yields a usable title."
       (when (buffer-live-p buf) (kill-buffer buf)))))
 
 (defun sprig--title-consume (event)
-  "Sink for a retitle fork: collect its answer, then hand it to the callback.
+  "Sink for a one-line ask fork: collect its answer, hand it to the callback.
 Runs in the fork's hidden buffer; assembles assistant text and, on `done',
-calls the stored `sprig--title-callback' with the cleaned title (nil on
+calls the stored `sprig--title-callback' with the cleaned answer (nil on
 failure).  The call is deferred with a zero timer so the confirm prompt runs
 at top level rather than inside the process filter."
   (pcase event
     (`(text ,s) (setq sprig--title-raw (concat sprig--title-raw s)))
     (`(done ,_ ,err)
      (let ((cb sprig--title-callback)
-           (proposed (and (not err) (sprig--title-clean sprig--title-raw))))
+           (proposed (and (not err)
+                          (funcall sprig--title-clean-fn sprig--title-raw))))
        (setq sprig--title-callback nil)
        (when cb (run-at-time 0 nil cb proposed))))
     (`(error ,_)
@@ -2920,25 +2933,35 @@ at top level rather than inside the process filter."
        (when cb (run-at-time 0 nil cb nil))))
     (_ nil)))
 
-(defun sprig--title-ask (id dir remote-host callback)
-  "Fork session ID in DIR on REMOTE-HOST to propose a title; run CALLBACK on it.
-CALLBACK gets the cleaned title string, or nil when the fork failed or gave
-nothing usable.  Reuses the side-question fork transport; one retitle runs
-at a time (`sprig--title-process')."
+(defun sprig--line-ask (id dir remote-host prompt clean what callback)
+  "Fork session ID in DIR on REMOTE-HOST to answer PROMPT with one line.
+CLEAN reduces the fork's raw answer to that line (nil when unusable) and
+CALLBACK gets the result, nil when the fork failed or gave nothing usable.
+WHAT names the errand in the progress message.  Reuses the side-question
+fork transport, so the fork sees the whole conversation, writes no log and
+opens no turn; one such ask runs at a time (`sprig--title-process')."
   (when (process-live-p sprig--title-process)
-    (user-error "A retitle is already running; wait for it to finish"))
+    (user-error "The agent is already being asked something; wait for it"))
   (let ((command (sprig--btw-command id dir remote-host))
         (buffer (generate-new-buffer " *sprig-title*")))
     (with-current-buffer buffer
       (setq-local sprig--sink #'sprig--title-consume)
       (setq-local sprig--title-raw "")
+      (setq-local sprig--title-clean-fn clean)
       (setq-local sprig--title-callback callback))
     (setq sprig--title-process
           (sprig--fork-spawn command dir remote-host buffer
                              "sprig-title" #'sprig--title-sentinel))
-    (sprig--btw-send sprig--title-process (sprig--title-prompt))
-    (message "sprig: asking the agent for a title (%s)..."
-             (if remote-host "remote" "local"))))
+    (sprig--btw-send sprig--title-process prompt)
+    (message "sprig: asking the agent for %s (%s)..."
+             what (if remote-host "remote" "local"))))
+
+(defun sprig--title-ask (id dir remote-host callback)
+  "Fork session ID in DIR on REMOTE-HOST to propose a title; run CALLBACK on it.
+CALLBACK gets the cleaned title string, or nil when the fork failed or gave
+nothing usable."
+  (sprig--line-ask id dir remote-host (sprig--title-prompt)
+                   #'sprig--title-clean "a title" callback))
 
 (defun sprig--title-persist (id remote-host title)
   "Write TITLE as session ID's user title, into its log.
