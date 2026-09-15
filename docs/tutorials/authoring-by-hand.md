@@ -82,7 +82,10 @@ is local, you can write one before the session has even started.
 
 `c p` publishes the review: your comments and your edits in one turn. Each edit
 carries both blocks in full, and the covering instruction says they are not
-suggestions to interpret, but one `Edit` each, character for character. Your
+suggestions to interpret, but one `Edit` each, character for character. It also
+says the consequences are the agent's: whatever your edit affects elsewhere
+(callers, references, imports, docs, tests) is updated to match, so a rename
+you typed in one place does not leave the tree disagreeing with itself. Your
 change lands in the working tree as a normal diff.
 
 Because the agent does the write, glance at the resulting diff to confirm it

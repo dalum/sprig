@@ -1042,9 +1042,16 @@ comments, and tells the agent the edits are not up for interpretation."
                 (should (string-match-p "an edit I wrote by hand" body))
                 (should (string-match-p "(baz))" body))
                 (should (string-match-p "(qux))" body))
-                (should (string-match-p
-                         "character for character"
-                         (sprig-review--publish-format "note" body 1)))))))
+                (let ((framed (sprig-review--publish-format "note" body 1)))
+                  (should (string-match-p "character for character" framed))
+                  ;; Verbatim text, rippled consequences: the framing asks
+                  ;; for what the edit breaks elsewhere to be updated too.
+                  (should (string-match-p "update whatever it affects elsewhere"
+                                          framed)))
+                ;; A review with no edits carries none of that framing.
+                (should-not (string-match-p
+                             "affects elsewhere"
+                             (sprig-review--publish-format "note" body 0)))))))
       (kill-buffer session)
       (when (get-buffer "*sprig-message*") (kill-buffer "*sprig-message*")))))
 

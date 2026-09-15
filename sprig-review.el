@@ -1266,7 +1266,8 @@ check where it belongs before applying it, or tell me it no longer fits"
   "Frame a published review: covering note TEXT over the draft BODY.
 EDITS, when it counts any, says some entries are text I wrote myself, so
 the framing asks for those verbatim rather than for a judgement about
-them."
+them, and for their consequences elsewhere (callers, references, docs)
+to be carried through: the bytes are fixed, the ripple is the agent's."
   (format "I have reviewed the current changes and left %s on specific \
 lines. Address each one, then tell me briefly what you changed for each. \
 Where you disagree with a comment, say so rather than changing the code.%s
@@ -1283,8 +1284,11 @@ Where you disagree with a comment, say so rather than changing the code.%s
 The entries marked as an edit I wrote by hand are not suggestions to \
 interpret: apply each with a single Edit on that file, reproducing my \
 text character for character, and do not reformat, re-indent, correct, \
-or improve any of it. Where one no longer matches the file, say so \
-rather than guessing where it should go."
+or improve any of it. My text is fixed; its consequences are not. After \
+applying an edit, update whatever it affects elsewhere (callers, \
+references, imports, docs, tests) so everything still agrees, and say \
+what that took. Where one no longer matches the file, say so rather \
+than guessing where it should go."
             "")
           text body))
 
