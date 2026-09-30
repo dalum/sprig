@@ -155,20 +155,42 @@ timestamp, or the state line's rule."
   ;; `magit-section-mode' turns font-lock on, and font-lock's unfontify pass
   ;; strips the plain `face' property off every region it redisplays.  So
   ;; everything rendered must carry `font-lock-face' instead, or it silently
-  ;; loses its colours as soon as the window scrolls over it.
-  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model)
-      '(:title "T")
-    (font-lock-mode 1)
-    (font-lock-fontify-region (point-min) (point-max))
-    (cl-flet ((face-at (re)
+  ;; loses its colours as soon as the window scrolls over it.  Fontification
+  ;; is off here to exercise the classic whole-line diff faces; the
+  ;; fontified path has a test of its own below.
+  (let ((sprig-diff-fontify-code nil))
+    (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model)
+        '(:title "T")
+      (font-lock-mode 1)
+      (font-lock-fontify-region (point-min) (point-max))
+      (cl-flet ((face-at (re)
+                  (goto-char (point-min))
+                  (re-search-forward re)
+                  (get-text-property (match-beginning 0) 'font-lock-face)))
+        (should (eq (face-at "^Edit  ") 'sprig-session-tool))
+        (should (eq (face-at "^\\+new$") 'sprig-diff-added))
+        (should (eq (face-at "^-old$") 'sprig-diff-removed))
+        (should (eq (face-at "^/tmp/x\\.el$") 'sprig-diff-file))
+        (should (eq (face-at "Title:") 'sprig-session-meta-key))))))
+
+(ert-deftest sprig-session-mode-test-hunk-code-fontified-marker-in-gutter ()
+  ;; With `sprig-diff-fontify-code' on (the default), an inline payload hunk
+  ;; keeps its -/+ text but moves the colour to the marker: the code carries
+  ;; its own syntax faces, the way the review renders a hunk, and the marker
+  ;; alone says which way the line went.
+  (sprig-session-tests--rendered-expanded (sprig-session-tests--edit-model) nil
+    (cl-flet ((marker-face (re)
                 (goto-char (point-min))
                 (re-search-forward re)
                 (get-text-property (match-beginning 0) 'font-lock-face)))
-      (should (eq (face-at "^Edit  ") 'sprig-session-tool))
-      (should (eq (face-at "^\\+new$") 'sprig-diff-added))
-      (should (eq (face-at "^-old$") 'sprig-diff-removed))
-      (should (eq (face-at "^/tmp/x\\.el$") 'sprig-diff-file))
-      (should (eq (face-at "Title:") 'sprig-session-meta-key)))))
+      (should (eq (marker-face "^\\+new$") 'sprig-diff-stat-added))
+      (should (eq (marker-face "^-old$") 'sprig-diff-stat-removed))
+      ;; The code itself no longer wears the whole-line diff face.
+      (goto-char (point-min))
+      (re-search-forward "^\\+new$")
+      (should-not (eq (get-text-property (1+ (match-beginning 0))
+                                         'font-lock-face)
+                      'sprig-diff-added)))))
 
 (ert-deftest sprig-session-mode-test-fontify-is-memoised ()
   ;; A settled block's text never changes, so a re-render must not fontify it

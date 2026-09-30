@@ -1,7 +1,7 @@
 ;;; sprig-review.el --- Changeset review with draft line comments -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.12.0
+;; Version: 0.13.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -102,17 +102,6 @@ Anything containing `..' is passed to `git diff' verbatim, so an explicit
 range (`\"main...HEAD\"' for the committed changes alone) still means
 exactly what git says it means."
   :type 'string
-  :group 'sprig)
-
-(defcustom sprig-review-fontify-code t
-  "Syntax-highlight reviewed code in each file's own major mode.
-With this on the diff carries the colours you read the code in normally,
-and whether a line was added or removed is said by the gutter instead:
-the line-number columns and the `+'/`-' marker.  Reading a review is
-mostly reading code, so the code gets the syntax colours and the change
-gets the margin.  Nil renders the old way, plain text with the whole line
-coloured."
-  :type 'boolean
   :group 'sprig)
 
 (defcustom sprig-review-fontify-file-lines 10000
@@ -252,7 +241,7 @@ as context, so the parse carries every line of both sides with its
 number.  That is what lets a hunk be fontified from the file it sits in
 rather than from its own few lines (see `sprig-review--filefont').
 Read once per reload beside the diff itself; nil when that read failed,
-when `sprig-review-fontify-code' or `sprig-review-fontify-file-lines'
+when `sprig-diff-fontify-code' or `sprig-review-fontify-file-lines'
 is nil, and until the first reload.")
 
 (defvar-local sprig-review--filefont-cache nil
@@ -596,55 +585,15 @@ post-image, which is what the file on disk actually reads.  Signals a
 ;; the whole treatment (`sprig-review-fontify-file-lines'), a failed
 ;; full-context read, and a tree that moved between the two reads.
 
-(defvar sprig-review--fontify-cache (make-hash-table :test 'equal :size 200)
-  "Memoises fontified diff blocks, keyed by (FILENAME . TEXT).
-A re-render fontifies every hunk afresh though only a comment moved, and
-comments move often, so the cache is what keeps `c c' cheap on a big diff.
-Keyed by the file's name rather than its path, since the name is all that
-picks the major mode.")
-
-(defconst sprig-review--fontify-cache-max 500
-  "Entries to hold before clearing `sprig-review--fontify-cache' wholesale.")
-
-(defun sprig-review--fontify-uncached (name text)
-  "Return TEXT fontified as a file called NAME would be, or TEXT on failure.
-Runs in a temp buffer with the mode hooks delayed, so none of the user's
-per-mode machinery (LSP, linters) starts up over a fragment of a diff, and
-with file-local variables off, since the text is not a file and should not
-be able to act like one."
-  (condition-case nil
-      (with-temp-buffer
-        (insert text)
-        (let ((buffer-file-name name)
-              (enable-local-variables nil)
-              (inhibit-message t))
-          (delay-mode-hooks (set-auto-mode t)))
-        (font-lock-ensure)
-        ;; Font-lock in this buffer would strip a plain `face' (see
-        ;; `sprig--adopt-faces'), so move them across before they travel.
-        (sprig--adopt-faces (buffer-string)))
-    (error text)))
-
-(defun sprig-review--fontify-block (file text)
-  "Return TEXT fontified for FILE, memoised; TEXT unchanged when off."
-  (if (or (not sprig-review-fontify-code) (string-empty-p text))
-      text
-    (let* ((name (file-name-nondirectory (or file "")))
-           (key (cons name text)))
-      (or (gethash key sprig-review--fontify-cache)
-          (progn
-            (when (> (hash-table-count sprig-review--fontify-cache)
-                     sprig-review--fontify-cache-max)
-              (clrhash sprig-review--fontify-cache))
-            (puthash key (sprig-review--fontify-uncached name text)
-                     sprig-review--fontify-cache))))))
-
 (defun sprig-review--fontify-side (file lines)
-  "Return the texts of LINES fontified together as one block, in order."
+  "Return the texts of LINES fontified together as one block, in order.
+The fontifier itself is shared with the transcript's inline diffs (see
+`sprig--fontify-block' in sprig-render.el); what stays here is only the
+line-plist plumbing and the whole-file maps built on top."
   (if (null lines)
       nil
     (let ((text (mapconcat (lambda (l) (plist-get l :text)) lines "\n")))
-      (split-string (sprig-review--fontify-block file text) "\n"))))
+      (split-string (sprig--fontify-block file text) "\n"))))
 
 (defun sprig-review--filefont-build (file)
   "Build FILE's whole-file fontified maps from the full-context parse.
@@ -679,7 +628,7 @@ file did not change cost nothing."
   "Return FILE's whole-file fontified maps (OLDMAP . NEWMAP), or nil.
 Nil when whole-file fontification is off or does not fit this file; the
 verdict is cached per file until the next reload."
-  (when (and sprig-review-fontify-code
+  (when (and sprig-diff-fontify-code
              sprig-review-fontify-file-lines
              sprig-review--full-context)
     (unless sprig-review--filefont-cache
@@ -800,7 +749,7 @@ line went."
                    ('add 'sprig-review-lineno-added)
                    ('del 'sprig-review-lineno-removed)
                    (_ 'sprig-review-lineno)))
-         (plain (if sprig-review-fontify-code
+         (plain (if sprig-diff-fontify-code
                     text
                   ;; Unfontified, the line itself has to carry the colour.
                   (sprig--face text (pcase kind
@@ -1039,7 +988,7 @@ line under point, and the same files open (see `sprig-review--expanded\=')."
            ;; The second read feeds only the colours, so its failure is
            ;; not the review's: the hunk-alone fontification still runs.
            (setq sprig-review--full-context
-                 (and sprig-review-fontify-code
+                 (and sprig-diff-fontify-code
                       sprig-review-fontify-file-lines
                       sprig-review--changes
                       (ignore-errors

@@ -180,7 +180,7 @@ so colour is not the only signal and the code keeps its syntax colours."
 (ert-deftest sprig-review-test-fontify-can-be-turned-off ()
   "With highlighting off the whole line carries the diff colour again,
 so the buffer never ends up with no signal at all."
-  (let ((sprig-review-fontify-code nil))
+  (let ((sprig-diff-fontify-code nil))
     (sprig-review-tests--with
       (should (memq 'sprig-diff-added
                     (ensure-list (sprig-review-tests--face-on "(baz))"))))
@@ -191,7 +191,7 @@ so the buffer never ends up with no signal at all."
   "Each side is fontified as one block, so a construct crossing lines
 inside the hunk resolves; line-by-line fontification would not."
   (let* ((text "def f():\n    return \"\"\"\n    still a string\n    \"\"\"")
-         (out (sprig-review--fontify-uncached "a.py" text))
+         (out (sprig--fontify-uncached "a.py" text))
          (at (lambda (needle)
                (get-text-property (string-match (regexp-quote needle) out)
                                   'font-lock-face out))))
@@ -289,29 +289,29 @@ whole; the verdict is per file and the hunk-alone path still runs."
 what a test render, a failed read, and a fontify-off buffer all get."
   (with-temp-buffer
     (should-not (sprig-review--filefont "a.py"))
-    (let ((sprig-review-fontify-code nil))
+    (let ((sprig-diff-fontify-code nil))
       (setq-local sprig-review--full-context
                   (sprig-parse-diff sprig-review-tests--doc-full-diff))
       (should-not (sprig-review--filefont "a.py")))))
 
 (ert-deftest sprig-review-test-fontify-survives-an-unknown-file ()
   "An unrecognised name is not an error; it just comes back plain."
-  (should (equal (sprig-review--fontify-uncached "x.zzzz" "a b c") "a b c"))
-  (let ((sprig-review-fontify-code nil))
-    (should (equal (sprig-review--fontify-block "a.py" "def f():") "def f():"))))
+  (should (equal (sprig--fontify-uncached "x.zzzz" "a b c") "a b c"))
+  (let ((sprig-diff-fontify-code nil))
+    (should (equal (sprig--fontify-block "a.py" "def f():") "def f():"))))
 
 (ert-deftest sprig-review-test-fontify-is-memoised ()
   "A re-render must not re-fontify: comments move often, hunks do not."
-  (clrhash sprig-review--fontify-cache)
+  (clrhash sprig--fontify-cache)
   (let ((calls 0))
-    (cl-letf* ((orig (symbol-function 'sprig-review--fontify-uncached))
-               ((symbol-function 'sprig-review--fontify-uncached)
+    (cl-letf* ((orig (symbol-function 'sprig--fontify-uncached))
+               ((symbol-function 'sprig--fontify-uncached)
                 (lambda (&rest args) (cl-incf calls) (apply orig args))))
-      (sprig-review--fontify-block "a.py" "def f():")
-      (sprig-review--fontify-block "a.py" "def f():")
+      (sprig--fontify-block "a.py" "def f():")
+      (sprig--fontify-block "a.py" "def f():")
       (should (= calls 1))
       ;; The same text in another language is a different question.
-      (sprig-review--fontify-block "a.el" "def f():")
+      (sprig--fontify-block "a.el" "def f():")
       (should (= calls 2)))))
 
 ;;;; Reading the tree

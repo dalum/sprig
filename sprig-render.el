@@ -1,7 +1,7 @@
 ;;; sprig-render.el --- Shared rendering grammar for sprig's surfaces -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.1.0
+;; Version: 0.2.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -122,6 +122,82 @@ buffers whose mode body ran before the edit."
   ;; deletes it; magit runs one from `post-command-hook'.
   (setq magit-section-highlight-force-update t))
 
+;;;; Fontified code
+;;
+;; Reviewing is mostly reading code, so wherever a change renders, the code
+;; carries the colours it is read in normally, in the file's own major mode,
+;; and the direction of a line is said by the margin rather than by painting
+;; the whole line.  This lived in the changeset review first and moved down
+;; here so the transcript's inline payload diffs read the same way.  The
+;; review still layers its whole-file fontification on top (see
+;; `sprig-review--filefont'), which needs the full-context git read only
+;; that surface has; the shared fallback here fontifies each side of a hunk
+;; as one block, which is right within the hunk.
+
+(define-obsolete-variable-alias 'sprig-review-fontify-code
+  'sprig-diff-fontify-code "0.2.0")
+
+(defcustom sprig-diff-fontify-code t
+  "Syntax-highlight changed code in each file's own major mode.
+With this on, a rendered diff carries the colours the code is normally
+read in, and whether a line was added or removed is said by the margin:
+the `+'/`-' marker, and in the changeset review the line-number columns
+too.  Nil renders the old way, plain text with the whole line coloured."
+  :type 'boolean
+  :group 'sprig)
+
+(defvar sprig--fontify-cache (make-hash-table :test 'equal :size 200)
+  "Memoises fontified diff blocks, keyed by (FILENAME . TEXT).
+A re-render fontifies every hunk afresh though nothing in it changed, and
+a streaming session buffer re-renders often, so the cache is what keeps a
+redraw cheap.  Keyed by the file's name rather than its path, since the
+name is all that picks the major mode.")
+
+(defconst sprig--fontify-cache-max 500
+  "Entries to hold before clearing `sprig--fontify-cache' wholesale.")
+
+(defun sprig--fontify-uncached (name text)
+  "Return TEXT fontified as a file called NAME would be, or TEXT on failure.
+Runs in a temp buffer with the mode hooks delayed, so none of the user's
+per-mode machinery (LSP, linters) starts up over a fragment of a diff, and
+with file-local variables off, since the text is not a file and should not
+be able to act like one."
+  (condition-case nil
+      (with-temp-buffer
+        (insert text)
+        (let ((buffer-file-name name)
+              (enable-local-variables nil)
+              (inhibit-message t))
+          (delay-mode-hooks (set-auto-mode t)))
+        (font-lock-ensure)
+        ;; Font-lock in this buffer would strip a plain `face' (see
+        ;; `sprig--adopt-faces'), so move them across before they travel.
+        (sprig--adopt-faces (buffer-string)))
+    (error text)))
+
+(defun sprig--fontify-block (file text)
+  "Return TEXT fontified for FILE, memoised; TEXT unchanged when off."
+  (if (or (not sprig-diff-fontify-code) (string-empty-p text))
+      text
+    (let* ((name (file-name-nondirectory (or file "")))
+           (key (cons name text)))
+      (or (gethash key sprig--fontify-cache)
+          (progn
+            (when (> (hash-table-count sprig--fontify-cache)
+                     sprig--fontify-cache-max)
+              (clrhash sprig--fontify-cache))
+            (puthash key (sprig--fontify-uncached name text)
+                     sprig--fontify-cache))))))
+
+(defun sprig--fontify-lines (file lines)
+  "Return LINES fontified together as one block in FILE's major mode.
+One side of a hunk at a time, so a construct spanning several of its
+lines comes out right; a construct that opens before the hunk is beyond
+reach here (the review's whole-file pass covers that, where it can)."
+  (when lines
+    (split-string (sprig--fontify-block file (string-join lines "\n"))
+                  "\n")))
+
 ;;;; Change sections
 
 (defun sprig--stat-string (change)
@@ -137,13 +213,28 @@ so they are worth reading at a glance rather than parsing."
                                 'sprig-diff-stat-removed)
             ")")))
 
-(defun sprig--insert-hunk (hunk)
-  "Insert HUNK as removed lines then added lines, each a coloured section line."
+(defun sprig--insert-hunk (hunk &optional file)
+  "Insert HUNK as removed lines then added lines, each a coloured section line.
+With `sprig-diff-fontify-code' on and FILE to pick a major mode by, the
+code carries its own syntax colours, each side fontified as one block the
+way the review's hunk fallback is, and the `-'/`+' marker alone says
+which way a line went, in the foreground stat faces.  No line numbers,
+which the review's gutter has: a payload hunk never knew any (an Edit
+knows the bytes it replaced but not where they sat).  With fontification
+off, or no FILE, the whole line is painted with the classic diff faces."
   (magit-insert-section (sprig-hunk hunk)
-    (dolist (l (plist-get hunk :old))
-      (insert (sprig--face (concat "-" l) 'sprig-diff-removed) "\n"))
-    (dolist (l (plist-get hunk :new))
-      (insert (sprig--face (concat "+" l) 'sprig-diff-added) "\n"))))
+    (let ((olds (plist-get hunk :old))
+          (news (plist-get hunk :new)))
+      (if (and sprig-diff-fontify-code file)
+          (progn
+            (dolist (l (sprig--fontify-lines file olds))
+              (insert (sprig--face "-" 'sprig-diff-stat-removed) l "\n"))
+            (dolist (l (sprig--fontify-lines file news))
+              (insert (sprig--face "+" 'sprig-diff-stat-added) l "\n")))
+        (dolist (l olds)
+          (insert (sprig--face (concat "-" l) 'sprig-diff-removed) "\n"))
+        (dolist (l news)
+          (insert (sprig--face (concat "+" l) 'sprig-diff-added) "\n"))))))
 
 (defun sprig--insert-change (change)
   "Insert CHANGE as a foldable file section holding its hunks."
@@ -151,7 +242,7 @@ so they are worth reading at a glance rather than parsing."
     (magit-insert-heading
       (sprig--face (plist-get change :file) 'sprig-diff-file))
     (dolist (hunk (plist-get change :hunks))
-      (sprig--insert-hunk hunk))))
+      (sprig--insert-hunk hunk (plist-get change :file)))))
 
 (defun sprig--section-file (section)
   "Return the file path SECTION refers to, or nil."
