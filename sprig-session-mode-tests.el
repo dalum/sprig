@@ -2918,72 +2918,33 @@ the pace at its next tool-call boundary."
         (should-not sprig--pair)
         (should (equal steered sprig-pair-release-instruction))))))
 
-(ert-deftest sprig-session-mode-test-pair-continue-arms-and-fires ()
-  "A clean `done' arms the pair continue; firing delivers the canned line.
-The metronome's own delivery counts a step but does not reset it, the
-way a user's would."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
-          sprig--busy nil sprig--queued nil)
-    (let (delivered)
-      (unwind-protect
-          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                    ((symbol-function 'sprig--review-deliver)
-                     (lambda (text &optional _) (setq delivered text))))
-            (sprig--pair-schedule nil)
-            (should (timerp sprig--pair-timer))
-            (sprig--pair-fire (current-buffer))
-            (should (equal delivered sprig-pair-continue-instruction))
-            (should (= sprig--pair-steps 1)))
-        (sprig--pair-cancel)))))
+(ert-deftest sprig-session-mode-test-pair-step-sends-the-continue ()
+  "`.' delivers the canned continue as a turn of its own.
+The step is a plain delivery, so it starts or resumes the session the
+way any send does."
+  (let (delivered)
+    (cl-letf (((symbol-function 'sprig--review-deliver)
+               (lambda (text &optional _) (setq delivered text))))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (setq sprig--pair t sprig--busy nil)
+        (sprig-session-pair-step)
+        (should (equal delivered sprig-pair-continue-instruction))))))
 
-(ert-deftest sprig-session-mode-test-pair-continue-declines-when-outranked ()
-  "The continue never arms off an errored turn, a hold, or a dead process,
-and never fires over a queued message: each of those outranks the
-metronome."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
-          sprig--busy nil sprig--queued nil)
-    (let (delivered)
-      (unwind-protect
-          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                    ((symbol-function 'sprig--review-deliver)
-                     (lambda (text &optional _) (setq delivered text))))
-            (sprig--pair-schedule t)
-            (should-not sprig--pair-timer)
-            (setq sprig--pair-hold t)
-            (sprig--pair-schedule nil)
-            (should-not sprig--pair-timer)
-            (setq sprig--pair-hold nil sprig--queued '("later"))
-            (sprig--pair-schedule nil)
-            (sprig--pair-fire (current-buffer))
-            (should-not delivered)
-            (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil)))
-              (setq sprig--queued nil)
-              (sprig--pair-schedule nil)
-              (should-not sprig--pair-timer)))
-        (sprig--pair-cancel)))))
-
-(ert-deftest sprig-session-mode-test-pair-compose-holds-and-abort-resumes ()
-  "Opening a compose buffer holds the pair continue; cancelling resumes it.
-Sending lifts the hold through the deliver path instead, so the canned
-line never races what is being typed."
-  (with-temp-buffer
-    (sprig-session-mode)
-    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
-          sprig--busy nil sprig--queued nil)
-    (unwind-protect
-        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
-                  ((symbol-function 'sprig--redraw-queue-floats) #'ignore))
-          (sprig--pair-suspend)
-          (should sprig--pair-hold)
-          (should-not sprig--pair-timer)
-          (sprig--pair-resume)
-          (should-not sprig--pair-hold)
-          (should (timerp sprig--pair-timer)))
-      (sprig--pair-cancel))))
+(ert-deftest sprig-session-mode-test-pair-step-refuses-off-and-mid-turn ()
+  "`.' refuses outside pair mode and while the step is still running.
+Out of pair mode a habitual press would send a stray continue; mid-turn
+a leaned-on key would pile continues into the turn."
+  (let (delivered)
+    (cl-letf (((symbol-function 'sprig--review-deliver)
+               (lambda (text &optional _) (setq delivered text))))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (setq sprig--pair nil sprig--busy nil)
+        (should-error (sprig-session-pair-step) :type 'user-error)
+        (setq sprig--pair t sprig--busy t)
+        (should-error (sprig-session-pair-step) :type 'user-error)
+        (should-not delivered)))))
 
 (provide 'sprig-session-mode-tests)
 ;;; sprig-session-mode-tests.el ends here
