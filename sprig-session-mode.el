@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.45.0
+;; Version: 0.46.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -60,6 +60,9 @@
 (declare-function sprig--notable-mode "sprig" (mode))
 (declare-function sprig--model-label "sprig" (model))
 (declare-function sprig--state-parts "sprig" (state))
+(declare-function sprig--review-pair-toggle "sprig" ())
+(declare-function sprig--pair-suspend "sprig" ())
+(declare-function sprig--pair-resume "sprig" ())
 ;; Transport state, defined in sprig.el; a session-owning session buffer
 ;; carries these buffer-locally, so silence the byte-compiler here.
 (defvar sprig--process)
@@ -72,6 +75,8 @@
 (defvar sprig--remote-override)
 (defvar sprig--permission-mode)
 (defvar sprig--btw-process)
+(defvar sprig--pair)
+(defvar sprig--pair-hold)
 
 ;;;; Renamed options
 ;;
@@ -1371,6 +1376,16 @@ the turn as plainly as the line does."
         (insert (sprig--face "  ·  " face)
                 (sprig--face (format "%d queued" queued)
                                     'sprig-session-pending)))
+      ;; Pair mode is standing identity like the permission mode, not news
+      ;; about this turn, so it rides the same dim tag; `held' says the
+      ;; metronome is stopped on you (a compose buffer open, an interrupt),
+      ;; not merely between steps.
+      (when (and (boundp 'sprig--pair) sprig--pair)
+        (insert (sprig--face "  ·  " face)
+                (sprig--face (if (and (boundp 'sprig--pair-hold)
+                                      sprig--pair-hold)
+                                 "⟳ pair (held)" "⟳ pair")
+                             'sprig-mode-tag)))
       ;; The permission mode rides its own tag, coloured on its own terms
       ;; rather than the turn's, exactly as the navigator's state line carries
       ;; it (same `sprig--notable-mode' filter, same `sprig-mode-tag' face).
@@ -2613,6 +2628,18 @@ question about the work, compose one with `c c' instead."
   (sprig-session--steer sprig-session-status-instruction)
   (message "sprig: status requested"))
 
+(defun sprig-session-pair-mode ()
+  "Toggle pair mode: one small step per turn, auto-continued (`c .').
+On, the agent is told to work one narrated step at a time and stop
+\(`sprig-pair-instruction'), and Sprig sends the canned continue
+`sprig-pair-delay' seconds after each turn ends, so the work advances
+at a watchable pace and the gap is where you steer.  Anything you say
+takes the pending continue's place; opening a compose buffer holds it
+while you type, and `c i' holds it until you next speak.  Off, the
+agent is told to work normally again."
+  (interactive)
+  (sprig--review-pair-toggle))
+
 (defun sprig-session-set-title (title)
   "Set this review's display TITLE in the header.
 The stored session's own ai-title (owned by the CLI) is left untouched, so
@@ -2891,6 +2918,12 @@ unmarks them."
             sprig-session--compose-format format
             sprig-session--compose-btw nil)
       (unless label (sprig-session--compose-attach source context)))
+    ;; Composing is speaking: hold the pair-mode continue while the buffer
+    ;; is open, so the canned line never races what is being typed.  Sending
+    ;; lifts the hold through the deliver/steer path; cancelling resumes it
+    ;; (`sprig-session-compose-abort').
+    (when (buffer-live-p target)
+      (with-current-buffer target (sprig--pair-suspend)))
     (pop-to-buffer buf)
     (message "%s%s%sC-c C-c to send, C-c C-k to cancel"
              (if plan "PLAN mode.  " "")
@@ -3077,7 +3110,12 @@ the CLI's own `/btw'."
 (defun sprig-session-compose-abort ()
   "Cancel the message compose."
   (interactive)
-  (quit-window t)
+  (let ((target sprig-session--compose-target))
+    (quit-window t)
+    ;; Nothing was said, so the pair-mode pace resumes where composing
+    ;; paused it (a no-op outside pair mode).
+    (when (buffer-live-p target)
+      (with-current-buffer target (sprig--pair-resume))))
   (message "sprig: message cancelled"))
 
 ;;;; Staging buffer (author an edit by hand, then file it)
@@ -3455,7 +3493,9 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("l" "resend last turn" sprig-session-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-session-interrupt)
     ("z" "compact context" sprig-session-compact)
-    ("b" "by the way: side question (writes no log)" sprig-session-btw)]
+    ("b" "by the way: side question (writes no log)" sprig-session-btw)
+    ("." "pair mode: one step per turn, auto-continued (toggle)"
+     sprig-session-pair-mode)]
    ["Changes (agent instructions)"
     ("k" "reject / undo (or unstage a floated message)" sprig-session-reject)
     ("C" "commit" sprig-session-commit)

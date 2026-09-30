@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.56.0
+;; Version: 0.57.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -2362,6 +2362,7 @@ is visible without opening the header."
 (declare-function sprig-session-compact "sprig-session-mode" ())
 (declare-function sprig-session-btw "sprig-session-mode" (question))
 (declare-function sprig-session-ask-status "sprig-session-mode" ())
+(declare-function sprig-session-pair-mode "sprig-session-mode" ())
 (declare-function sprig-session--fontify-markdown "sprig-session-mode" (text))
 (declare-function sprig-session--completed-prose "sprig-session-mode" (text))
 (declare-function sprig-session--paragraph-landed-p "sprig-session-mode" (delta))
@@ -2626,7 +2627,11 @@ model via `sprig-session-consume'."
   ;; which would then be folded in ahead of the `done' it was waiting for and
   ;; read as though it had been sent into the turn it queued behind.
   (when (eq (car-safe event) 'done)
-    (sprig--flush-queue)))
+    (sprig--flush-queue)
+    ;; After the flush on purpose: a flushed queued message sets `sprig--busy'
+    ;; again, which is exactly the guard that keeps the pair-mode continue
+    ;; from talking over it.
+    (sprig--pair-schedule (nth 2 event))))
 
 ;;;; Side questions ("by the way")
 ;;
@@ -3304,6 +3309,162 @@ unless NO-PROMPT."
            (if sprig--working-dir (concat " in " sprig--working-dir) ""))
   (sprig--status-refresh))
 
+;;;; Pair mode: one small step per turn, auto-continued at a watchable pace
+;;
+;; Pair mode turns the session into watching someone code.  Toggling it on
+;; sends the agent a working agreement (`sprig-pair-instruction'): one small,
+;; narrated change per turn, then stop, saying what would come next.  Sprig
+;; then plays metronome: `sprig-pair-delay' seconds after each turn ends it
+;; sends the canned continue, so the work advances step by step at a pace a
+;; reader can follow, and the gap is where you steer.  Anything you say
+;; cancels the pending continue (your message is the continue); opening a
+;; compose buffer holds it until you send or cancel, so the canned line never
+;; races what you are typing; an interrupt holds it until you next speak,
+;; since auto-continuing a turn you just stopped would undo the stopping.
+
+(defcustom sprig-pair-delay 5
+  "Seconds pair mode waits after a turn ends before continuing the agent.
+The reading gap: long enough to take the step in and start typing a
+redirection, short enough that the work does not stall."
+  :type 'number
+  :group 'sprig)
+
+(defcustom sprig-pair-max-steps 20
+  "Consecutive auto-continues pair mode sends before pausing for you.
+A backstop for a walked-away-from session: each canned continue is a
+turn, and an agent with nothing left to do would otherwise be poked
+forever.  Any message of yours resets the count.  Nil means no cap."
+  :type '(choice (const :tag "No cap" nil) integer)
+  :group 'sprig)
+
+(defcustom sprig-pair-instruction
+  "Let's pair program: I am watching as you work, so pace yourself for a \
+reader.  Each turn, take exactly one small, coherent step (one function, \
+one fix, one focused edit).  Say in a line or two what you are about to do \
+and why, make the change, then end your turn with one line on what you \
+would do next.  Do not run ahead: I will tell you when to continue.  If \
+you have no task yet, or the task is finished, say so in one line instead \
+of inventing a step."
+  "Working agreement sent to the agent when pair mode is toggled on.
+Steers a turn in flight, so the agent adopts the pace at its next
+tool-call boundary; opens a turn of its own otherwise."
+  :type 'string
+  :group 'sprig)
+
+(defcustom sprig-pair-continue-instruction
+  "Go ahead with the next step."
+  "Canned continue pair mode sends after each turn's pause."
+  :type 'string
+  :group 'sprig)
+
+(defcustom sprig-pair-release-instruction
+  "We are done pairing: work normally again, carrying the task through \
+without pausing for me between steps."
+  "Sent to the agent when pair mode is toggled off.
+Without it the agent would keep stopping after each small step with
+nothing left to continue it."
+  :type 'string
+  :group 'sprig)
+
+(defvar-local sprig--pair nil
+  "Non-nil while this session is in pair mode (see `sprig-session-pair-mode').")
+
+(defvar-local sprig--pair-timer nil
+  "Timer for the pending pair-mode continue, or nil.")
+
+(defvar-local sprig--pair-hold nil
+  "Non-nil while pair mode's auto-continue is held on the user.
+Set while a compose buffer is open on this session and by an interrupt;
+cleared by any message the user sends.  A held pair session shows
+`pair (held)' on the state line.")
+
+(defvar-local sprig--pair-steps 0
+  "Auto-continues sent since the user last said anything.
+Compared against `sprig-pair-max-steps'.")
+
+(defvar sprig--pair-firing nil
+  "Bound non-nil while pair mode delivers its own canned continue.
+Tells `sprig--review-deliver' the message is the metronome's, not the
+user's, so it neither clears the hold nor resets the step count.")
+
+(defun sprig--pair-cancel ()
+  "Cancel this session's pending pair-mode continue, if any."
+  (when sprig--pair-timer
+    (cancel-timer sprig--pair-timer)
+    (setq sprig--pair-timer nil)))
+
+(defun sprig--pair-suspend ()
+  "Hold pair mode's auto-continue until the user next speaks.
+Cancels a pending continue and keeps the next `done' from arming one,
+so an open compose buffer (or an interrupt) is never raced by the
+canned line.  Delivering or steering any message lifts the hold."
+  (when sprig--pair
+    (sprig--pair-cancel)
+    (setq sprig--pair-hold t)
+    (sprig--redraw-queue-floats)))
+
+(defun sprig--pair-resume ()
+  "Lift the pair-mode hold and re-arm the continue if the session is idle.
+The counterpart to `sprig--pair-suspend' for a compose buffer cancelled
+rather than sent: nothing was said, so the pace resumes where it paused."
+  (when (and sprig--pair sprig--pair-hold)
+    (setq sprig--pair-hold nil)
+    (sprig--pair-schedule nil)
+    (sprig--redraw-queue-floats)))
+
+(defun sprig--pair-schedule (err)
+  "Arm the pair-mode continue timer, a turn having ended with error ERR.
+Called on `done' after the queue flush, so a flushed queued message
+\(which sets `sprig--busy' again) outranks the canned continue.  Declines
+when pair mode is off or held, when the turn errored, when the process
+died with the turn, and once `sprig-pair-max-steps' continues have gone
+by without a word from the user."
+  (sprig--pair-cancel)
+  (when (and sprig--pair (not sprig--pair-hold) (not sprig--busy) (not err)
+             (process-live-p sprig--process))
+    (if (and sprig-pair-max-steps (>= sprig--pair-steps sprig-pair-max-steps))
+        (message
+         "sprig: pair mode paused after %d unattended steps; say anything to carry on"
+         sprig--pair-steps)
+      (setq sprig--pair-timer
+            (run-at-time sprig-pair-delay nil
+                         #'sprig--pair-fire (current-buffer))))))
+
+(defun sprig--pair-fire (buffer)
+  "Send the canned continue into BUFFER's session, the reading gap over.
+Re-checks every guard at fire time: the gap is exactly when the user
+speaks, a dialog opens, or the session drops, and any of those outranks
+the metronome."
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq sprig--pair-timer nil)
+      (when (and sprig--pair (not sprig--pair-hold) (not sprig--busy)
+                 (not sprig--queued)
+                 (process-live-p sprig--process))
+        (setq sprig--pair-steps (1+ sprig--pair-steps))
+        (let ((sprig--pair-firing t))
+          (sprig--review-deliver sprig-pair-continue-instruction))
+        (message "sprig: pair mode continues (step %d)" sprig--pair-steps)))))
+
+(defun sprig--review-pair-toggle ()
+  "Toggle pair mode on this session buffer's session.
+On, it sends the working agreement (`sprig-pair-instruction'), steering
+a running turn or opening one; off, it sends the release
+\(`sprig-pair-release-instruction'), so the agent does not keep stopping
+after each step with nothing left to continue it."
+  (if sprig--pair
+      (progn
+        (setq sprig--pair nil sprig--pair-hold nil sprig--pair-steps 0)
+        (sprig--pair-cancel)
+        (sprig--review-steer sprig-pair-release-instruction)
+        (sprig--redraw-queue-floats)
+        (message "sprig: pair mode off"))
+    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0)
+    (sprig--review-steer sprig-pair-instruction)
+    (sprig--redraw-queue-floats)
+    (message "sprig: pair mode on (continues %ss after each step)"
+             sprig-pair-delay)))
+
 (defun sprig--review-steer (text)
   "Send TEXT into the turn already in flight, to steer it.
 The CLI's stdin stays open for the length of a turn, and a user message
@@ -3318,6 +3479,10 @@ When it is not, the turn ended while the message was being composed, and
 the message is delivered as a turn of its own rather than lost."
   (if (not sprig--busy)
       (sprig--review-deliver text)
+    ;; Steering is the user speaking too, so it lifts a pair-mode hold and
+    ;; resets the unattended-step count the way a delivery does (no continue
+    ;; can be pending mid-turn, so there is no timer to cancel).
+    (setq sprig--pair-hold nil sprig--pair-steps 0)
     (sprig--send-user text)
     ;; Float it above the state line rather than splice it into the stream:
     ;; the agent has not taken it yet, so it waits at the bottom and lands in
@@ -3346,6 +3511,11 @@ turn ended while the message was being composed, and the promise `after
 this turn' is already kept."
   (if (not sprig--busy)
       (sprig--review-deliver text)
+    ;; A queued follow-up is the user speaking for the next turn, so it lifts
+    ;; a pair-mode hold and resets the unattended-step count; the flush sets
+    ;; `sprig--busy' again before the continue could arm, so the queued
+    ;; message wins the turn.
+    (setq sprig--pair-hold nil sprig--pair-steps 0)
     (setq sprig--queued (append sprig--queued (list text)))
     (sprig--redraw-queue-floats)
     (sprig--status-refresh)
@@ -3421,6 +3591,12 @@ own gesture: approving an ExitPlanMode plan, or `P' to set the mode by hand."
   ;; that can fold in steer (`c c'), or wait (`c q'), and never come here busy.
   (when sprig--busy
     (user-error "A turn is already in flight (say it with `c c', or wait with `c q')"))
+  ;; Any delivery makes a pending pair-mode continue stale: this message is
+  ;; the continue.  The metronome's own canned line keeps the hold and the
+  ;; step count as they are, or firing would count as the user speaking.
+  (sprig--pair-cancel)
+  (unless sprig--pair-firing
+    (setq sprig--pair-hold nil sprig--pair-steps 0))
   (when (and mode (not (equal mode sprig--permission-mode)))
     (sprig--set-permission-mode mode))
   (setq sprig--busy t)
@@ -3452,6 +3628,10 @@ stopping the turn does not unmake it.  Interrupting with one queued reads
 as `stop, do this instead', which is the useful gesture.  To stop and mean
 it, drop the queue first (`c Q')."
   (sprig--clear-interrupt)
+  ;; An interrupt means stop: auto-continuing off the interrupt's own `done'
+  ;; would undo the stopping, so hold the pair-mode metronome until the user
+  ;; next says something.
+  (sprig--pair-suspend)
   (setq sprig--interrupt-request-id (sprig--send-interrupt))
   (when sprig-interrupt-timeout
     (setq sprig--interrupt-timer
@@ -5535,6 +5715,8 @@ command's docstring."
   "Ask a side question about the row's session, disturbing nothing (`c b').")
 (sprig--status-define-steer sprig-status-ask-status sprig-session-ask-status
   "Ask the row's session for a brief status report (`c s').")
+(sprig--status-define-steer sprig-status-pair-mode sprig-session-pair-mode
+  "Toggle pair mode on the row's session (`c .').")
 (sprig--status-define-steer sprig-status-answer sprig-session-answer
   "Answer the row's session's waiting question, one at a time (`a a').")
 (sprig--status-define-steer sprig-status-answer-recommended
@@ -5775,7 +5957,9 @@ not here: they act on a diff section, which the navigator has none of."
     ("r" "resend last turn" sprig-status-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)
     ("z" "compact context" sprig-status-compact)
-    ("b" "by the way: side question (writes no log)" sprig-status-btw)]
+    ("b" "by the way: side question (writes no log)" sprig-status-btw)
+    ("." "pair mode: one step per turn, auto-continued (toggle)"
+     sprig-status-pair-mode)]
    ["Session"
     ("o" "open & connect" sprig-status-connect)
     ("d" "disconnect (stops a held session)" sprig-status-disconnect)]])

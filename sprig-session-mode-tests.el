@@ -2901,5 +2901,89 @@ no compose step, steering a turn in flight the way `c c' would."
         (sprig-session-ask-status)
         (should (equal steered sprig-session-status-instruction))))))
 
+(ert-deftest sprig-session-mode-test-pair-toggle-sends-the-agreement ()
+  "`c .' on sends the working agreement, off sends the release.
+Both go through the steer path, so mid-turn the agent adopts (or drops)
+the pace at its next tool-call boundary."
+  (let (steered)
+    (cl-letf (((symbol-function 'sprig--review-steer)
+               (lambda (text) (setq steered text)))
+              ((symbol-function 'sprig--redraw-queue-floats) #'ignore))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (sprig-session-pair-mode)
+        (should sprig--pair)
+        (should (equal steered sprig-pair-instruction))
+        (sprig-session-pair-mode)
+        (should-not sprig--pair)
+        (should (equal steered sprig-pair-release-instruction))))))
+
+(ert-deftest sprig-session-mode-test-pair-continue-arms-and-fires ()
+  "A clean `done' arms the pair continue; firing delivers the canned line.
+The metronome's own delivery counts a step but does not reset it, the
+way a user's would."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
+          sprig--busy nil sprig--queued nil)
+    (let (delivered)
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'sprig--review-deliver)
+                     (lambda (text &optional _) (setq delivered text))))
+            (sprig--pair-schedule nil)
+            (should (timerp sprig--pair-timer))
+            (sprig--pair-fire (current-buffer))
+            (should (equal delivered sprig-pair-continue-instruction))
+            (should (= sprig--pair-steps 1)))
+        (sprig--pair-cancel)))))
+
+(ert-deftest sprig-session-mode-test-pair-continue-declines-when-outranked ()
+  "The continue never arms off an errored turn, a hold, or a dead process,
+and never fires over a queued message: each of those outranks the
+metronome."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
+          sprig--busy nil sprig--queued nil)
+    (let (delivered)
+      (unwind-protect
+          (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                    ((symbol-function 'sprig--review-deliver)
+                     (lambda (text &optional _) (setq delivered text))))
+            (sprig--pair-schedule t)
+            (should-not sprig--pair-timer)
+            (setq sprig--pair-hold t)
+            (sprig--pair-schedule nil)
+            (should-not sprig--pair-timer)
+            (setq sprig--pair-hold nil sprig--queued '("later"))
+            (sprig--pair-schedule nil)
+            (sprig--pair-fire (current-buffer))
+            (should-not delivered)
+            (cl-letf (((symbol-function 'process-live-p) (lambda (_) nil)))
+              (setq sprig--queued nil)
+              (sprig--pair-schedule nil)
+              (should-not sprig--pair-timer)))
+        (sprig--pair-cancel)))))
+
+(ert-deftest sprig-session-mode-test-pair-compose-holds-and-abort-resumes ()
+  "Opening a compose buffer holds the pair continue; cancelling resumes it.
+Sending lifts the hold through the deliver path instead, so the canned
+line never races what is being typed."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (setq sprig--pair t sprig--pair-hold nil sprig--pair-steps 0
+          sprig--busy nil sprig--queued nil)
+    (unwind-protect
+        (cl-letf (((symbol-function 'process-live-p) (lambda (_) t))
+                  ((symbol-function 'sprig--redraw-queue-floats) #'ignore))
+          (sprig--pair-suspend)
+          (should sprig--pair-hold)
+          (should-not sprig--pair-timer)
+          (sprig--pair-resume)
+          (should-not sprig--pair-hold)
+          (should (timerp sprig--pair-timer)))
+      (sprig--pair-cancel))))
+
 (provide 'sprig-session-mode-tests)
 ;;; sprig-session-mode-tests.el ends here
