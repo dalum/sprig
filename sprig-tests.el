@@ -4639,5 +4639,29 @@ other tool's input is a file it read, not a directory it moved into."
   (should-not (sprig--seen-directory "Read" "{\"file_path\": \"/wt/x.el\"}"))
   (should-not (sprig--seen-directory "Bash" "not json")))
 
+(ert-deftest sprig-test-refresh-option-defaults ()
+  "An option at its default is unbound for the reload to rebind anew;
+one the user has set keeps its value.  Exercised on a scratch group, so
+the suite's own sprig options are not unbound out from under it."
+  (let ((group 'sprig-tests--refresh-group)
+        (symbol 'sprig-tests--refresh-opt))
+    (unwind-protect
+        (progn
+          (custom-declare-variable symbol ''"default" "Scratch."
+                                   :type 'string :group group)
+          ;; Untouched: standing at the default, so the refresh unbinds it
+          ;; and a re-loaded defcustom would rebind it at the new default.
+          (should (equal (symbol-value symbol) "default"))
+          (sprig--refresh-option-defaults group)
+          (should-not (boundp symbol))
+          ;; User-set: the value differs from the default, so it is kept.
+          (custom-declare-variable symbol ''"default" "Scratch."
+                                   :type 'string :group group)
+          (set symbol "mine")
+          (sprig--refresh-option-defaults group)
+          (should (equal (symbol-value symbol) "mine")))
+      (makunbound symbol)
+      (put group 'custom-group nil))))
+
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here

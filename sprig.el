@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.59.0
+;; Version: 0.60.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -6494,6 +6494,26 @@ override the defface one anyway."
     (when (string-prefix-p "sprig-" (symbol-name face))
       (put face 'face-defface-spec nil))))
 
+(defun sprig--refresh-option-defaults (&optional group)
+  "Unbind every option of GROUP (`sprig') still standing at its default.
+The `defvar' half of `defcustom' keeps an already-bound variable's
+value, so re-loading a file leaves an edited default (a reworded canned
+instruction, say) unseen until Emacs restarts, exactly as a re-loaded
+`defface' leaves an edited face (see `sprig--undefine-faces').  An
+option whose value still `equal's its recorded standard value has not
+been set by the user, so it is unbound here for the reload's own
+`defcustom' to rebind at the new default; a customized or `setq'd value
+differs, and is kept.  The one blind spot: a value deliberately set to
+exactly the old default reads as untouched and is refreshed too."
+  (dolist (entry (get (or group 'sprig) 'custom-group))
+    (pcase entry
+      (`(,symbol custom-variable)
+       (when-let ((std (get symbol 'standard-value)))
+         (when (and (boundp symbol)
+                    (ignore-errors
+                      (equal (symbol-value symbol) (eval (car std) t))))
+           (makunbound symbol)))))))
+
 (declare-function sprig--suppress-section-highlight "sprig-session-mode")
 
 (defun sprig--resettle-review-buffers ()
@@ -6515,11 +6535,14 @@ A development convenience: after editing any file in
 `sprig--source-files', re-load them all from `sprig--source-directory' so
 the change takes effect without restarting Emacs.  The `.el' source is
 loaded, not any stale byte code beside it.  Edited faces take effect too
-\(see `sprig--undefine-faces'), as do the review mode's settings (see
-`sprig--resettle-review-buffers').  Open buffers keep their state; only
-their behaviour picks up the new definitions."
+\(see `sprig--undefine-faces'), as do edited option defaults on options
+you have not set yourself (see `sprig--refresh-option-defaults') and the
+review mode's settings (see `sprig--resettle-review-buffers').  Open
+buffers keep their state; only their behaviour picks up the new
+definitions."
   (interactive)
   (sprig--undefine-faces)
+  (sprig--refresh-option-defaults)
   (dolist (file sprig--source-files)
     (load (expand-file-name (concat file ".el") sprig--source-directory) nil t))
   (sprig--resettle-review-buffers)

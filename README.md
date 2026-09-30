@@ -413,7 +413,7 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 
 ## Development
 
-After editing any of the source files, `M-x sprig-reload` re-loads all of them from disk in dependency order, so a change takes effect without restarting Emacs. Open buffers keep their state and pick up the new definitions. Edited faces take effect too: `defface` is a no-op on an already-defined face, so the reload undefines sprig's own faces first, and a face you have customized or themed keeps that.
+After editing any of the source files, `M-x sprig-reload` re-loads all of them from disk in dependency order, so a change takes effect without restarting Emacs. Open buffers keep their state and pick up the new definitions. Edited faces take effect too: `defface` is a no-op on an already-defined face, so the reload undefines sprig's own faces first, and a face you have customized or themed keeps that. Edited option *defaults* take effect the same way: `defcustom` keeps an already-bound value, so the reload first unbinds every sprig option still standing at its recorded default (a reworded canned instruction would otherwise stay stale until restart), while an option you have `setq`'d or customized differs from that default and is left alone.
 
 `sprig-tests.el` is an ERT suite covering the process-free layers (the stream-json transport and its event vocabulary, command construction, the session model and tool-payload diff engine, the stored-session log parser, and the navigator's session enumeration). It needs no extra dependencies and runs offline, starting no session:
 
