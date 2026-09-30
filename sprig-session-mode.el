@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.47.0
+;; Version: 0.48.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -322,7 +322,8 @@ is one TAB away, since the tool section folds to its heading."
   "When non-nil, a tool call that reconstructs a diff renders expanded.
 By default every tool section folds to its one-line heading, so a long
 turn reads as a list of what the agent did rather than as pages of diff;
-TAB opens the one you want to review."
+TAB opens the one you want to review.  A session in pair mode expands
+its diffs regardless (see `sprig-session-pair-mode')."
   :type 'boolean
   :group 'sprig)
 
@@ -618,9 +619,12 @@ Every tool folds to its one-line heading, so a turn reads as a list of
 what the agent did; TAB opens the one you want.  A `TodoWrite' renders its
 checklist in place of a result, so the plan-of-work reads as a list rather
 than as a tool call.  Set `sprig-session-expand-diffs' to render
-diff-bearing tools open instead."
+diff-bearing tools open instead; pair mode renders them open on its own,
+since the change itself is what is being watched there."
   (magit-insert-section (sprig-tool block
-                                    (not (and sprig-session-expand-diffs
+                                    (not (and (or sprig-session-expand-diffs
+                                                  (and (boundp 'sprig--pair)
+                                                       sprig--pair))
                                               (plist-get block :changes))))
     (magit-insert-heading (sprig-session--tool-heading block))
     ;; Deferred so a folded tool keeps its body out of the buffer; magit only
@@ -2628,6 +2632,8 @@ question about the work, compose one with `c c' instead."
 On, the agent is told to work one narrated step at a time and stop
 \(`sprig-pair-instruction'); `.' then advances it a step per press, the
 way a debugger steps, so the work moves exactly as fast as you read.
+While it stands, a diff-bearing tool call renders open rather than
+folded to its heading, since the change itself is what you are watching.
 Between steps every verb works as ever: `c c' is a continue with your
 redirection in it.  Off, the agent is told to work normally again."
   (interactive)

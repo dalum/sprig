@@ -130,6 +130,27 @@ timestamp, or the state line's rule."
       (re-search-forward "^Bash  ")
       (should (oref (magit-current-section) hidden)))))
 
+(ert-deftest sprig-session-mode-test-pair-mode-expands-diffs ()
+  ;; A paired session renders a diff-bearing tool open without the option:
+  ;; the change is what is being watched, so it must not hide behind its
+  ;; heading waiting on a TAB.  A tool with no diff still folds.
+  (sprig-session-tests--rendered (sprig-session-tests--edit-model) nil
+    (setq sprig--pair t)
+    (sprig-session-render (sprig-session-tests--edit-model) nil)
+    (goto-char (point-min))
+    (re-search-forward "^Edit  ")
+    (should-not (oref (magit-current-section) hidden))
+    (should (string-match-p "^\\+new$" (buffer-string))))
+  (let ((model (sprig-session-build
+                `((tool-call "b1" "Bash" ,(json-serialize (list :command "ls")))
+                  (tool-result "b1" nil "out")))))
+    (sprig-session-tests--rendered model nil
+      (setq sprig--pair t)
+      (sprig-session-render model nil)
+      (goto-char (point-min))
+      (re-search-forward "^Bash  ")
+      (should (oref (magit-current-section) hidden)))))
+
 (ert-deftest sprig-session-mode-test-faces-survive-font-lock ()
   ;; `magit-section-mode' turns font-lock on, and font-lock's unfontify pass
   ;; strips the plain `face' property off every region it redisplays.  So

@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.58.0
+;; Version: 0.59.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -3323,12 +3323,17 @@ unless NO-PROMPT."
 reader.  Each turn, take exactly one small, coherent step (one function, \
 one fix, one focused edit).  Say in a line or two what you are about to do \
 and why, make the change, then end your turn with one line on what you \
-would do next.  Do not run ahead: I will tell you when to continue.  If \
-you have no task yet, or the task is finished, say so in one line instead \
-of inventing a step."
+would do next.  Make every file change with the Edit or Write tool, never \
+through shell commands (sed, tee, heredocs, patch): my editor shows Edit \
+and Write calls as diffs, and a shell edit shows me nothing.  Do not run \
+ahead: I will tell you when to continue.  If you have no task yet, or the \
+task is finished, say so in one line instead of inventing a step."
   "Working agreement sent to the agent when pair mode is toggled on.
 Steers a turn in flight, so the agent adopts the pace at its next
-tool-call boundary; opens a turn of its own otherwise."
+tool-call boundary; opens a turn of its own otherwise.  The Edit/Write
+clause is what makes the steps visible: the session buffer reconstructs
+its inline diffs from those tools' payloads, so an edit made through a
+shell command would land as a step with nothing to show."
   :type 'string
   :group 'sprig)
 
