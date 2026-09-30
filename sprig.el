@@ -2361,6 +2361,7 @@ is visible without opening the header."
 (declare-function sprig-session-retry "sprig-session-mode" ())
 (declare-function sprig-session-compact "sprig-session-mode" ())
 (declare-function sprig-session-btw "sprig-session-mode" (question))
+(declare-function sprig-session-ask-status "sprig-session-mode" ())
 (declare-function sprig-session--fontify-markdown "sprig-session-mode" (text))
 (declare-function sprig-session--completed-prose "sprig-session-mode" (text))
 (declare-function sprig-session--paragraph-landed-p "sprig-session-mode" (delta))
