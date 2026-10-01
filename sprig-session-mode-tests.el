@@ -2961,6 +2961,24 @@ the pace at its next tool-call boundary."
         (should-not sprig--pair)
         (should (equal steered sprig-pair-release-instruction))))))
 
+(ert-deftest sprig-session-mode-test-pair-restored-from-the-log ()
+  "Seeding a conversation restores pair mode from its own record:
+the newest of the agreement and the release decides, and a session
+with neither is not paired.  No marker file, no extra read: the
+agreement is in the log like everything else."
+  (with-temp-buffer
+    (sprig-session-mode)
+    (sprig-session-seed `((user "hi")
+                          (user ,sprig-pair-instruction)
+                          (text "understood")))
+    (should sprig--pair)
+    (sprig-session-seed `((user ,sprig-pair-instruction)
+                          (user "keep going")
+                          (user ,sprig-pair-release-instruction)))
+    (should-not sprig--pair)
+    (sprig-session-seed '((user "plain conversation")))
+    (should-not sprig--pair)))
+
 (ert-deftest sprig-session-mode-test-pair-step-sends-the-continue ()
   "`.' delivers the canned continue as a turn of its own.
 The step is a plain delivery, so it starts or resumes the session the
