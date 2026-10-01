@@ -1,7 +1,7 @@
 ;;; sprig.el --- Transport and navigator for reviewing agent sessions -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.60.0
+;; Version: 0.61.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -3318,8 +3318,20 @@ unless NO-PROMPT."
 ;; over, and the whole hold/suspend apparatus it needed to avoid racing the
 ;; user's typing disappears with it.
 
+(defconst sprig-pair-sentinel "Let's pair program!"
+  "First words of the pair-mode working agreement, matched to restore it.
+Pair mode is recognised in a replayed conversation by this sentinel, by
+prefix, rather than by the whole wording, so `sprig-pair-instruction'
+can be reworded freely without old sessions' agreements going
+unrecognised (see `sprig-session--pair-restore').  The toggle prepends
+it when a customised instruction has dropped it, since an agreement
+that cannot be recognised later would silently not survive a restart.")
+
+(defconst sprig-pair-release-sentinel "We are done pairing!"
+  "First words of the pair-mode release, `sprig-pair-sentinel's counterpart.")
+
 (defcustom sprig-pair-instruction
-  "Let's pair program: I am watching as you work, so pace yourself for a \
+  "Let's pair program! I am watching as you work, so pace yourself for a \
 reader.  Each turn, take exactly one small, coherent step (one function, \
 one fix, one focused edit).  Say in a line or two what you are about to do \
 and why, make the change, then end your turn with one line on what you \
@@ -3333,7 +3345,9 @@ Steers a turn in flight, so the agent adopts the pace at its next
 tool-call boundary; opens a turn of its own otherwise.  The Edit/Write
 clause is what makes the steps visible: the session buffer reconstructs
 its inline diffs from those tools' payloads, so an edit made through a
-shell command would land as a step with nothing to show."
+shell command would land as a step with nothing to show.  The opening
+words are `sprig-pair-sentinel', how a replayed session is recognised
+as paired; reword the rest freely."
   :type 'string
   :group 'sprig)
 
@@ -3344,13 +3358,20 @@ shell command would land as a step with nothing to show."
   :group 'sprig)
 
 (defcustom sprig-pair-release-instruction
-  "We are done pairing: work normally again, carrying the task through \
+  "We are done pairing! Work normally again, carrying the task through \
 without pausing for me between steps."
   "Sent to the agent when pair mode is toggled off.
 Without it the agent would keep stopping after each small step with
-nothing left to continue it."
+nothing left to continue it.  Opens with
+`sprig-pair-release-sentinel', as the agreement opens with its own."
   :type 'string
   :group 'sprig)
+
+(defun sprig--pair-say (sentinel text)
+  "Return TEXT opening with SENTINEL, prepending it where customised away.
+What is sent must be what a later seed can recognise, or the agreement
+holds for the agent yet silently not for sprig."
+  (if (string-prefix-p sentinel text) text (concat sentinel " " text)))
 
 (defvar-local sprig--pair nil
   "Non-nil while this session is in pair mode (see `sprig-session-pair-mode').")
@@ -3364,11 +3385,13 @@ after each step with nothing left to continue it."
   (if sprig--pair
       (progn
         (setq sprig--pair nil)
-        (sprig--review-steer sprig-pair-release-instruction)
+        (sprig--review-steer (sprig--pair-say sprig-pair-release-sentinel
+                                              sprig-pair-release-instruction))
         (sprig--redraw-queue-floats)
         (message "sprig: pair mode off"))
     (setq sprig--pair t)
-    (sprig--review-steer sprig-pair-instruction)
+    (sprig--review-steer (sprig--pair-say sprig-pair-sentinel
+                                          sprig-pair-instruction))
     (sprig--redraw-queue-floats)
     (message "sprig: pair mode on (`.' advances a step)")))
 

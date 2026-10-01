@@ -1,7 +1,7 @@
 ;;; sprig-session-mode.el --- Read-only session transcript buffer for sprig -*- lexical-binding: t; -*-
 
 ;; Author: you
-;; Version: 0.49.0
+;; Version: 0.50.0
 ;; Package-Requires: ((emacs "28.1") (magit-section "4.0.0"))
 ;; Keywords: tools, convenience, ai
 
@@ -75,8 +75,8 @@
 (defvar sprig--permission-mode)
 (defvar sprig--btw-process)
 (defvar sprig--pair)
-(defvar sprig-pair-instruction)
-(defvar sprig-pair-release-instruction)
+(defvar sprig-pair-sentinel)
+(defvar sprig-pair-release-sentinel)
 
 ;;;; Renamed options
 ;;
@@ -2215,20 +2215,19 @@ records it, and no marker of sprig's own is needed: the newest of the
 working agreement and the release decides, and a session with neither
 is not paired.  Run on every seed, so a restart, a reopen, and a `g'
 all restore the same answer, over any transport, since the log text is
-already here.  Both wordings are matched as currently customised
-\(`sprig-pair-instruction', `sprig-pair-release-instruction'), so a
-reworded instruction forgets an old session's agreement; toggling pair
-mode on again is the remedy, and sends the new wording while it is at
-it."
+already here.  The match is on the fixed sentinels the two messages
+open with (`sprig-pair-sentinel', `sprig-pair-release-sentinel'), by
+prefix, so the instructions' wording can be customised freely without
+old sessions' agreements going unrecognised."
   (setq sprig--pair
         (catch 'sprig--pair-found
           ;; The events list is newest-first, so the first of the two
-          ;; wordings met is the one that stands.
+          ;; sentinels met is the one that stands.
           (dolist (ev sprig-session--events)
             (when (eq (car-safe ev) 'user)
-              (cond ((equal (cadr ev) sprig-pair-instruction)
+              (cond ((string-prefix-p sprig-pair-sentinel (cadr ev))
                      (throw 'sprig--pair-found t))
-                    ((equal (cadr ev) sprig-pair-release-instruction)
+                    ((string-prefix-p sprig-pair-release-sentinel (cadr ev))
                      (throw 'sprig--pair-found nil)))))
           nil)))
 

@@ -2977,7 +2977,28 @@ agreement is in the log like everything else."
                           (user ,sprig-pair-release-instruction)))
     (should-not sprig--pair)
     (sprig-session-seed '((user "plain conversation")))
-    (should-not sprig--pair)))
+    (should-not sprig--pair)
+    ;; The match is the sentinel, by prefix, not the whole wording: an
+    ;; agreement sent under an older or customised wording still restores.
+    (sprig-session-seed
+     `((user ,(concat sprig-pair-sentinel " Step gently, as we used to say."))))
+    (should sprig--pair)))
+
+(ert-deftest sprig-session-mode-test-pair-toggle-prepends-the-sentinel ()
+  "A customised instruction that dropped the sentinel gets it back on send:
+what is sent must be what a later seed can recognise, or the agreement
+holds for the agent yet silently not for sprig."
+  (let ((sprig-pair-instruction "Take one small step at a time, please.")
+        steered)
+    (cl-letf (((symbol-function 'sprig--review-steer)
+               (lambda (text) (setq steered text)))
+              ((symbol-function 'sprig--redraw-queue-floats) #'ignore))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (sprig-session-pair-mode)
+        (should (equal steered
+                       (concat sprig-pair-sentinel
+                               " Take one small step at a time, please.")))))))
 
 (ert-deftest sprig-session-mode-test-pair-step-sends-the-continue ()
   "`.' delivers the canned continue as a turn of its own.
