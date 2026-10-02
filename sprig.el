@@ -5428,8 +5428,8 @@ to the buffer's head."
 ;; the session under point: `s' starts (`s n' new, `s c' new-then-compose,
 ;; `s p' new-then-plan, `s f' fork), `c' steers (`c c' composes), `a' answers,
 ;; `P' sets the permission mode (`P p' plan, `P a' auto, ...), `d' removes
-;; (`d d' disconnects, `d D' deletes), and `l' switches the view (`l l'
-;; live-only, `l a' show all, `l g' show subagents).
+;; (`d d' disconnects, `d r' restarts, `d D' deletes), and `l' switches the
+;; view (`l l' live-only, `l a' show all, `l g' show subagents).
 ;; Interrupt is `c i'; connect is `c o'.  `/' (filter) stays top-level, and
 ;; `S S' opens the host's session roots (sort lives on `l s' and a header click).
 (define-key sprig-status-mode-map (kbd "s")   #'sprig-status-start)
@@ -5768,6 +5768,22 @@ back to life."
         (message "sprig: disconnected, but the broker stop failed")))
     (sprig--status-refresh)))
 
+(defun sprig-status-restart ()
+  "Restart the session on the current line: stop it, then resume at once.
+`d d''s disconnect followed by `c o''s connect, in one press.  The fresh
+process is the point: the CLI reads its configuration (settings.json
+permission rules, MCP servers) only at spawn, so this is how a config
+change reaches a running session without losing the conversation.  A row
+that is not connected simply connects."
+  (interactive)
+  (let* ((entry (sprig--status-entry-at-point))
+         (buf (plist-get entry :buffer)))
+    (when (or (plist-get entry :live)
+              (and (buffer-live-p buf)
+                   (process-live-p (buffer-local-value 'sprig--process buf))))
+      (sprig-status-disconnect)))
+  (sprig-status-connect))
+
 (defun sprig--delete-session-log (entry)
   "Permanently delete ENTRY's stored session log and transcripts beside it.
 Runs on ENTRY's host: a local log is removed by path, a remote one over
@@ -6077,14 +6093,18 @@ They are hidden by default (they are not sessions you drive); see
 ;; Defined after the verbs they list, so every suffix command is known by the
 ;; time the prefix is compiled (as with `sprig-status-dispatch').
 (transient-define-prefix sprig-status-remove ()
-  "Take the session on the row at point out of the navigator.
+  "Stop, restart, or delete the session on the row at point.
 `d d' disconnects the live process, stopping a broker-held session on its
 host too, but keeps the CLI's log, so the session returns on the next
-refresh and resumes fresh; `d D' also deletes the log, so it is gone for
-good.  Deleting asks first, since there is no undo."
-  [["Remove"
+refresh and resumes fresh; `d r' does that and reconnects at once, which
+is how a configuration change reaches a running session (the CLI reads
+its settings only at spawn); `d D' also deletes the log, so it is gone
+for good.  Deleting asks first, since there is no undo."
+  [["Session"
     ("d" "disconnect (stop a held session; keep the log)"
      sprig-status-disconnect)
+    ("r" "restart (disconnect, then resume in a fresh process)"
+     sprig-status-restart)
     ("D" "delete (disconnect, then remove the log; no undo)"
      sprig-status-delete)]])
 

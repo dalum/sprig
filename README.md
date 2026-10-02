@@ -122,7 +122,7 @@ The session lives on past the buffer: reopen it any time from the navigator, or 
 | `c` | Steer the session at point, the session buffer's `c` transient without leaving the list: `c c` compose & send, `c y` / `c n` answer yes / no, `c s` ask for a status (canned, steers the turn), `c p` plan mode, `c r` independent review (subagent), `c l` resend, `c i` interrupt, `c z` compact, `c b` a side question (writes no log), `c .` toggle pair mode (see [Pair mode](#pair-mode)), `c q` / `c Q` queue / drop, `c o` open & connect, `c d` disconnect |
 | `a` | Answer the structured question the session at point is waiting on: `a a` one at a time, `a r` take the recommended, `a s` skip |
 | `P` | Set the permission mode of the session at point (open and live), the session buffer's `P` without leaving the list: `P p` plan, `P a` auto, `P e` accept edits, `P m` manual, `P b` bypass |
-| `d` | Remove the session at point: `d d` disconnect (its log is kept), `d D` delete permanently, log and all (asks first; no undo) |
+| `d` | Stop, restart, or delete the session at point: `d d` disconnect (its log is kept), `d r` restart (disconnect, then resume in a fresh process, so the CLI re-reads its settings and MCP config), `d D` delete permanently, log and all (asks first; no undo) |
 | `l` | Switch the view: `l l` toggle live-only (hide disconnected `○`), `l a` toggle show-all (lift the cap), `l g` toggle the CLI's subagent (`agent-*`) transcripts in, `l s` sort, `l /` filter. Each toggle shows `[on]` in the popup while active |
 | `/` | Filter the list by project or title (empty clears) |
 | `S` | Show transient: `S S` opens the roots view for the host of the group point is in (each root a line where `RET` starts a session there) |
