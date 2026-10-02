@@ -465,7 +465,8 @@ may be carried across calls to continue a fold (see
 EVENTS is a buffer's stored event list, newest first (as pushed by
 `sprig-session-consume'), so the first `title' event is the freshest.  The
 navigator titles a live session's row with this, recovering the replayed
-`ai-title' that the live stream itself never carries."
+`ai-title', which the live stream carries only as the receipt of a
+`generate_session_title' request (see `sprig--maybe-request-title')."
   (let ((hit (seq-find (lambda (ev) (eq (car-safe ev) 'title)) events)))
     (and hit (cadr hit))))
 

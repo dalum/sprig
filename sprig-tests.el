@@ -866,7 +866,61 @@ agent's own work."
                            :response (list :subtype "error"
                                            :request_id "sprig-4"
                                            :error "nope"))))
-                   '((control-response "sprig-4" "error"))))))
+                   '((control-response "sprig-4" "error"))))
+    ;; A `generate_session_title' receipt carries the title in its payload;
+    ;; the parse folds it in as a live `title' event beside the receipt.
+    (should (equal (sprig--claude-parse-line
+                    (json-serialize
+                     (list :type "control_response"
+                           :response (list :subtype "success"
+                                           :request_id "sprig-5"
+                                           :response (list :title "A name")))))
+                   '((control-response "sprig-5" "success")
+                     (title "A name"))))))
+
+(defmacro sprig-test--with-title-sink (sent &rest body)
+  "Run BODY in a temp buffer with the done-path collaborators stubbed.
+Control requests sent land in SENT (a list variable), newest first."
+  (declare (indent 1))
+  `(with-temp-buffer
+     (let ((,sent nil))
+       (cl-letf (((symbol-function 'sprig--send-control)
+                  (lambda (req) (push req ,sent) "sprig-1"))
+                 ((symbol-function 'process-live-p) (lambda (_) t))
+                 ((symbol-function 'sprig-session-consume) #'ignore)
+                 ((symbol-function 'sprig--status-refresh) #'ignore)
+                 ((symbol-function 'sprig--status-refresh-cancel) #'ignore)
+                 ((symbol-function 'sprig--flush-queue) #'ignore)
+                 ((symbol-function 'sprig--clear-interrupt) #'ignore))
+         ,@body))))
+
+(ert-deftest sprig-test-done-requests-title-once ()
+  ;; From CLI 2.1.280 an sdk-cli session is never titled on the CLI's own
+  ;; initiative, so the sink asks at turn end: once, from the conversation's
+  ;; first user prompt (the events list is newest-first), with persist so
+  ;; the CLI writes the `ai-title' record the scans already read.
+  (sprig-test--with-title-sink sent
+    (setq sprig-session--events
+          '((text "hi") (user "second prompt") (user "first prompt")))
+    (sprig--review-sink '(done nil nil))
+    (should (equal (plist-get (car sent) :subtype) "generate_session_title"))
+    (should (equal (plist-get (car sent) :description) "first prompt"))
+    (should (eq (plist-get (car sent) :persist) t))
+    ;; Once per buffer: a second turn's end must not spend another ask.
+    (sprig--review-sink '(done nil nil))
+    (should (= (length sent) 1))))
+
+(ert-deftest sprig-test-done-skips-title-when-titled-or-promptless ()
+  ;; A session already titled (a replayed `ai-title', or an earlier ask's
+  ;; receipt) is left alone, and so is one with no user prompt to title by.
+  (sprig-test--with-title-sink sent
+    (setq sprig-session--events '((title "Named") (user "first prompt")))
+    (sprig--review-sink '(done nil nil))
+    (should-not sent))
+  (sprig-test--with-title-sink sent
+    (setq sprig-session--events '((text "hi")))
+    (sprig--review-sink '(done nil nil))
+    (should-not sent)))
 
 (ert-deftest sprig-test-interrupt-error-receipt-falls-back ()
   ;; An error receipt for our interrupt means the CLI refused it: kill the

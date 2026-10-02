@@ -339,6 +339,11 @@ the streamed `input_json_delta' fragments until the block closes.")
 (defvar-local sprig--permission-mode nil
   "The session's current permission mode, tracked from `status' events.
 nil until the CLI reports one; \"plan\" while a plan turn is in effect.")
+
+(defvar-local sprig--title-requested nil
+  "Non-nil once this buffer has asked the CLI to generate a title.
+One ask per session buffer: a second would spend a model call to produce
+the same title (see `sprig--maybe-request-title').")
 (defvar-local sprig--control-counter 0
   "Monotonic counter for control-request ids on this buffer's session.")
 (defvar-local sprig--sink #'ignore
@@ -1877,8 +1882,15 @@ in the buffer-local `sprig--blocks'; run this in the conversation buffer."
          ;; means it was refused.  `request_id' rides inside `response', so
          ;; the sink can match it to the request it acks.
          ((equal .type "control_response")
-          (list (list 'control-response
-                      .response.request_id .response.subtype)))
+          (append
+           (list (list 'control-response
+                       .response.request_id .response.subtype))
+           ;; A `generate_session_title' receipt carries the new title in
+           ;; its payload; fold it like a replayed `ai-title' record, so
+           ;; the buffer and navigator adopt it the moment it is made
+           ;; rather than on the next log scan.
+           (when-let ((tt .response.response.title))
+             (list (list 'title tt)))))
          ;; Turn complete.
          ((equal .type "result")
           (list (list 'done .total_cost_usd .is_error)))
@@ -2171,6 +2183,30 @@ does with the interrupt receipt."
   "Ask the session to switch to permission MODE (e.g. \"plan\", \"auto\")."
   (sprig--send-control (list :subtype "set_permission_mode" :mode mode))
   (setq sprig--permission-mode mode))
+
+(defun sprig--maybe-request-title ()
+  "Ask the CLI to title an untitled session, once, as a turn ends.
+From CLI 2.1.280 a stream-json (`sdk-cli') session no longer gets the
+generated `ai-title' an interactive session does: title generation moved
+behind the `generate_session_title' control request, so an SDK client
+asks for its own.  Sent with `persist', the CLI writes the same
+`ai-title' log record it used to, which replay and the navigator's scan
+already read; the receipt also carries the title, folded in as a live
+`title' event by the parse (see `sprig--claude-parse-line').  The
+description it titles from is the conversation's first user prompt, the
+one the interactive CLI titles by.  A CLI too old to know the request
+answers with an error receipt, which the sink ignores."
+  (when (and (not sprig--title-requested)
+             (process-live-p sprig--process)
+             (null (sprig-session-events-title sprig-session--events)))
+    (let ((first-user (car (last (seq-filter
+                                  (lambda (ev) (eq (car-safe ev) 'user))
+                                  sprig-session--events)))))
+      (when-let ((text (cadr first-user)))
+        (setq sprig--title-requested t)
+        (sprig--send-control (list :subtype "generate_session_title"
+                                   :description text
+                                   :persist t))))))
 
 (defun sprig--send-interrupt ()
   "Ask the session to interrupt the turn in flight, returning the request id.
@@ -2602,6 +2638,10 @@ model via `sprig-session-consume'."
     (`(done ,_ ,_) (setq sprig--busy nil
                          sprig--compacting nil)
      (sprig--clear-interrupt)
+     ;; An untitled session gets its title asked for here, at the turn's
+     ;; end, when there is a prompt to title it by and the CLI is idle
+     ;; enough to answer.
+     (sprig--maybe-request-title)
      ;; The turn is over: render the final state at once, dropping any
      ;; coalesced mid-turn refresh still pending so it cannot fire a stale
      ;; render a beat later.
