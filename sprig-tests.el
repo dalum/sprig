@@ -1404,6 +1404,95 @@ claude"
     (should (equal (plist-get (nth 2 rows) :session) "ddd"))
     (should-not (plist-get (nth 2 rows) :starred))))
 
+(ert-deftest sprig-test-parse-scan-rows-live-by-id ()
+  ;; A `live' preamble marks a row held by session id even when the row's own
+  ;; per-log live flag is empty (the broker's marker was stranded in another
+  ;; dir when the log was re-homed), and a row whose id is absent stays cold.
+  ;; The per-log flag still holds on its own, so the two sources union.
+  (let* ((blob (concat "\036live\037aaa\037ccc\037"
+                       "\036100\037/p/-x/aaa.jsonl\037\037\037T1\037"
+                       "\036090\037/p/-y/bbb.jsonl\037\037\037\0371"
+                       "\036080\037/p/-z/ddd.jsonl\037\037\037\037"))
+         (rows (sprig--parse-scan-rows blob nil)))
+    (should (= (length rows) 3))
+    ;; aaa: held by the id preamble though its per-log flag is empty
+    (should (equal (plist-get (nth 0 rows) :session) "aaa"))
+    (should (eq (plist-get (nth 0 rows) :live) t))
+    ;; bbb: absent from the preamble, but its own per-log flag holds it
+    (should (eq (plist-get (nth 1 rows) :live) t))
+    ;; ddd: neither source, so cold
+    (should-not (plist-get (nth 2 rows) :live))))
+
+(ert-deftest sprig-test-parse-scan-rows-live-survives-the-cap ()
+  ;; The scan slurps a held session's log a second time so the newest-N cap
+  ;; cannot hide it.  The repeat is dropped (one row per log), and the cap
+  ;; keeps the newest N plus every held row past them, never the duplicate.
+  (let* ((blob (concat "\036live\037ccc\037"
+                       "\036300\037/p/-x/aaa.jsonl\037\037\037\037"
+                       "\036200\037/p/-y/bbb.jsonl\037\037\037\037"
+                       "\036100\037/p/-z/ccc.jsonl\037\037\037\037"
+                       "\036100\037/p/-z/ccc.jsonl\037\037\037\037"))
+         (all (sprig--parse-scan-rows blob nil)))
+    ;; Four records, three logs: the duplicate held row is parsed once.
+    (should (= (length all) 3))
+    (let ((rows (sprig--parse-scan-rows blob 2)))
+      ;; The cap takes aaa and bbb, and spares ccc because the broker holds it.
+      (should (equal (mapcar (lambda (r) (plist-get r :session)) rows)
+                     '("aaa" "bbb" "ccc")))
+      (should (eq (plist-get (nth 2 rows) :live) t)))
+    ;; Nothing held: the cap bites as it always did.
+    (let ((rows (sprig--parse-scan-rows
+                 (replace-regexp-in-string "\036live\037ccc\037" "" blob) 2)))
+      (should (= (length rows) 2)))))
+
+(ert-deftest sprig-test-remote-scan-command-covers-held-sessions ()
+  ;; The scan command carries the `live' id preamble and a final pass over
+  ;; every `.sprig-live' marker's log, so a held session is neither mismatched
+  ;; by path nor hidden by the cap.
+  (let ((cmd (sprig--remote-scan-all-command "~/p" 30)))
+    (should (string-search "\\036live\\037" cmd))
+    (should (string-search "-name '*.sprig-live'" cmd))
+    ;; The marker pass reuses the same slurp, so it is a function, called twice.
+    (should (string-prefix-p "r() {" cmd))
+    (should (= 2 (cl-count-if (lambda (l) (string-suffix-p "| r" l))
+                              (split-string cmd ";" t))))))
+
+(ert-deftest sprig-test-local-scan-lists-a-held-session-past-the-cap ()
+  ;; A broker-held session whose log is older than the cap, and whose marker
+  ;; was stranded in the project dir the log was re-homed from, still shows
+  ;; and still shows as held: the flag is matched by id host-wide and the cap
+  ;; spares a held row.
+  (let* ((root (make-temp-file "sprig-live" t))
+         (proj "/tmp/whatever/old")
+         (sprig-remotes nil)
+         (sprig-config-directory nil)
+         (sprig-claude-projects-directory root)
+         (old (sprig-tests--make-session-log
+               root proj "HELD1"
+               `(:type "user" :cwd ,proj :message (:role "user" :content "hi")))))
+    (unwind-protect
+        (progn
+          ;; The marker sits in another project dir, as a re-homed log leaves it.
+          (make-directory (expand-file-name "-tmp-elsewhere" root))
+          (write-region "" nil (expand-file-name "-tmp-elsewhere/HELD1.sprig-live"
+                                                 root))
+          ;; A newer session, so the held one falls past a cap of one.
+          (sprig-tests--make-session-log
+           root "/tmp/whatever/new" "FRESH1"
+           `(:type "user" :cwd "/tmp/whatever/new"
+             :message (:role "user" :content "hi")))
+          (set-file-times (expand-file-name "HELD1.jsonl" old) '(10000 0))
+          (let* ((sprig-status-max-sessions 1)
+                 (rows (sprig--scan-session-logs))
+                 (held (seq-find (lambda (r) (equal (plist-get r :session) "HELD1"))
+                                 rows)))
+            (should (= 2 (length rows)))
+            (should held)
+            (should (eq (plist-get held :live) t))
+            ;; The newest row is there on its own merits and is not held.
+            (should-not (plist-get (car rows) :live))))
+      (delete-directory root t))))
+
 (ert-deftest sprig-test-star-write-unstar-clears-strays ()
   ;; A session's log is re-homed across project dirs, stranding an old star.
   ;; `sprig--star-ids-local' finds the star by id wherever it sits, and
@@ -1472,6 +1561,45 @@ claude"
             (should-not (sprig--verify-live-apply
                          nil (list (list :session "HELD1" :live t))
                          "{\"ok\": true, \"sessions\": [{\"cli_session_id\": \"HELD1\"}]}"))))
+      (delete-directory root t))))
+
+(ert-deftest sprig-test-verify-live-restores-what-the-broker-holds ()
+  ;; The listing settles the flag both ways: a row the broker holds but that
+  ;; carries no marker gets one written beside its log, so it shows as held
+  ;; and the next scan agrees.  A session the broker reports as `ended' is
+  ;; not promoted (it lingers in the listing after it died on its own), and a
+  ;; row with no log to write beside is left alone.
+  (let* ((root (make-temp-file "sprigpromote" t))
+         (pdir (expand-file-name "-p-a" root))
+         (log (expand-file-name "HELD1.jsonl" pdir)))
+    (unwind-protect
+        (progn
+          (make-directory pdir)
+          (write-region "" nil log)
+          (write-region "" nil (expand-file-name "DONE1.jsonl" pdir))
+          (let ((sprig-config-directory nil)
+                (sprig-claude-projects-directory root)
+                (rows (list (list :session "HELD1" :live nil :file log)
+                            (list :session "DONE1" :live nil
+                                  :file (expand-file-name "DONE1.jsonl" pdir))
+                            (list :session "NOLOG" :live nil))))
+            (should (sprig--verify-live-apply
+                     nil rows
+                     (concat "{\"ok\": true, \"sessions\": ["
+                             "{\"cli_session_id\": \"HELD1\", \"ended\": false},"
+                             "{\"cli_session_id\": \"DONE1\", \"ended\": true},"
+                             "{\"cli_session_id\": \"NOLOG\", \"ended\": false}]}")))
+            (should (file-exists-p (expand-file-name "HELD1.sprig-live" pdir)))
+            (should-not (file-exists-p (expand-file-name "DONE1.sprig-live" pdir)))
+            (should-not (file-exists-p (expand-file-name "NOLOG.sprig-live" pdir)))
+            ;; An ended session the row called held is cleaned, not kept.
+            (write-region "" nil (expand-file-name "DONE1.sprig-live" pdir))
+            (should (sprig--verify-live-apply
+                     nil (list (list :session "DONE1" :live t))
+                     (concat "{\"ok\": true, \"sessions\": ["
+                             "{\"cli_session_id\": \"DONE1\", \"ended\": true}]}")))
+            (should-not (file-exists-p
+                         (expand-file-name "DONE1.sprig-live" pdir)))))
       (delete-directory root t))))
 
 (ert-deftest sprig-test-remove-live-marker-clears-a-stale-one ()

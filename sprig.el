@@ -636,6 +636,30 @@ fire-and-forget ssh, so the caller (a process sentinel) never blocks."
                                    "\\.sprig-live\\'")))
             (ignore-errors (delete-file f))))))))
 
+(defun sprig--write-live-marker (host log)
+  "Write the `.sprig-live' marker beside session LOG on HOST, best-effort.
+nil HOST is the local machine.  The broker writes this marker itself when it
+takes a session, but only within a short window after the session id first
+appears, and the stale-marker cleanups only ever delete: a session the broker
+demonstrably holds can end up with no marker at all and then shows as cold for
+the rest of its life.  So when the broker's own `list' vouches for a session
+whose row is not flagged live, one is written back (see
+`sprig--verify-live-apply'); this is the inverse of `sprig--remove-live-marker'
+and, like it, a remote write is one fire-and-forget ssh, so the caller never
+blocks.  A marker written for a session that later dies uncleanly is cleaned
+by the same verify pass, so the write is safe to lose a race."
+  (when log
+    (let ((marker (sprig--live-file log)))
+      (if host
+          (ignore-errors
+            (apply #'start-process "sprig-marker-write" nil sprig-ssh-program
+                   (append sprig-ssh-args
+                           (list host
+                                 (concat "touch "
+                                         (sprig--remote-dir-arg marker)
+                                         " 2>/dev/null; :")))))
+        (ignore-errors (write-region "" nil marker nil 'silent))))))
+
 (defun sprig--broker-stop-session (id host)
   "Ask HOST's broker to stop held session ID; return non-nil when it did.
 nil HOST stops on the local machine.  The broker closes the child's stdin,
@@ -4123,10 +4147,50 @@ across the move rather than being lost with the old directory."
         (puthash (file-name-base f) t set)))
     set))
 
+(defun sprig--live-ids-local (root)
+  "Ids of every `.sprig-live' broker marker anywhere under ROOT, as a hash set.
+The live flag is collected host-wide by session id for the same reason a star
+is (see `sprig--star-ids-local'): the marker sits beside the log the broker
+found when it took the session, and the CLI re-homes that log to another
+project directory when the session resumes from a different working
+directory, leaving the marker behind.  Matching by id keeps a running session
+showing as held across the move."
+  (let ((set (make-hash-table :test 'equal)))
+    (when (file-directory-p root)
+      (dolist (f (directory-files-recursively root "\\.sprig-live\\'"))
+        (puthash (file-name-base f) t set)))
+    set))
+
+(defun sprig--cap-keeping-live (items limit live-p)
+  "Return ITEMS' first LIMIT, plus every later item LIVE-P holds for.
+A session the broker still holds must be listed however old its log is: it is
+the one row the navigator cannot afford to drop, and an idle held session
+falls below the newest-N cap (`sprig-status-max-sessions') soon enough.  The
+order of ITEMS is kept; a nil LIMIT caps nothing."
+  (if (null limit)
+      items
+    (let ((n 0)
+          (kept '()))
+      (dolist (it items)
+        (cond ((< n limit) (setq n (1+ n)) (push it kept))
+              ((funcall live-p it) (push it kept))))
+      (nreverse kept))))
+
+(defun sprig--log-live-p (log live-ids)
+  "Non-nil when session LOG is broker-held, by its own marker or by id.
+LIVE-IDS is the host-wide set from `sprig--live-ids-local'; the marker beside
+LOG is tested too, so the two sources union the way a star's do."
+  (and (or (gethash (file-name-base log) live-ids)
+           (file-exists-p (sprig--live-file log)))
+       t))
+
 (defun sprig--scan-session-logs-local (limit)
-  "Scan the LIMIT newest local logs under the session host's projects dir."
+  "Scan the LIMIT newest local logs under the session host's projects dir.
+A broker-held session is exempt from the cap and keeps its live flag across a
+re-homed log (see `sprig--cap-keeping-live' and `sprig--log-live-p')."
   (let* ((root (expand-file-name (sprig--projects-directory)))
          (star-ids (sprig--star-ids-local root))
+         (live-ids (sprig--live-ids-local root))
          (files (seq-remove
                  (lambda (f)
                    (or (sprig--log-ignored-p f)
@@ -4141,7 +4205,9 @@ across the move rather than being lost with the old directory."
                                       f))
                               files)
                       (lambda (a b) (> (car a) (car b))))))
-    (when limit (setq dated (seq-take dated limit)))
+    (setq dated (sprig--cap-keeping-live
+                 dated limit
+                 (lambda (cell) (sprig--log-live-p (cdr cell) live-ids))))
     (mapcar (lambda (cell)
               (let* ((f (cdr cell))
                      (size (or (file-attribute-size (file-attributes f)) 0)))
@@ -4156,7 +4222,7 @@ across the move rather than being lost with the old directory."
                   (plist-put pl :starred
                              (or (gethash (file-name-base f) star-ids)
                                  (file-exists-p (sprig--star-file f))))
-                  (plist-put pl :live (file-exists-p (sprig--live-file f)))
+                  (plist-put pl :live (sprig--log-live-p f live-ids))
                   pl)))
             dated)))
 
@@ -4172,43 +4238,61 @@ some of the newest, so a little headroom keeps the capped set full."
 (defun sprig--remote-scan-all-command (root cap &optional subagents)
   "Shell command listing the CAP newest logs under ROOT with their scan fields.
 One SSH round trip does the whole scan: `find | sort | head' picks the newest
-logs by mtime, then each is slurped for its mtime, path, star flag, head bytes
-(for the `cwd'), its title line (grepped whole-file since it can sit anywhere),
-and a trailing live flag.  A user `customTitle' is preferred over the generated
-`aiTitle' (see `sprig--log-title'), so the grep looks for it first.  The star
-flag is `1' when a `<id>.sprig-star' marker sits beside the log (see
-`sprig--star-file'); the trailing live flag is `1' when a `<id>.sprig-live'
-broker marker does (see `sprig--live-file'), so the navigator learns which
-sessions are still held without a separate query.  Both are tested in the same
-loop, so no extra round trip is paid.  Records are RS(\\036)-separated, fields
-US(\\037)-separated, for `sprig--parse-scan-rows'.
+logs by mtime, then the `r' shell function slurps each for its mtime, path,
+star flag, head bytes (for the `cwd'), its title line (grepped whole-file since
+it can sit anywhere), and a trailing live flag.  A user `customTitle' is
+preferred over the generated `aiTitle' (see `sprig--log-title'), so the grep
+looks for it first.  The star flag is `1' when a `<id>.sprig-star' marker sits
+beside the log (see `sprig--star-file'); the trailing live flag is `1' when a
+`<id>.sprig-live' broker marker does (see `sprig--live-file'), so the navigator
+learns which sessions are still held without a separate query.  Both are tested
+in the same loop, so no extra round trip is paid.  Records are
+RS(\\036)-separated, fields US(\\037)-separated, for `sprig--parse-scan-rows'.
 
 Subagent transcripts (`.../subagents/agent-*.jsonl', see
 `sprig--log-subagent-p') are pruned in the `find' itself unless SUBAGENTS is
 non-nil, so they never eat into the newest-N cap.
 
-A leading `stars' record lists every `<id>.sprig-star' marker's id under ROOT,
-so a star is matched by session id host-wide rather than only beside the log
-it was written next to: the CLI re-homes a session's log to a new project dir
-when it resumes from a different working directory (a git worktree), stranding
-the marker in the old dir, and id-keying lets the star follow the session
-across the move (see `sprig--parse-scan-rows').  The newest-N cap never drops
-a star, since the preamble scans them whole."
-  (format "printf '\\036stars\\037'; \
-find %s -name '*.sprig-star' 2>/dev/null | while IFS= read -r s; do \
-b=${s##*/}; printf '%%s\\037' \"${b%%.sprig-star}\"; done; \
-find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
-| sort -rn | head -n %d | while IFS='\t' read -r m p; do \
+Two preamble records, `stars' and `live', list every marker id of their kind
+under ROOT, so each flag is matched by session id host-wide rather than only
+beside the log it was written next to: the CLI re-homes a session's log to a
+new project dir when it resumes from a different working directory (a git
+worktree), stranding the marker in the old dir, and id-keying lets the flag
+follow the session across the move (see `sprig--parse-scan-rows').  Both
+preambles scan every marker whole, so neither flag is lost to the cap.
+
+A held session must be listed however old its log is, so a last pass slurps
+the log behind every `.sprig-live' marker too: its sibling log when it has
+one, else the log of that id wherever it now sits.  Those records repeat what
+the capped pass already emitted; the parser drops the duplicates and keeps
+every live row past the cap (see `sprig--cap-keeping-live')."
+  (let ((prune (if subagents "" " -not -path '*/subagents/*'")))
+    (format "r() { while IFS='\t' read -r m p; do \
 printf '\\036%%s\\037%%s\\037' \"$m\" \"$p\"; \
 [ -e \"${p%%.jsonl}.sprig-star\" ] && printf 1; \
 printf '\\037'; head -c %d \"$p\"; \
 printf '\\037'; t=$(grep -a customTitle \"$p\" | tail -1); \
 [ -z \"$t\" ] && t=$(grep -a aiTitle \"$p\" | tail -1); printf '%%s' \"$t\"; \
-printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; :; done"
-          root
-          root
-          (if subagents "" " -not -path '*/subagents/*'")
-          cap sprig--status-preview-bytes))
+printf '\\037'; [ -e \"${p%%.jsonl}.sprig-live\" ] && printf 1; :; done; }; \
+printf '\\036stars\\037'; \
+find %s -name '*.sprig-star' 2>/dev/null | while IFS= read -r s; do \
+b=${s##*/}; printf '%%s\\037' \"${b%%.sprig-star}\"; done; \
+printf '\\036live\\037'; \
+find %s -name '*.sprig-live' 2>/dev/null | while IFS= read -r s; do \
+b=${s##*/}; printf '%%s\\037' \"${b%%.sprig-live}\"; done; \
+find %s -name '*.jsonl'%s -printf '%%T@\\t%%p\\n' 2>/dev/null \
+| sort -rn | head -n %d | r; \
+find %s -name '*.sprig-live' 2>/dev/null | while IFS= read -r s; do \
+l=\"${s%%.sprig-live}.jsonl\"; \
+if [ -e \"$l\" ]; then find \"$l\" -printf '%%T@\\t%%p\\n' 2>/dev/null; \
+else b=${s##*/}; find %s -name \"${b%%.sprig-live}.jsonl\"%s \
+-printf '%%T@\\t%%p\\n' 2>/dev/null; fi; done | r"
+            sprig--status-preview-bytes
+            root
+            root
+            root prune cap
+            root
+            root prune)))
 
 (defun sprig--parse-scan-rows (blob limit)
   "Parse BLOB from `sprig--remote-scan-all-command' into scan plists.
@@ -4219,27 +4303,35 @@ beside the log, else empty (live means the broker still holds the session).
 The live flag is last and optional, so an older blob without it still parses,
 its session simply not live.
 
-A leading `stars' record (its first field the literal `stars', the rest a
-US-separated list of ids) names every starred session host-wide; a row is
-starred when its own id is in that set or its per-log star flag is `1', so a
-star found by id in a re-homed session's old directory still counts (see
-`sprig--remote-scan-all-command').  An older blob without the record just
-falls back to the per-log flag.  Ignored logs
-are
-dropped and the rest capped to LIMIT, newest first, matching
-`sprig--scan-session-logs'.  The head holds no US byte in any real log, so it
-is bounded by the separators around it."
+Two preamble records key the same two flags by session id host-wide: `stars'
+names every starred session, `live' every held one (their first field is the
+literal `stars' or `live', the rest a US-separated list of ids).  A row
+carries a flag when its own id is in the matching set or its per-log flag is
+`1', so a marker stranded in a re-homed session's old directory still counts
+(see `sprig--remote-scan-all-command').  An older blob without the records
+just falls back to the per-log flags.
+
+Ignored logs are dropped, a log named twice (the scan slurps a held session's
+log again so the cap cannot hide it) is kept once, and the rest is capped to
+LIMIT, newest first, matching `sprig--scan-session-logs-local'.  A live row
+survives the cap (see `sprig--cap-keeping-live').  The head holds no US byte
+in any real log, so it is bounded by the separators around it."
   (let ((chunks (and blob (split-string blob "\036" t)))
         (star-ids (make-hash-table :test 'equal))
+        (live-ids (make-hash-table :test 'equal))
+        (seen (make-hash-table :test 'equal))
         rows)
     (dolist (chunk chunks)
-      (let ((p1 (string-search "\037" chunk)))
-        (when (and p1 (equal (substring chunk 0 p1) "stars"))
+      (let* ((p1 (string-search "\037" chunk))
+             (set (and p1 (pcase (substring chunk 0 p1)
+                            ("stars" star-ids)
+                            ("live" live-ids)))))
+        (when set
           (dolist (id (split-string (substring chunk (1+ p1)) "\037" t))
-            (puthash id t star-ids)))))
+            (puthash id t set)))))
     (dolist (chunk chunks)
       (let ((p1 (string-search "\037" chunk)))
-        (when (and p1 (not (equal (substring chunk 0 p1) "stars")))
+        (when (and p1 (not (member (substring chunk 0 p1) '("stars" "live"))))
           (let* ((mtime (string-to-number (substring chunk 0 p1)))
                  (rest1 (substring chunk (1+ p1)))
                  (p2 (string-search "\037" rest1)))
@@ -4262,15 +4354,22 @@ is bounded by the separators around it."
                          (raw (string-trim (if p5 (substring tail 0 p5)
                                              (or tail ""))))
                          (title (and (not (string-empty-p raw)) raw)))
-                    (unless (sprig--log-ignored-p path)
+                    (unless (or (sprig--log-ignored-p path)
+                                (gethash path seen))
+                      (puthash path t seen)
                       (let ((pl (sprig--log-plist
                                  path mtime head (lambda () title))))
                         (plist-put pl :starred
                                    (or star (gethash (plist-get pl :session)
                                                      star-ids)))
-                        (push (plist-put pl :live live) rows)))))))))))
-    (setq rows (nreverse rows))
-    (if limit (seq-take rows limit) rows)))
+                        (plist-put pl :live
+                                   (and (or live
+                                            (gethash (plist-get pl :session)
+                                                     live-ids))
+                                        t))
+                        (push pl rows)))))))))))
+    (sprig--cap-keeping-live (nreverse rows) limit
+                             (lambda (row) (plist-get row :live)))))
 
 (defun sprig--scan-session-logs-remote (limit)
   "Scan the newest remote logs under `sprig-claude-projects-directory'.
@@ -4591,38 +4690,55 @@ repaint show the truth at once (compare `sprig--status-scan-cache-set-star')."
 
 (defun sprig--verify-live-apply (host rows json)
   "Reconcile ROWS' `:live' flags against the broker's `list' answer JSON.
-Every `:live' row whose session the broker does not name is stale: its
-marker is removed on HOST, its cached row downgraded, and non-nil returned
-so the caller repaints.  A JSON that does not parse to an `ok' listing
-proves nothing and changes nothing (nil).  The held set is matched on the
-broker's `cli_session_id', the same id the marker and the log carry."
+The broker's own listing is the truth about what it holds, so it settles the
+flag both ways.  A `:live' row whose session it does not name is stale: the
+marker is removed on HOST and the cached row downgraded.  A row it does name
+that is not flagged live has lost its marker (or never got one): a marker is
+written beside the log and the cached row upgraded, so the row shows as held
+at once and the next scan agrees.  Non-nil is returned when anything changed,
+so the caller repaints.  A JSON that does not parse to an `ok' listing proves
+nothing and changes nothing (nil).  The held set is matched on the broker's
+`cli_session_id', the same id the marker and the log carry, and spans only
+sessions the broker reports as still running: a session that ended on its own
+lingers in the listing as `ended', and promoting that would conjure a ghost."
   (let* ((data (ignore-errors
                  (json-parse-string json :object-type 'alist
                                     :null-object nil)))
          (ok (and data (eq (alist-get 'ok data) t)))
          (held (and ok (mapcar (lambda (s) (alist-get 'cli_session_id s))
-                               (append (alist-get 'sessions data) nil))))
+                               (seq-remove
+                                (lambda (s) (eq (alist-get 'ended s) t))
+                                (append (alist-get 'sessions data) nil)))))
          (changed nil))
     (when ok
       (dolist (row rows)
-        (let ((id (plist-get row :session)))
-          (when (and (plist-get row :live) id (not (member id held)))
+        (let* ((id (plist-get row :session))
+               (live (plist-get row :live))
+               (in-broker (and id (member id held))))
+          (cond
+           ((and live id (not in-broker))
             (sprig--remove-live-marker id host)
             (sprig--status-scan-cache-set-live host id nil)
-            (setq changed t)))))
+            (setq changed t))
+           ((and (not live) in-broker (plist-get row :file))
+            (sprig--write-live-marker host (plist-get row :file))
+            (sprig--status-scan-cache-set-live host id t)
+            (setq changed t))))))
     changed))
 
 (defun sprig--status-verify-live (host rows)
-  "Check HOST's broker really holds ROWS' `:live' sessions, in the background.
-The scan takes a `<id>.sprig-live' marker on faith, but a daemon that died
-without cleanup (a machine restart) strands its markers, and a dead session
-then shows as running for good.  So one `list' query asks the broker what
-it actually holds, and `sprig--verify-live-apply' cleans up any row it
-cannot vouch for.  The broker's `list' answers an empty set without
-starting a daemon when none runs; a transport failure exits nonzero,
-proving nothing, and nothing is touched.  A no-op when no row claims to be
-live or the broker does not cover HOST."
-  (when (and (seq-some (lambda (r) (plist-get r :live)) rows)
+  "Settle ROWS' held claims against HOST's broker, in the background.
+The scan takes a `<id>.sprig-live' marker on faith, and takes its absence on
+faith too, so both can lie: a daemon that died without cleanup (a machine
+restart) strands its markers and a dead session shows as running for good,
+while a held session whose marker was never written, or was cleaned off by an
+earlier verify, shows as cold for good.  So one `list' query asks the broker
+what it actually holds and `sprig--verify-live-apply' corrects the rows it
+contradicts, either way.  The broker's `list' answers an empty set without
+starting a daemon when none runs; a transport failure exits nonzero, proving
+nothing, and nothing is touched.  A no-op when there are no rows or the broker
+does not cover HOST."
+  (when (and rows
              (if host (sprig--broker-remote-p) (sprig--broker-local-p)))
     (let* ((buffer (generate-new-buffer " *sprig-broker-list*"))
            (proc
@@ -4846,7 +4962,11 @@ CLI's own log, on whichever host the log lives; the CLI ignores it."
   "Return the broker live-marker path beside session LOG (an `<id>.jsonl').
 The broker touches this `<id>.sprig-live' file while it holds the session
 and removes it when the session ends, so the scan learns which sessions are
-still held without querying the broker (see the broker script)."
+still held without querying the broker (see the broker script).  The scan
+matches the marker by session id as well as by path, since a re-homed log
+leaves it behind (see `sprig--live-ids-local'), and a verify pass writes one
+back when the broker vouches for a session that has none
+\(`sprig--write-live-marker')."
   (concat (file-name-sans-extension log) ".sprig-live"))
 
 (defun sprig--status-starred-p (entry)
