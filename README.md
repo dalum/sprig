@@ -360,7 +360,10 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-live-context-lines` | `400` | Lines before point sent as context (nil = whole buffer) |
 | `sprig-live-steer-marker` | `">>>"` | What makes a comment line an instruction |
 | `sprig-live-restart-idle` | `0.6` | Seconds of your silence before it resumes writing |
-| `sprig-live-max-tokens` | `512` | Tokens a run may write |
+| `sprig-live-max-tokens` | `256` | Ceiling on a run; the stop strings should end it sooner |
+| `sprig-live-stop-alist` | per mode | Strings ending a run, marking a new top-level form |
+| `sprig-live-fallback-stop-strings` | `("\n\n\n")` | Used when the mode is not in the alist |
+| `sprig-live-extra-stop-strings` | `nil` | Stop strings added in every buffer |
 | `sprig-live-temperature` | `0.2` | Sampling temperature |
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
 | `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
@@ -473,7 +476,11 @@ That is why `sprig-live-slot` is pinned (a different slot is a different cache, 
 
 **`Qwen3-Coder-30B-A3B-Instruct` is the one to serve.** Being MoE it caches as well as the small model, and the ~3B active parameters keep generation close. Asked for a tail-recursive list reversal in an Emacs Lisp buffer it wrote idiomatic Elisp with a docstring, took the surrounding `sprig-live--` naming convention, and used a `while` loop because Elisp has no tail-call optimisation. The 1.5B wrote code that was not tail-recursive, then repeated the task three times, worse each time. The 1.5B remains the choice if 17.7 GB resident is too much; it is the fast option, not the good one.
 
-**Both models invent their own instructions**, having answered yours: a completion model imitates the `>>>` convention and writes itself a plausible next line. `sprig-live--stop-strings` ends a run on the marker, so the turn comes back to you instead of the model putting words in your mouth.
+**A run is one coherent step**, as a pair-mode turn is, and two stop conditions keep it that way. The first is the steer marker: a completion model imitates the `>>>` convention and, having answered you, writes itself a plausible next instruction, which reads as the model putting words in your mouth. The second marks a **new top-level form** (`sprig-live-stop-alist`, per mode), because a model that has finished will otherwise carry straight on into something you did not ask for. Measured on Qwen3-Coder with no marker in the buffer: one `defun`, then it stopped.
+
+The blank line in those patterns is deliberate — a bare `\n(` would also match the model's very first token when it opens with an empty line, ending the run before it wrote anything. For a mode the alist does not know, `sprig-live-fallback-stop-strings` uses two blank lines; `sprig-live-extra-stop-strings` adds your own everywhere.
+
+**Stopping sticks.** `C-c C-l q` disarms the mode, so your next keystroke does not start it again, and an edit made while nothing is running starts nothing. Typing resumes only what was actually running.
 
 ## Status / caveats
 

@@ -190,5 +190,42 @@
     (sprig-live--resume)
     (should-not sprig-live--process)))
 
+(ert-deftest sprig-live-test-stops-mark-a-new-top-level-form ()
+  ;; The symptom this fixes: the model answers you, then starts something
+  ;; else unbidden.  The marker cannot catch that, since it never writes one.
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (let ((stops (sprig-live--stop-strings)))
+      (should (member sprig-live-steer-marker stops))
+      (should (member "\n\n(" stops)))))
+
+(ert-deftest sprig-live-test-stops-require-a-blank-line ()
+  ;; A bare newline-and-paren would match the model's very first token when
+  ;; it opens with an empty line, ending the run before it wrote anything.
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (should-not (member "\n(" (sprig-live--stop-strings)))))
+
+(ert-deftest sprig-live-test-unknown-mode-falls-back ()
+  (with-temp-buffer
+    (fundamental-mode)
+    (let ((sprig-live-fallback-stop-strings '("\n\n\n")))
+      (should (member "\n\n\n" (sprig-live--stop-strings))))))
+
+(ert-deftest sprig-live-test-extra-stops-are-appended ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (let ((sprig-live-extra-stop-strings '("END")))
+      (should (member "END" (sprig-live--stop-strings))))))
+
+(ert-deftest sprig-live-test-request-carries-every-stop ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (let* ((body (json-parse-string (sprig-live--request-body "p")
+                                    :object-type 'alist :array-type 'list))
+           (stops (alist-get 'stop body)))
+      (should (member "\n\n(" stops))
+      (should (member sprig-live-steer-marker stops)))))
+
 (provide 'sprig-live-tests)
 ;;; sprig-live-tests.el ends here

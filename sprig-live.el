@@ -61,8 +61,10 @@ the whole reason steering is cheap.  Letting the server choose spreads a
 session over slots and pays the cold prefill again on each hop."
   :type 'integer)
 
-(defcustom sprig-live-max-tokens 512
-  "Tokens the model may write before it stops on its own."
+(defcustom sprig-live-max-tokens 256
+  "Tokens the model may write before it stops on its own.
+A ceiling, not a target: the stop strings should end a run well before
+this.  At ~18 tok/s it is about the longest you would sit watching."
   :type 'integer)
 
 (defcustom sprig-live-temperature 0.2
@@ -187,14 +189,53 @@ inserted so this can be tested without a server."
                 (setq out (concat out (or (alist-get 'content obj) "")))))))))
     (cons out rest)))
 
+(defcustom sprig-live-stop-alist
+  '((emacs-lisp-mode "\n\n(" "\n\n;;;")
+    (lisp-interaction-mode "\n\n(")
+    (lisp-mode "\n\n(")
+    (scheme-mode "\n\n(")
+    (clojure-mode "\n\n(")
+    (python-mode "\n\ndef " "\n\nclass " "\n\n@" "\n\nif __name__")
+    (python-ts-mode "\n\ndef " "\n\nclass " "\n\n@" "\n\nif __name__")
+    (sh-mode "\n\nfunction ")
+    (rust-mode "\n\nfn " "\n\npub fn " "\n\nimpl " "\n\nstruct ")
+    (rust-ts-mode "\n\nfn " "\n\npub fn " "\n\nimpl " "\n\nstruct "))
+  "Per-mode strings that end a run, beyond the steer marker.
+A run should be one coherent step, as a pair-mode turn is.  Left alone a
+model finishes what you asked for and then starts something else
+unbidden, which is the thing to catch: each entry marks a *new top-level
+form*, so a run ends where your reading would.
+
+The blank line is deliberate.  A bare newline-and-paren would also match
+the model's very first token when it opens with an empty line, ending the
+run before it wrote anything; a top-level form in these languages follows
+a blank line anyway."
+  :type '(alist :key-type symbol :value-type (repeat string)))
+
+(defcustom sprig-live-extra-stop-strings nil
+  "Stop strings added in every buffer, whatever its mode."
+  :type '(repeat string))
+
+(defcustom sprig-live-fallback-stop-strings '("\n\n\n")
+  "Stop strings used when `sprig-live-stop-alist' knows nothing of the mode.
+Two blank lines: a weaker signal than a named top-level form, but it still
+catches a model that has finished and is casting about."
+  :type '(repeat string))
+
 (defun sprig-live--stop-strings ()
   "Strings that end a run.
-The steer marker is yours, not the model's.  Left to itself a completion
-model imitates the convention: having answered your line it writes a
-plausible next instruction to itself and keeps going, which reads as the
-model putting words in your mouth.  Stopping on the marker hands the turn
-back instead, which is the whole bargain of live mode."
-  (list sprig-live-steer-marker))
+
+Two kinds.  The steer marker is yours, not the model's: left to itself a
+completion model imitates the convention, writing itself a plausible next
+instruction, which reads as the model putting words in your mouth.  The
+rest mark a new top-level form, because a model that has answered you
+will otherwise carry straight on into something you did not ask for.
+
+Stopping hands the turn back, which is the whole bargain of live mode."
+  (append (list sprig-live-steer-marker)
+          (or (alist-get major-mode sprig-live-stop-alist)
+              sprig-live-fallback-stop-strings)
+          sprig-live-extra-stop-strings))
 
 (defun sprig-live--request-body (prompt)
   "Return the JSON request body streaming PROMPT."
