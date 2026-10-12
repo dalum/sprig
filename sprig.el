@@ -57,6 +57,66 @@
   "Path to the `claude' CLI (on the machine where the session runs)."
   :type 'string)
 
+(defcustom sprig-backend 'claude
+  "Which agent backend a session runs on.
+`claude' runs the `claude' CLI (`sprig-program').  `llama' runs the
+`sprig-llama' client layer (`sprig-llama-program') against an
+OpenAI/Anthropic-style server such as llama.cpp, named by
+`sprig-llama-base-url'.
+
+Both speak the same stream-json protocol over stdio, so the transport,
+the parser and the session buffer are the same either way; only the
+program and its arguments differ (`sprig--program', `sprig--base-args').
+Per-buffer overrides go through `sprig--backend-override'.
+
+A `llama' session has no tools: the server asks for tool calls but
+nothing executes them, so the diff review and the verbs, which are
+instructions to an agent that edits files, do not apply to it."
+  :type '(choice (const :tag "claude CLI" claude)
+                 (const :tag "llama.cpp via sprig-llama" llama)))
+
+(defcustom sprig-llama-program nil
+  "Path to the `sprig-llama' client layer, or nil to find it beside sprig.
+Nil resolves to `llama/sprig-llama' next to the loaded library, which is
+where a git checkout keeps it.  Set this when the script lives elsewhere,
+or on an SSH host at a path of its own."
+  :type '(choice (const :tag "Beside sprig" nil) (file :tag "Script")))
+
+(defcustom sprig-llama-base-url "http://127.0.0.1:8080"
+  "Base URL of the server a `llama' session talks to.
+The `sprig-llama' client appends `/v1/messages'.  Interpreted on the
+machine running the session, so a remote session wants the URL as that
+host sees it."
+  :type 'string)
+
+(defcustom sprig-llama-model "local"
+  "Model name a `llama' session asks the server for.
+llama.cpp serves one model and ignores this, but it is echoed back on the
+`init' event and so is what the session buffer reports running on.
+Separate from `sprig-model', which names a Claude model."
+  :type 'string)
+
+(defcustom sprig-llama-projects-directory "~/.sprig-llama/projects"
+  "Root under which `sprig-llama' stores per-project session logs.
+The counterpart of `sprig-claude-projects-directory', kept apart from it
+so llama sessions and Claude sessions do not appear in each other's
+navigator listings.  Interpreted on the session host."
+  :type 'directory)
+
+(defcustom sprig-llama-max-tokens 4096
+  "Cap on the tokens a `llama' turn may generate."
+  :type 'integer)
+
+(defcustom sprig-llama-thinking nil
+  "When non-nil, let a `llama' session's model reason before answering.
+Off by default: local models are slow, and the thinking is billed in
+wall-clock seconds you spend watching."
+  :type 'boolean)
+
+(defcustom sprig-llama-extra-args nil
+  "Extra arguments appended to the `sprig-llama' command line."
+  :type '(repeat string))
+
 (defcustom sprig-remotes nil
   "SSH destinations (e.g. \"user@host\") the navigator lists, or nil.
 Each entry becomes a `remote' group of its own in the navigator, scanned
@@ -391,6 +451,12 @@ at a worktree the agent moved into must not re-home the session itself,
 which is what writing `sprig--working-dir' would do on the next connect.
 Nil reads the session's own directory, as ever (`sprig--directory').")
 
+(defvar-local sprig--backend-override 'inherit
+  "Per-session backend override for this buffer's session.
+The symbol `inherit' (the default) follows `sprig-backend'; any other
+value overrides it for this buffer alone, so one Emacs can hold a Claude
+session and a llama session at once.  Mirrors `sprig--remote-override'.")
+
 (defvar-local sprig--remote-override 'inherit
   "Per-session SSH-destination override for this buffer's session.
 The symbol `inherit' (the default) follows the primary remote (the first
@@ -435,7 +501,63 @@ stands."
 
 ;;;; Command construction
 
+(defun sprig--backend ()
+  "The backend this buffer's session runs on, a symbol.
+`sprig--backend-override' wins over `sprig-backend' when it is anything
+but `inherit', so one Emacs can hold sessions on both."
+  (if (eq sprig--backend-override 'inherit)
+      sprig-backend
+    sprig--backend-override))
+
+(defun sprig--llama-p ()
+  "Non-nil when this buffer's session runs on the `llama' backend."
+  (eq (sprig--backend) 'llama))
+
+(defun sprig--llama-program ()
+  "Path to the `sprig-llama' client layer.
+Nil `sprig-llama-program' resolves to `llama/sprig-llama' beside the
+loaded library, which is where a checkout keeps it."
+  (or sprig-llama-program
+      (let ((lib (or (and load-file-name (file-name-directory load-file-name))
+                     (locate-library "sprig")
+                     default-directory)))
+        (expand-file-name "llama/sprig-llama"
+                          (if (file-directory-p lib)
+                              lib
+                            (file-name-directory lib))))))
+
+(defun sprig--program ()
+  "The program a session runs, per `sprig--backend'.
+The one place the backend choice turns into a command name; everything
+downstream (`sprig--command', the broker, the SSH wrapping) is the same
+either way, because both programs speak the same protocol over stdio."
+  (if (sprig--llama-p) (sprig--llama-program) sprig-program))
+
 (defun sprig--base-args ()
+  "The session argument list (without program / ssh wrapping).
+Dispatches on `sprig--backend'; see `sprig--claude-args' and
+`sprig--llama-args'."
+  (if (sprig--llama-p) (sprig--llama-args) (sprig--claude-args)))
+
+(defun sprig--llama-args ()
+  "The `sprig-llama' argument list.
+Only the flags that mean something to the client: it owns the
+conversation, so a resume names the log to read back rather than asking
+a server to remember anything."
+  (append
+   (list "--base-url" sprig-llama-base-url
+         "--model" sprig-llama-model
+         "--projects-dir" sprig-llama-projects-directory
+         "--max-tokens" (number-to-string sprig-llama-max-tokens))
+   (when sprig-llama-thinking (list "--thinking"))
+   (when sprig-system-prompt
+     (list "--append-system-prompt" sprig-system-prompt))
+   (when sprig--session-id
+     (append (list "--resume" sprig--session-id)
+             (when sprig--fork-session (list "--fork-session"))))
+   sprig-llama-extra-args))
+
+(defun sprig--claude-args ()
   "The `claude' argument list (without program / ssh wrapping)."
   (append
    (list "-p"
@@ -514,7 +636,7 @@ local'), so it survives Emacs itself exiting."
      ((and (not remote) (sprig--broker-local-p))
       (sprig--broker-command-local))
      (t
-      (sprig--wrap-command (cons sprig-program (sprig--base-args))
+      (sprig--wrap-command (cons (sprig--program) (sprig--base-args))
                            (sprig--directory)
                            remote)))))
 
@@ -542,7 +664,7 @@ dir rides `--cwd', and the `claude' argv follows a `--'."
          (tokens
           (append
            (list "python3" (sprig--remote-dir-arg sprig-broker-remote-path)
-                 "open" "--program" (shell-quote-argument sprig-program))
+                 "open" "--program" (shell-quote-argument (sprig--program)))
            (when sprig--broker-attach-only (list "--attach-only" "--no-start"))
            (when dir (list "--cwd" (sprig--remote-dir-arg dir)))
            (when session (list "--session" (shell-quote-argument session)))
@@ -588,7 +710,7 @@ child), and the `claude' argv follows a `--'."
                        sprig--session-id)))
     (append
      (list "python3" (sprig--broker-local-path)
-           "open" "--program" sprig-program)
+           "open" "--program" (sprig--program))
      (when sprig--broker-attach-only (list "--attach-only" "--no-start"))
      (when dir (list "--cwd" (expand-file-name dir)))
      (when session (list "--session" session))
@@ -3882,9 +4004,14 @@ supported user knob is `sprig-config-directory'.")
 When `sprig-config-directory' is set, that is its `projects/'
 subdirectory; otherwise `sprig-claude-projects-directory'.  Interpreted on
 the session host, so it may carry a leading `~'."
-  (if sprig-config-directory
-      (file-name-concat (directory-file-name sprig-config-directory) "projects")
-    sprig-claude-projects-directory))
+  (cond
+   ;; A llama session's logs are written by `sprig-llama', which keeps them
+   ;; apart from the CLI's so the two backends' sessions do not appear in
+   ;; each other's navigator listings.
+   ((sprig--llama-p) sprig-llama-projects-directory)
+   (sprig-config-directory
+    (file-name-concat (directory-file-name sprig-config-directory) "projects"))
+   (t sprig-claude-projects-directory)))
 
 (defvar-local sprig--status-filter nil
   "Case-insensitive substring the navigator narrows rows to, or nil for all.

@@ -4847,3 +4847,107 @@ the suite's own sprig options are not unbound out from under it."
 
 (provide 'sprig-tests)
 ;;; sprig-tests.el ends here
+
+;;;; llama backend
+
+(ert-deftest sprig-test-backend-defaults-to-claude ()
+  (with-temp-buffer
+    (let ((sprig-backend 'claude))
+      (should (eq (sprig--backend) 'claude))
+      (should-not (sprig--llama-p))
+      (should (equal (sprig--program) sprig-program)))))
+
+(ert-deftest sprig-test-backend-override-beats-the-option ()
+  ;; One Emacs holds sessions on both backends, so the buffer-local override
+  ;; wins; `inherit' is what follows the option.
+  (with-temp-buffer
+    (let ((sprig-backend 'claude))
+      (setq sprig--backend-override 'llama)
+      (should (eq (sprig--backend) 'llama))
+      (setq sprig--backend-override 'inherit)
+      (should (eq (sprig--backend) 'claude)))))
+
+(ert-deftest sprig-test-llama-program-resolves-beside-sprig ()
+  (with-temp-buffer
+    (let ((sprig-llama-program nil))
+      (should (string-suffix-p "llama/sprig-llama" (sprig--llama-program))))
+    (let ((sprig-llama-program "/opt/sprig-llama"))
+      (should (equal (sprig--llama-program) "/opt/sprig-llama")))))
+
+(ert-deftest sprig-test-base-args-dispatch-on-the-backend ()
+  (with-temp-buffer
+    (let ((sprig-backend 'llama) (sprig-llama-base-url "http://h:1")
+          (sprig-llama-model "m") (sprig-llama-projects-directory "~/p")
+          (sprig-llama-max-tokens 64) (sprig-llama-thinking nil)
+          (sprig-system-prompt nil) (sprig-llama-extra-args nil))
+      (let ((args (sprig--base-args)))
+        (should (member "--base-url" args))
+        (should (member "http://h:1" args))
+        (should (member "--max-tokens" args))
+        (should (member "64" args))
+        ;; The CLI's own flags mean nothing to the client layer.
+        (should-not (member "--input-format" args))
+        (should-not (member "--permission-prompt-tool" args))))))
+
+(ert-deftest sprig-test-llama-args-thinking-is-opt-in ()
+  (with-temp-buffer
+    (let ((sprig-system-prompt nil) (sprig-llama-extra-args nil))
+      (let ((sprig-llama-thinking nil))
+        (should-not (member "--thinking" (sprig--llama-args))))
+      (let ((sprig-llama-thinking t))
+        (should (member "--thinking" (sprig--llama-args)))))))
+
+(ert-deftest sprig-test-llama-args-resume-and-fork ()
+  (with-temp-buffer
+    (let ((sprig-system-prompt nil) (sprig-llama-extra-args nil)
+          (sprig-llama-thinking nil))
+      (setq sprig--session-id "sess-l1")
+      (setq sprig--fork-session nil)
+      (let ((args (sprig--llama-args)))
+        (should (member "--resume" args))
+        (should (member "sess-l1" args))
+        (should-not (member "--fork-session" args)))
+      (setq sprig--fork-session t)
+      (should (member "--fork-session" (sprig--llama-args))))))
+
+(ert-deftest sprig-test-command-local-on-llama ()
+  ;; The backend changes the program and its arguments and nothing else: the
+  ;; wrapping below is shared, which is what keeps the transport one path.
+  (with-temp-buffer
+    (let ((sprig-remotes nil) (sprig-directory nil) (sprig-backend 'llama)
+          (sprig-llama-program "/usr/bin/sprig-llama")
+          (sprig-system-prompt nil) (sprig-llama-extra-args nil)
+          (sprig-llama-thinking nil))
+      (let ((cmd (sprig--command)))
+        (should (equal (car cmd) "/usr/bin/sprig-llama"))
+        (should (member "--base-url" cmd))
+        (should-not (member "--input-format" cmd))))))
+
+(ert-deftest sprig-test-broker-carries-the-llama-program ()
+  ;; The broker takes `--program' and an argv after `--', so it composes with
+  ;; either backend without knowing which it is holding.
+  (with-temp-buffer
+    (let ((sprig-use-broker 'all) (sprig-remotes nil) (sprig-directory nil)
+          (sprig-backend 'llama) (sprig-llama-program "/usr/bin/sprig-llama")
+          (sprig-config-directory nil) (sprig-system-prompt nil)
+          (sprig-llama-extra-args nil) (sprig-llama-thinking nil))
+      (let ((cmd (sprig--command)))
+        (should (member "--program" cmd))
+        (should (member "/usr/bin/sprig-llama" cmd))
+        (should (member "--" cmd))
+        (should (member "--base-url" cmd))))))
+
+(ert-deftest sprig-test-projects-directory-follows-the-backend ()
+  ;; Kept apart so the navigator does not list one backend's sessions under
+  ;; the other's.
+  (with-temp-buffer
+    (let ((sprig-config-directory nil)
+          (sprig-claude-projects-directory "~/.claude/projects")
+          (sprig-llama-projects-directory "~/.sprig-llama/projects"))
+      (let ((sprig-backend 'claude))
+        (should (equal (sprig--projects-directory) "~/.claude/projects")))
+      (let ((sprig-backend 'llama))
+        (should (equal (sprig--projects-directory) "~/.sprig-llama/projects")))
+      ;; A config dir redirects the CLI's root, not the client layer's.
+      (let ((sprig-backend 'llama) (sprig-config-directory "~/cfg"))
+        (should (equal (sprig--projects-directory) "~/.sprig-llama/projects"))))))

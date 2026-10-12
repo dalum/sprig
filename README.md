@@ -29,6 +29,7 @@ Because the whole protocol is plain stdio, running the session on a remote host 
 - `magit-section` 4.0+, for the session buffer. It is declared in the package headers, so `package.el` / straight install it (and its own deps) automatically.
 - `claude` CLI v2.1+ on the machine that runs the session (local or the SSH host), logged in (`claude` then `/login`).
 - `markdown-mode` is optional; when present, prose in the session buffer is fontified with its faces.
+- For a `llama` session instead of `claude`: `python3` on the machine that runs the session, and a server speaking the Anthropic `/v1/messages` route (llama.cpp does). See [llama/README.md](llama/README.md); such a session is conversation only, with no tools and so no diff review or verbs.
 
 ## Install
 
@@ -345,6 +346,14 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 |---|---|---|
 | `sprig-remotes` | `nil` | SSH destinations the navigator lists a `remote` group for, one per host; the first is the primary remote new sessions default to. Nil = local only |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
+| `sprig-backend` | `claude` | Which backend a session runs on: `claude` (the CLI) or `llama` (a local model through [`llama/sprig-llama`](llama/README.md)) |
+| `sprig-llama-program` | `nil` | Path to the `sprig-llama` client (nil = `llama/sprig-llama` beside sprig) |
+| `sprig-llama-base-url` | `"http://127.0.0.1:8080"` | Server a `llama` session talks to |
+| `sprig-llama-model` | `"local"` | Model name a `llama` session asks for, and what the buffer reports |
+| `sprig-llama-projects-directory` | `"~/.sprig-llama/projects"` | Where `sprig-llama` keeps session logs, apart from the CLI's |
+| `sprig-llama-max-tokens` | `4096` | Cap on the tokens a `llama` turn may generate |
+| `sprig-llama-thinking` | `nil` | Let a `llama` model reason before answering (slow locally) |
+| `sprig-llama-extra-args` | `nil` | Extra `sprig-llama` arguments |
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
 | `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
