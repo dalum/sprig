@@ -152,5 +152,43 @@
   (should (eq (keymap-lookup sprig-live-command-map "s") #'sprig-live-start))
   (should-not (keymap-lookup sprig-live-mode-map "C-c C-l s")))
 
+(ert-deftest sprig-live-test-stop-survives-the-next-keystroke ()
+  ;; The bug: stop cancelled the timer, then your very next keystroke armed
+  ;; a fresh one and the model carried on.  Stop must stick.
+  (with-temp-buffer
+    (sprig-live-mode 1)
+    (setq sprig-live--marker (copy-marker (point) t)
+          sprig-live--armed t)
+    (sprig-live-stop)
+    (should-not sprig-live--armed)
+    (insert "something I typed myself")
+    (should-not sprig-live--timer)
+    (should-not sprig-live--armed)))
+
+(ert-deftest sprig-live-test-editing-while-idle-starts-nothing ()
+  ;; Typing resumes only what was running; an edit of your own is your own.
+  (with-temp-buffer
+    (sprig-live-mode 1)
+    (setq sprig-live--armed nil)
+    (insert "plain editing")
+    (should-not sprig-live--timer)))
+
+(ert-deftest sprig-live-test-start-and-steer-arm-it ()
+  (with-temp-buffer
+    (setq-local comment-start "#")
+    (sprig-live-mode 1)
+    (setq sprig-live--armed nil
+          sprig-live--marker (copy-marker (point) t))
+    (sprig-live-steer)
+    (should sprig-live--armed)))
+
+(ert-deftest sprig-live-test-resume-does-nothing-unarmed ()
+  (with-temp-buffer
+    (sprig-live-mode 1)
+    (setq sprig-live--marker (copy-marker (point) t)
+          sprig-live--armed nil)
+    (sprig-live--resume)
+    (should-not sprig-live--process)))
+
 (provide 'sprig-live-tests)
 ;;; sprig-live-tests.el ends here

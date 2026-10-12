@@ -116,6 +116,16 @@ typing elsewhere in the buffer does not misplace the next token.")
 the model's insertions from yours.  Without it the model's own output
 would read as a steer and restart the stream on every token.")
 
+(defvar-local sprig-live--armed nil
+  "Non-nil while live mode is engaged, i.e. your pause should resume it.
+
+Typing resumes only what was running.  Without this, editing the buffer
+for your own reasons started the model writing again, and `sprig-live-stop'
+was undone by your very next keystroke: it cancelled the timer, and the
+keystroke armed a new one.  Set by `sprig-live-start' and
+`sprig-live-steer', cleared by `sprig-live-stop' and by a run ending of
+its own accord, a finished thought being no invitation to continue.")
+
 (defvar-local sprig-live--timer nil
   "Idle timer that resumes the stream after you stop typing.")
 
@@ -259,7 +269,11 @@ whitespace is removed, so a real comment the model wrote survives."
         (with-current-buffer buf
           (when (eq sprig-live--process proc)
             (setq sprig-live--process nil)
-            (sprig-live--trim-dangling-comment)))))))
+            (sprig-live--trim-dangling-comment)
+            ;; Only a run we killed mid-flight is resumed; one that stopped
+            ;; by itself has finished, and your next edit is your own.
+            (unless (timerp sprig-live--timer)
+              (setq sprig-live--armed nil))))))))
 
 (defun sprig-live--stream (prompt)
   "Start streaming PROMPT into this buffer."
@@ -288,7 +302,7 @@ whitespace is removed, so a real comment the model wrote survives."
 (defun sprig-live--resume ()
   "Start writing again from the marker, with the buffer as it now stands."
   (setq sprig-live--timer nil)
-  (when (and sprig-live-mode sprig-live--marker
+  (when (and sprig-live-mode sprig-live--armed sprig-live--marker
              (marker-position sprig-live--marker)
              (not (process-live-p sprig-live--process)))
     (save-excursion
@@ -301,7 +315,7 @@ whitespace is removed, so a real comment the model wrote survives."
 The stream is killed at once rather than debounced: leaving it writing
 while you type would interleave its text with yours.  Resuming is what
 waits, so a sentence typed is one interruption."
-  (unless sprig-live--inserting
+  (unless (or sprig-live--inserting (not sprig-live--armed))
     (sprig-live--abort)
     (when (timerp sprig-live--timer) (cancel-timer sprig-live--timer))
     (setq sprig-live--timer
@@ -320,6 +334,7 @@ waits, so a sentence typed is one interruption."
   (interactive)
   (unless sprig-live-mode (sprig-live-mode 1))
   (sprig-live--abort)
+  (setq sprig-live--armed t)
   (setq sprig-live--marker (copy-marker (point) t))
   (sprig-live--stream
    (sprig-live--prompt (sprig-live--context sprig-live-context-lines)))
@@ -334,6 +349,9 @@ waits, so a sentence typed is one interruption."
   (sprig-live--abort)
   (when (timerp sprig-live--timer) (cancel-timer sprig-live--timer))
   (setq sprig-live--timer nil)
+  ;; Disarming is what makes this stick: without it your next keystroke
+  ;; would arm a fresh timer and the model would carry on.
+  (setq sprig-live--armed nil)
   (message "sprig-live: stopped"))
 
 ;;;###autoload
@@ -344,6 +362,7 @@ stops on the first character and resumes, reading your line, once you
 pause.  The comment is ordinary buffer text, which is why the model needs
 no separate channel to hear you."
   (interactive)
+  (setq sprig-live--armed t)
   (when (and sprig-live--marker (marker-position sprig-live--marker))
     (goto-char sprig-live--marker))
   (unless (bolp) (insert "\n"))
