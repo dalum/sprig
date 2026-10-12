@@ -69,6 +69,12 @@ special case.
 
 Stdlib only, like the broker: it needs nothing but `python3`.
 
+## Shipping
+
+Package managers such as straight ship only `.el` files, so this script is not there to read beside the loaded library. sprig therefore carries its bytes in `sprig--llama-source-text` and installs them at `sprig-llama-install-path` on first use, exactly as it does the broker. **Run `python3 llama/embed.py` after editing this script**; `sprig-test-llama-source-matches-file` fails if you forget.
+
+`sprig-llama-program` overrides all of that with a script of your own, which is what you want while iterating. A remote session needs it set: the path is interpreted on the SSH host, and only the broker ships itself there so far.
+
 ## What a llama session cannot do
 
 **There are no tools.** The server will *request* tool calls perfectly well

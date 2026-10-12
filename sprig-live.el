@@ -351,9 +351,24 @@ no separate channel to hear you."
   (when (and comment-end (not (string-empty-p comment-end)))
     (save-excursion (insert comment-end))))
 
+;;;###autoload (autoload 'sprig-live-command-map "sprig-live" nil t 'keymap)
+(defvar-keymap sprig-live-command-map
+  :doc "Prefix map for live mode, to bind where you like:
+
+  (keymap-global-set \"C-c C-l\" sprig-live-command-map)
+
+Global rather than in `sprig-live-mode-map' because starting is the one
+command you need before the mode is on, and a minor-mode map is not
+active until it is: a start key living only there could never reach the
+command that enables it."
+  "s" #'sprig-live-start
+  "q" #'sprig-live-stop
+  "." #'sprig-live-steer)
+
 (defvar-keymap sprig-live-mode-map
-  :doc "Keymap for `sprig-live-mode'."
-  "C-c C-l s" #'sprig-live-start
+  :doc "Keymap for `sprig-live-mode', active only while it is on.
+Carries the two verbs that mean something mid-flight, so they work in a
+live buffer whether or not `sprig-live-command-map' is bound."
   "C-c C-l q" #'sprig-live-stop
   "C-c C-l ." #'sprig-live-steer)
 

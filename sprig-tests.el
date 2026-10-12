@@ -4867,10 +4867,14 @@ the suite's own sprig options are not unbound out from under it."
       (setq sprig--backend-override 'inherit)
       (should (eq (sprig--backend) 'claude)))))
 
-(ert-deftest sprig-test-llama-program-resolves-beside-sprig ()
+(ert-deftest sprig-test-llama-program-defaults-to-the-install-path ()
+  ;; Not "beside sprig" any more: straight ships only .el files, so the
+  ;; client is embedded and installed, as the broker is.
   (with-temp-buffer
-    (let ((sprig-llama-program nil))
-      (should (string-suffix-p "llama/sprig-llama" (sprig--llama-program))))
+    (let ((sprig-llama-program nil)
+          (sprig-llama-install-path "~/.local/share/sprig/sprig-llama"))
+      (should (equal (sprig--llama-program)
+                     (expand-file-name sprig-llama-install-path))))
     (let ((sprig-llama-program "/opt/sprig-llama"))
       (should (equal (sprig--llama-program) "/opt/sprig-llama")))))
 
@@ -4936,6 +4940,37 @@ the suite's own sprig options are not unbound out from under it."
         (should (member "/usr/bin/sprig-llama" cmd))
         (should (member "--" cmd))
         (should (member "--base-url" cmd))))))
+
+(ert-deftest sprig-test-llama-source-matches-file ()
+  ;; The embedded client bytes must match llama/sprig-llama exactly, or an
+  ;; install would lay down a stale script.  Regenerate with llama/embed.py.
+  (let* ((dir (file-name-directory
+               (or load-file-name buffer-file-name default-directory)))
+         (file (expand-file-name "llama/sprig-llama" dir)))
+    (skip-unless (file-readable-p file))
+    (let ((on-disk (with-temp-buffer
+                     (insert-file-contents-literally file)
+                     (buffer-string))))
+      (should (equal on-disk sprig--llama-source-text)))))
+
+(ert-deftest sprig-test-llama-source-ships-embedded-by-default ()
+  ;; With no override the installed bytes are the embedded copy; a set
+  ;; `sprig-llama-program' is yours to keep current, so install is skipped.
+  (let ((sprig-llama-program nil))
+    (should (equal (sprig--llama-source) sprig--llama-source-text)))
+  (let ((sprig-llama-program "/nonexistent/script"))
+    (should-error (sprig--llama-source))))
+
+(ert-deftest sprig-test-llama-program-is-pure ()
+  ;; Building a command must write nothing: the install belongs to
+  ;; `sprig--spawn', as the broker's does.
+  (let* ((sprig-llama-program nil)
+         (sprig-llama-install-path "/tmp/sprig-llama-test-should-not-exist"))
+    (should (equal (sprig--llama-program)
+                   (expand-file-name sprig-llama-install-path)))
+    (should-not (file-exists-p sprig-llama-install-path)))
+  (let ((sprig-llama-program "/opt/mine"))
+    (should (equal (sprig--llama-program) "/opt/mine"))))
 
 (ert-deftest sprig-test-projects-directory-follows-the-backend ()
   ;; Kept apart so the navigator does not list one backend's sessions under

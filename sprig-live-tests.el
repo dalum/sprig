@@ -145,5 +145,12 @@
     (sprig-live--trim-dangling-comment)
     (should (equal (buffer-string) "(defun f ())\n;; a real remark"))))
 
+(ert-deftest sprig-live-test-start-is-bindable-before-the-mode-is-on ()
+  ;; The bug this guards: a start key in the minor-mode map alone can never
+  ;; fire, the map being inactive until the mode it starts is on.
+  (should (keymapp sprig-live-command-map))
+  (should (eq (keymap-lookup sprig-live-command-map "s") #'sprig-live-start))
+  (should-not (keymap-lookup sprig-live-mode-map "C-c C-l s")))
+
 (provide 'sprig-live-tests)
 ;;; sprig-live-tests.el ends here

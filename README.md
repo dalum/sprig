@@ -347,7 +347,8 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-remotes` | `nil` | SSH destinations the navigator lists a `remote` group for, one per host; the first is the primary remote new sessions default to. Nil = local only |
 | `sprig-program` | `"claude"` | Path to the CLI on the session host |
 | `sprig-backend` | `claude` | Which backend a session runs on: `claude` (the CLI) or `llama` (a local model through [`llama/sprig-llama`](llama/README.md)) |
-| `sprig-llama-program` | `nil` | Path to the `sprig-llama` client (nil = `llama/sprig-llama` beside sprig) |
+| `sprig-llama-program` | `nil` | Path to the `sprig-llama` client (nil = install the embedded copy) |
+| `sprig-llama-install-path` | `"~/.local/share/sprig/sprig-llama"` | Where the embedded client is installed |
 | `sprig-llama-base-url` | `"http://127.0.0.1:8080"` | Server a `llama` session talks to |
 | `sprig-llama-model` | `"local"` | Model name a `llama` session asks for, and what the buffer reports |
 | `sprig-llama-projects-directory` | `"~/.sprig-llama/projects"` | Where `sprig-llama` keeps session logs, apart from the CLI's |
@@ -425,7 +426,13 @@ A fresh config dir starts logged out. A session runs headless (over the stream-j
 (setq sprig-live-base-url "http://127.0.0.1:8081")  ;; a completion model, not an instruct one
 ```
 
-`C-c C-l s` starts it writing at point, `C-c C-l .` opens a steering comment, `C-c C-l q` stops it.
+Bind the prefix map once, and `C-c C-l s` starts it writing at point, `C-c C-l .` opens a steering comment, `C-c C-l q` stops it:
+
+```elisp
+(keymap-global-set "C-c C-l" sprig-live-command-map)
+```
+
+Globally rather than in the minor-mode map, because starting is the one command you need *before* the mode is on, and a minor-mode map is not active until it is.
 
 **You steer by typing a comment.** The prompt *is* the buffer up to where the model writes, so a comment line is simply more context and needs no channel of its own. A line carrying `sprig-live-steer-marker` (`>>>`) is marked as an instruction rather than a remark, so the comments already in your file stay comments. In practice:
 
