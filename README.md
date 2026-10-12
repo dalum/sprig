@@ -354,6 +354,13 @@ Task-focused guides live under [`docs/tutorials/`](docs/tutorials/):
 | `sprig-llama-max-tokens` | `4096` | Cap on the tokens a `llama` turn may generate |
 | `sprig-llama-thinking` | `nil` | Let a `llama` model reason before answering (slow locally) |
 | `sprig-llama-extra-args` | `nil` | Extra `sprig-llama` arguments |
+| `sprig-live-base-url` | `"http://127.0.0.1:8081"` | Server [live mode](#live-mode) writes from (a completion model) |
+| `sprig-live-slot` | `0` | Server slot live mode pins to; the slot holds the prompt cache |
+| `sprig-live-context-lines` | `400` | Lines before point sent as context (nil = whole buffer) |
+| `sprig-live-steer-marker` | `">>>"` | What makes a comment line an instruction |
+| `sprig-live-restart-idle` | `0.6` | Seconds of your silence before it resumes writing |
+| `sprig-live-max-tokens` | `512` | Tokens a run may write |
+| `sprig-live-temperature` | `0.2` | Sampling temperature |
 | `sprig-directory` | `nil` | Fallback working directory for a new session |
 | `sprig-config-directory` | `nil` | `CLAUDE_CONFIG_DIR` for sprig's sessions, keeping their logs and login separate from `~/.claude` (nil = the CLI default). Log in there once with `M-x sprig-login` |
 | `sprig-model` | `"claude-opus-4-8"` | Model id, or nil for CLI default |
@@ -409,6 +416,47 @@ By default sprig shares the CLI's `~/.claude`, so its sessions sit alongside any
 
 A fresh config dir starts logged out. A session runs headless (over the stream-json protocol) and cannot drive the interactive login itself, so run `M-x sprig-login` once per host. It runs `claude auth login` down a pipe with the config dir set, opens the authorization URL in your local browser (the right place: the login is your account, not the host's), and reads the code the browser shows back into the minibuffer for you to paste. It works the same for a remote session, over SSH. Every headless sprig session on that host then reuses the stored credentials. Settings and `CLAUDE.md` under that dir are also separate from your main `~/.claude`.
 
+## Live mode
+
+`sprig-live-mode` is the other half of pairing, and the opposite bargain to [pair mode](#pair-mode). Pair mode is stepwise and nothing is sent on your behalf; live mode writes continuously into the buffer at point, and your control is that you can stop it mid-word by typing.
+
+```elisp
+(require 'sprig-live)
+(setq sprig-live-base-url "http://127.0.0.1:8081")  ;; a completion model, not an instruct one
+```
+
+`C-c C-l s` starts it writing at point, `C-c C-l .` opens a steering comment, `C-c C-l q` stops it.
+
+**You steer by typing a comment.** The prompt *is* the buffer up to where the model writes, so a comment line is simply more context and needs no channel of its own. A line carrying `sprig-live-steer-marker` (`>>>`) is marked as an instruction rather than a remark, so the comments already in your file stay comments. In practice:
+
+```python
+def total(xs):
+    # >>> use recursion, no loops
+    if len(xs) == 1:
+        return xs[0]
+    else:
+        return xs[0] + total(xs[1:])
+```
+
+Without that line the same model wrote `result = 0` and a `for` loop. The comment is ordinary text you can keep or delete.
+
+**Why it is fast enough to feel live.** llama.cpp holds each slot's prompt KV cache, so a prompt that grows only at its end costs just the new tokens. Measured here on Qwen2.5-Coder-1.5B-Q8_0:
+
+| Request | Tokens prefilled | Time |
+|---|---|---|
+| Cold, 4289-token prompt | 4289 | 21.8s |
+| Identical again | 1 | 0.04s |
+| Grown at the end | 4 | 0.07s |
+| Grown again, a steer appended | 7 | 0.09s |
+
+That is why `sprig-live-slot` is pinned (a different slot is a different cache, and a fresh cold prefill) and why `sprig-live-context-lines` bounds the context: the first prefill is the one cost no cache removes. Generation runs at ~24 tok/s, which is roughly the pace you can read code at.
+
+**It executes nothing.** Emacs does the inserting and the model only proposes text, so there is no tool, no shell, and nothing to approve. That is also why live mode needs no agent: the thing you wanted was to watch it write, not to have it act.
+
+**Use a completion model, not an instruct one.** The prompt is raw buffer text with no chat template. `ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF` (1.65 GB) is what the measurements above come from; the 3B is better and half the speed. A hybrid linear-attention model such as Qwen3.6 is the wrong choice here however fast it chats, because its recurrent state cannot be rewound to a prefix, so **nothing caches** and every keystroke pays a full prefill.
+
+A caveat worth knowing: a 1.5B base model will often carry on past the function you wanted and start repeating the file. Watching and stopping it is the interaction, not a workaround.
+
 ## Status / caveats
 
 - v0.18.0, written against `claude` 2.1.x. The protocol round-trip (streaming, multi-turn memory, session resume, plan-mode switch) is verified against the real CLI; the Elisp itself has had light exercise, so expect a rough edge or two.
@@ -428,6 +476,7 @@ After editing any of the source files, `M-x sprig-reload` re-loads all of them f
 
 ```
 emacs -Q --batch -L . -l sprig.el -l sprig-tests.el -f ert-run-tests-batch-and-exit
+emacs -Q --batch -L . -l sprig-live.el -l sprig-live-tests.el -f ert-run-tests-batch-and-exit
 ```
 
 The session buffer (`sprig-session-mode.el`) has its own suite in `sprig-session-mode-tests.el`, which loads `magit-section`. Point the load path at wherever it is installed (locally, the vendored `.deps/` used for development):
