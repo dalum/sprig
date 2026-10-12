@@ -177,6 +177,15 @@ inserted so this can be tested without a server."
                 (setq out (concat out (or (alist-get 'content obj) "")))))))))
     (cons out rest)))
 
+(defun sprig-live--stop-strings ()
+  "Strings that end a run.
+The steer marker is yours, not the model's.  Left to itself a completion
+model imitates the convention: having answered your line it writes a
+plausible next instruction to itself and keeps going, which reads as the
+model putting words in your mouth.  Stopping on the marker hands the turn
+back instead, which is the whole bargain of live mode."
+  (list sprig-live-steer-marker))
+
 (defun sprig-live--request-body (prompt)
   "Return the JSON request body streaming PROMPT."
   (json-serialize
@@ -185,6 +194,7 @@ inserted so this can be tested without a server."
          :temperature sprig-live-temperature
          :cache_prompt t
          :id_slot sprig-live-slot
+         :stop (vconcat (sprig-live--stop-strings))
          :stream t)))
 
 (defun sprig-live--command ()
@@ -220,6 +230,27 @@ holds the stream in its own buffer and the text arrives in bursts."
                   (insert content)
                   (set-marker marker (point)))))))))))
 
+(defun sprig-live--trim-dangling-comment ()
+  "Remove a bare comment opener left at the marker by a stop.
+Stopping on the steer marker catches the model mid-comment, just after it
+has written the opener it was about to put the marker in, so the buffer is
+left with a stray `;; \='.  Only a line that is nothing but an opener and
+whitespace is removed, so a real comment the model wrote survives."
+  (when (and sprig-live--marker (marker-position sprig-live--marker)
+             comment-start)
+    (save-excursion
+      (goto-char sprig-live--marker)
+      (let ((beg (line-beginning-position)))
+        (when (string-match-p
+               (concat "\\`[[:space:]]*"
+                       (regexp-quote (string-trim-right comment-start))
+                       "[[:space:]]*\\'")
+               (buffer-substring-no-properties beg (point)))
+          (let ((sprig-live--inserting t))
+            ;; Take the newline before it too: it was ours, not yours.
+            (delete-region (max (point-min) (1- beg)) (point))
+            (set-marker sprig-live--marker (point))))))))
+
 (defun sprig-live--sentinel (proc _event)
   "Clear PROC when it exits, so a later start is not taken for a running one."
   (unless (process-live-p proc)
@@ -227,7 +258,8 @@ holds the stream in its own buffer and the text arrives in bursts."
       (when (buffer-live-p buf)
         (with-current-buffer buf
           (when (eq sprig-live--process proc)
-            (setq sprig-live--process nil)))))))
+            (setq sprig-live--process nil)
+            (sprig-live--trim-dangling-comment)))))))
 
 (defun sprig-live--stream (prompt)
   "Start streaming PROMPT into this buffer."

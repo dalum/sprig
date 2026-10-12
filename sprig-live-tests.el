@@ -121,5 +121,29 @@
     (sprig-live-mode -1)
     (should-not sprig-live--marker)))
 
+(ert-deftest sprig-live-test-request-stops-on-the-steer-marker ()
+  ;; Without this the model answers your line, then writes itself a
+  ;; plausible next instruction and keeps going: it puts words in your
+  ;; mouth, which is the one thing live mode must not do.
+  (let* ((sprig-live-steer-marker "###")
+         (body (json-parse-string (sprig-live--request-body "p")
+                                  :object-type 'alist :array-type 'list)))
+    (should (member "###" (alist-get 'stop body)))))
+
+(ert-deftest sprig-live-test-trim-removes-only-a-bare-opener ()
+  (with-temp-buffer
+    (setq-local comment-start ";;")
+    (insert "(defun f ())\n;; ")
+    (setq sprig-live--marker (copy-marker (point) t))
+    (sprig-live--trim-dangling-comment)
+    (should (equal (buffer-string) "(defun f ())")))
+  ;; A comment with words in it is the model's prose, and stays.
+  (with-temp-buffer
+    (setq-local comment-start ";;")
+    (insert "(defun f ())\n;; a real remark")
+    (setq sprig-live--marker (copy-marker (point) t))
+    (sprig-live--trim-dangling-comment)
+    (should (equal (buffer-string) "(defun f ())\n;; a real remark"))))
+
 (provide 'sprig-live-tests)
 ;;; sprig-live-tests.el ends here

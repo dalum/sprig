@@ -453,9 +453,20 @@ That is why `sprig-live-slot` is pinned (a different slot is a different cache, 
 
 **It executes nothing.** Emacs does the inserting and the model only proposes text, so there is no tool, no shell, and nothing to approve. That is also why live mode needs no agent: the thing you wanted was to watch it write, not to have it act.
 
-**Use a completion model, not an instruct one.** The prompt is raw buffer text with no chat template. `ggml-org/Qwen2.5-Coder-1.5B-Q8_0-GGUF` (1.65 GB) is what the measurements above come from; the 3B is better and half the speed. A hybrid linear-attention model such as Qwen3.6 is the wrong choice here however fast it chats, because its recurrent state cannot be rewound to a prefix, so **nothing caches** and every keystroke pays a full prefill.
+**Which model.** What disqualifies a model here is not its size but its attention: a hybrid linear-attention model (Qwen3.6, Qwen3-Coder-**Next**) cannot have its recurrent state rewound to a prefix, so **nothing caches** and every keystroke pays a full prefill. Full attention is the requirement; mixture-of-experts is fine. Measured on the same buffer:
 
-A caveat worth knowing: a 1.5B base model will often carry on past the function you wanted and start repeating the file. Watching and stopping it is the interaction, not a workaround.
+| | Qwen2.5-Coder-1.5B-Q8_0 | Qwen3-Coder-30B-A3B UD-Q4_K_XL |
+|---|---|---|
+| Size | 1.65 GB | 17.7 GB |
+| `model_type` | `qwen2` (dense) | `qwen3_moe` (MoE, full attention) |
+| Cache reuse on growth | yes, 4 tokens | yes, 4 tokens |
+| Steer latency | 0.09s | 0.33s |
+| Generation | 24 tok/s | 18 tok/s |
+| Quality | poor | good |
+
+**`Qwen3-Coder-30B-A3B-Instruct` is the one to serve.** Being MoE it caches as well as the small model, and the ~3B active parameters keep generation close. Asked for a tail-recursive list reversal in an Emacs Lisp buffer it wrote idiomatic Elisp with a docstring, took the surrounding `sprig-live--` naming convention, and used a `while` loop because Elisp has no tail-call optimisation. The 1.5B wrote code that was not tail-recursive, then repeated the task three times, worse each time. The 1.5B remains the choice if 17.7 GB resident is too much; it is the fast option, not the good one.
+
+**Both models invent their own instructions**, having answered yours: a completion model imitates the `>>>` convention and writes itself a plausible next line. `sprig-live--stop-strings` ends a run on the marker, so the turn comes back to you instead of the model putting words in your mouth.
 
 ## Status / caveats
 
