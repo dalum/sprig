@@ -2978,6 +2978,7 @@ is visible without opening the header."
 (declare-function sprig-session-compact "sprig-session-mode" ())
 (declare-function sprig-session-btw "sprig-session-mode" (question))
 (declare-function sprig-session-ask-status "sprig-session-mode" ())
+(declare-function sprig-session-cleanup "sprig-session-mode" ())
 (declare-function sprig-session-pair-mode "sprig-session-mode" ())
 (declare-function sprig-session-pair-step "sprig-session-mode" ())
 (declare-function sprig-session--fontify-markdown "sprig-session-mode" (text))
@@ -6364,6 +6365,8 @@ command's docstring."
   "Ask a side question about the row's session, disturbing nothing (`c b').")
 (sprig--status-define-steer sprig-status-ask-status sprig-session-ask-status
   "Ask the row's session for a brief status report (`c s').")
+(sprig--status-define-steer sprig-status-cleanup sprig-session-cleanup
+  "Ask the row's session to clean up after its work (`c u').")
 (sprig--status-define-steer sprig-status-pair-mode sprig-session-pair-mode
   "Toggle pair mode on the row's session (`c .').")
 (sprig--status-define-steer sprig-status-pair-step sprig-session-pair-step
@@ -6620,6 +6623,8 @@ not here: they act on a diff section, which the navigator has none of."
     ("y" "yes / accept" sprig-status-accept)
     ("n" "no / decline" sprig-status-decline)
     ("s" "status report (canned; steers a running turn)" sprig-status-ask-status)
+    ("u" "clean up: worktrees, scratch files (canned; after this turn)"
+     sprig-status-cleanup)
     ("p" "compose in plan mode" sprig-status-message-plan)
     ("r" "resend last turn" sprig-status-retry)
     ("i" "interrupt turn (any queued message then goes)" sprig-status-interrupt)

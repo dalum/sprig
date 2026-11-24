@@ -2944,6 +2944,20 @@ no compose step, steering a turn in flight the way `c c' would."
         (sprig-session-ask-status)
         (should (equal steered sprig-session-status-instruction))))))
 
+(ert-deftest sprig-session-mode-test-cleanup-queues-the-canned-request ()
+  "`c u' queues the canned cleanup instruction rather than steering with it:
+tearing down worktrees belongs after the running turn, not inside it."
+  (let (queued steered)
+    (cl-letf (((symbol-function 'sprig--review-queue)
+               (lambda (text) (setq queued text)))
+              ((symbol-function 'sprig--review-steer)
+               (lambda (text) (setq steered text))))
+      (with-temp-buffer
+        (sprig-session-mode)
+        (sprig-session-cleanup)
+        (should (equal queued sprig-session-cleanup-instruction))
+        (should-not steered)))))
+
 (ert-deftest sprig-session-mode-test-pair-toggle-sends-the-agreement ()
   "`c .' on sends the working agreement, off sends the release.
 Both go through the steer path, so mid-turn the agent adopts (or drops)

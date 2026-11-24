@@ -2421,6 +2421,19 @@ working; idle, it opens a turn of its own."
   :type 'string
   :group 'sprig)
 
+(defcustom sprig-session-cleanup-instruction
+  "Please tidy up after this work: remove any git worktrees you created \
+and their branches, delete scratch files, logs and build artefacts you \
+left behind, and stop any processes you started. Leave the tree as you \
+found it. Ask me first before removing anything you did not create \
+yourself, and tell me briefly what you removed."
+  "Canned request the cleanup verb (`c u') sends into the conversation.
+Composes nothing, like the yes/no and status instructions; unlike them it
+queues rather than steers, since tearing down worktrees and scratch files
+mid-turn would pull the ground out from under the work still running."
+  :type 'string
+  :group 'sprig)
+
 (defun sprig-session-reject-instruction (changes)
   "Return an instruction asking the agent to undo CHANGES.
 CHANGES is a list of (FILE . HUNK-PLIST)."
@@ -2652,6 +2665,17 @@ question about the work, compose one with `c c' instead."
   (interactive)
   (sprig-session--steer sprig-session-status-instruction)
   (message "sprig: status requested"))
+
+(defun sprig-session-cleanup ()
+  "Ask the agent to clean up after its work (`c u').
+A canned instruction like `c s', asking it to remove the git worktrees,
+scratch files and stray processes the work left behind.  It queues rather
+than steers: the cleanup belongs after the turn, not inside it, so a
+running turn finishes untouched and this goes as a turn of its own once it
+ends.  The wording is `sprig-session-cleanup-instruction'."
+  (interactive)
+  (sprig-session--queue sprig-session-cleanup-instruction)
+  (message "sprig: cleanup requested"))
 
 (defun sprig-session-pair-mode ()
   "Toggle pair mode: one small step per turn, stepped by hand (`c .').
@@ -3509,6 +3533,8 @@ it to whatever is already picked, to take with \\<sprig-answer-mode-map>\
     ("y" "yes / accept" sprig-session-accept)
     ("n" "no / decline" sprig-session-decline)
     ("s" "status report (canned; steers a running turn)" sprig-session-ask-status)
+    ("u" "clean up: worktrees, scratch files (canned; after this turn)"
+     sprig-session-cleanup)
     ("p" "compose in plan mode" sprig-session-message-plan)
     ("r" "independent review of the changes (subagent)" sprig-session-independent-review)
     ("l" "resend last turn" sprig-session-retry)
